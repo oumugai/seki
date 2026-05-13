@@ -1,0 +1,48 @@
+-- ===========================================================
+-- tests/seki/test_numeric_matrix.seki — 行列式・固有値
+-- ===========================================================
+
+import "../../lib/numeric/eigen.seki"
+
+-- ----- n×n 行列式 -----
+def id3 := [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+def upper3 := [[2, 1, 5], [0, 3, 7], [0, 0, 4]]
+def antisym3 := [[0, 2, 3], [0 - 2, 0, 5], [0 - 3, 0 - 5, 0]]
+
+theorem det_identity3 : det id3 == 1 := by eval
+theorem det_upper3    : det upper3 == 24 := by eval     -- 2*3*4
+theorem det_antisym3  : det antisym3 == 0 := by eval
+
+-- ----- 2x2 固有値 (特性多項式の係数) -----
+-- A1 = ((2, 0), (0, 3)) → λ² - 5λ + 6
+def A1 := ((2, 0), (0, 3))
+def cp1 := charPoly2 A1
+theorem charpoly_diag_const : nth 0 cp1 == 6   := by eval
+theorem charpoly_diag_lin   : nth 1 cp1 == 0 - 5 := by eval
+
+-- Jordan block: ((1, 1), (0, 1)) → λ² - 2λ + 1
+def A2 := ((1, 1), (0, 1))
+def cp2 := charPoly2 A2
+theorem charpoly_jord_const : nth 0 cp2 == 1     := by eval
+theorem charpoly_jord_lin   : nth 1 cp2 == 0 - 2 := by eval
+
+-- ----- 固有値の分類 -----
+theorem ev_diag :
+    match eigenvalues2 A1 with
+    | Pair _ _ -> true
+    | _ -> false
+  := by eval
+
+theorem ev_jordan :
+    match eigenvalues2 A2 with
+    | Single _ -> true
+    | _ -> false
+  := by eval
+
+-- 回転行列 ((0, -1), (1, 0)): 実数解なし
+def A3 := ((0, 0 - 1), (1, 0))
+theorem ev_rotation :
+    match eigenvalues2 A3 with
+    | NoReal -> true
+    | _ -> false
+  := by eval

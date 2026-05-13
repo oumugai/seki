@@ -1,0 +1,40 @@
+-- ===========================================================
+-- tests/seki/test_numeric_ode.seki — Euler / RK4 / 単振動
+-- ===========================================================
+
+import "../../lib/numeric/ode.seki"
+
+def absR := \r -> if r < 0.0 then 0.0 - r else r
+
+-- ----- y' = y, y(0) = 1 → y(t) = e^t -----
+def odeRhs := \_ y -> y
+
+-- RK4 で h=0.1, 10 ステップ → y(1) ≈ e
+def rk4Sol := rk4N odeRhs 0.1 0.0 1.0 10
+def rk4_y1 := lastOfList rk4Sol
+def errRK4 := absR (rk4_y1 - e)
+
+theorem rk4_accuracy : errRK4 < 0.00001 := by eval
+
+-- Euler は同じ条件で精度低い
+def eulerSol := eulerN odeRhs 0.1 0.0 1.0 10
+def euler_y1 := lastOfList eulerSol
+def errEuler := absR (euler_y1 - e)
+
+theorem euler_less_accurate : errEuler > errRK4 := by eval
+
+-- ----- 単振動: y'' + y = 0, y(0)=1, y'(0)=0 → y(t) = cos(t) -----
+def harmonic := \_ st ->
+    let y = fst st in
+    let v = snd st in
+    (v, 0.0 - y)
+
+def harmonicAtT := \t0 st0 n h ->
+    if n == 0 then st0
+    else harmonicAtT (t0 + h) (rk4StepPair harmonic h t0 st0) (n - 1) h
+
+-- t = π で y は -1 になるはず
+def st_pi := harmonicAtT 0.0 (1.0, 0.0) 314 0.01
+def y_pi := fst st_pi
+
+theorem harmonic_at_pi : absR (y_pi - (0.0 - 1.0)) < 0.001 := by eval

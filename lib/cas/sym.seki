@@ -1,0 +1,87 @@
+-- ===========================================================
+-- lib/cas/sym.seki — 記号式の代数的データ型と簡約
+--
+-- 公開する名前:
+--   data Sym = SNum / SVar / SNeg / SAdd / SSub / SMul / SDiv
+--            / SPow / SSin / SCos / SExp / SLn
+--   def simp1     — 1 段の代数簡約
+--   def simplify  — 不動点まで簡約
+-- ===========================================================
+
+data Sym
+  = SNum Int
+  | SVar String
+  | SNeg Sym
+  | SAdd Sym Sym
+  | SSub Sym Sym
+  | SMul Sym Sym
+  | SDiv Sym Sym
+  | SPow Sym Int
+  | SSin Sym
+  | SCos Sym
+  | SExp Sym
+  | SLn Sym
+
+-- 1 段の代数簡約: 0/1 同一律 + 定数畳み込み + 整除畳み込み
+def simp1 := \e ->
+    match e with
+    -- 加算
+    | SAdd (SNum a) (SNum b) -> SNum (a + b)
+    | SAdd (SNum 0) y -> y
+    | SAdd x (SNum 0) -> x
+    -- 減算
+    | SSub (SNum a) (SNum b) -> SNum (a - b)
+    | SSub x (SNum 0) -> x
+    | SSub (SNum 0) y -> SNeg y
+    -- 乗算
+    | SMul (SNum a) (SNum b) -> SNum (a * b)
+    | SMul (SNum 0) _ -> SNum 0
+    | SMul _ (SNum 0) -> SNum 0
+    | SMul (SNum 1) y -> y
+    | SMul x (SNum 1) -> x
+    -- 除算 (両辺整数で割り切れる場合のみ畳む)
+    | SDiv x (SNum 1) -> x
+    | SDiv (SNum 0) _ -> SNum 0
+    | SDiv (SNum a) (SNum b) ->
+        if (b != 0) and ((a mod b) == 0)
+        then SNum (a / b)
+        else SDiv (SNum a) (SNum b)
+    -- c * (x / d): 定数を除数を通して引き上げる
+    | SMul (SNum c) (SDiv u (SNum d)) ->
+        if (d != 0) and ((c mod d) == 0)
+        then SMul (SNum (c / d)) u
+        else SDiv (SMul (SNum c) u) (SNum d)
+    | SMul (SDiv u (SNum d)) (SNum c) ->
+        if (d != 0) and ((c mod d) == 0)
+        then SMul (SNum (c / d)) u
+        else SDiv (SMul (SNum c) u) (SNum d)
+    -- べき乗
+    | SPow _ 0 -> SNum 1
+    | SPow x 1 -> x
+    | SPow (SNum a) n -> SNum (powInt a n)
+    -- 単項マイナス
+    | SNeg (SNum a) -> SNum (0 - a)
+    | SNeg (SNeg x) -> x
+    -- 再帰的に子へ
+    | SAdd x y -> SAdd (simp1 x) (simp1 y)
+    | SSub x y -> SSub (simp1 x) (simp1 y)
+    | SMul x y -> SMul (simp1 x) (simp1 y)
+    | SDiv x y -> SDiv (simp1 x) (simp1 y)
+    | SPow x n -> SPow (simp1 x) n
+    | SNeg x  -> SNeg (simp1 x)
+    | SSin x  -> SSin (simp1 x)
+    | SCos x  -> SCos (simp1 x)
+    | SExp x  -> SExp (simp1 x)
+    | SLn x   -> SLn (simp1 x)
+    | other -> other
+
+-- 不動点まで簡約 (最大 8 反復)
+def simplify := \e ->
+    let e1 = simp1 e in
+    let e2 = simp1 e1 in
+    let e3 = simp1 e2 in
+    let e4 = simp1 e3 in
+    let e5 = simp1 e4 in
+    let e6 = simp1 e5 in
+    let e7 = simp1 e6 in
+    simp1 e7

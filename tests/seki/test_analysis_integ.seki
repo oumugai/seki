@@ -1,0 +1,43 @@
+-- ===========================================================
+-- tests/seki/test_analysis_integ.seki — 数値積分
+-- ===========================================================
+
+import "../../lib/analysis/integ.seki"
+
+def absR := \r -> if r < 0.0 then 0.0 - r else r
+
+-- ----- ∫_0^1 x² dx = 1/3 ≈ 0.333... -----
+def f_sq := \x -> x * x
+
+theorem trap_x2
+  : absR (integTrap 100 f_sq 0.0 1.0 - (1.0 / 3.0)) < 0.001 := by eval
+
+theorem simp_x2
+  : absR (integSimpson 100 f_sq 0.0 1.0 - (1.0 / 3.0)) < 0.000001 := by eval
+
+theorem mid_x2
+  : absR (integMidpoint 100 f_sq 0.0 1.0 - (1.0 / 3.0)) < 0.001 := by eval
+
+-- ----- Simpson > 中点 > 台形 (同じ n で精度比較) -----
+def n_test := 20
+def err_trap := absR (integTrap n_test f_sq 0.0 1.0 - (1.0 / 3.0))
+def err_simp := absR (integSimpson n_test f_sq 0.0 1.0 - (1.0 / 3.0))
+theorem simp_more_accurate : err_simp < err_trap := by eval
+
+-- ----- ∫_0^π sin(x) dx = 2 (sin は Taylor 級数で近似) -----
+import "../../lib/analysis/series.seki"
+def f_sin := \x -> sinTaylor 15 x
+def two_R := 2.0
+theorem integ_sin_pi
+  : absR (integSimpson 100 f_sin 0.0 pi - two_R) < 0.001 := by eval
+
+-- ----- ∫_0^1 (4x³) dx = x⁴ |_0^1 = 1 -----
+def f_cube4 := \x -> 4.0 * x * x * x
+theorem integ_cube
+  : absR (integSimpson 100 f_cube4 0.0 1.0 - 1.0) < 0.0001 := by eval
+
+-- ----- ∫_1^2 (1/x) dx = ln(2) ≈ 0.6931 -----
+def f_inv := \x -> 1.0 / x
+def ln2 := 0.693147180559945
+theorem integ_lnx
+  : absR (integSimpson 200 f_inv 1.0 2.0 - ln2) < 0.0001 := by eval

@@ -1,0 +1,145 @@
+-- ===========================================================
+-- 29: 解析学 — 数値微分・数値積分・Taylor 級数・極限
+--
+-- `lib/analysis/` の各モジュールを使った微分・積分・極限・収束の demo。
+-- ===========================================================
+
+import "analysis/diff.seki"
+import "analysis/integ.seki"
+import "analysis/series.seki"
+import "analysis/limit.seki"
+
+-- ===========================================================
+-- §1. 数値微分
+-- ===========================================================
+
+-- f(x) = x² → f'(x) = 2x, f'(3) = 6
+def f_sq := \x -> x * x
+
+theorem diff_sq_forward
+  : absR (diffForward 0.001 f_sq 3.0 - 6.0) < 0.01 := by eval
+
+theorem diff_sq_central
+  : absR (diffCentral 0.0001 f_sq 3.0 - 6.0) < 0.000001 := by eval
+
+-- 2 階導関数: f''(x) = 2 ∀x
+theorem diff2_sq
+  : absR (diff2Central 0.001 f_sq 5.0 - 2.0) < 0.001 := by eval
+
+-- ----- 多変数: f(x,y) = x² + y², ∇f = (2x, 2y) -----
+def f_xy := \xs ->
+    let x = head xs in
+    let y = head (tail xs) in
+    x * x + y * y
+
+def grad_at := gradient 0.001 f_xy [3.0, 4.0]
+theorem grad_x : absR ((head grad_at) - 6.0) < 0.001 := by eval
+theorem grad_y : absR ((head (tail grad_at)) - 8.0) < 0.001 := by eval
+
+-- ===========================================================
+-- §2. 数値積分
+-- ===========================================================
+
+-- ∫_0^1 x² dx = 1/3
+theorem integ_x2_simpson
+  : absR (integSimpson 100 f_sq 0.0 1.0 - (1.0 / 3.0)) < 0.000001 := by eval
+
+-- ∫_0^π sin(x) dx = 2 (sin は Taylor で近似)
+def f_sin := \x -> sinTaylor 15 x
+theorem integ_sin_pi
+  : absR (integSimpson 100 f_sin 0.0 pi - 2.0) < 0.001 := by eval
+
+-- ∫_1^2 (1/x) dx = ln(2) ≈ 0.6931
+def f_inv := \x -> 1.0 / x
+def ln2 := 0.693147180559945
+theorem integ_lnx
+  : absR (integSimpson 200 f_inv 1.0 2.0 - ln2) < 0.00001 := by eval
+
+-- ===========================================================
+-- §3. Taylor 級数による初等関数の近似
+-- ===========================================================
+
+-- e^1 = e
+theorem exp_1_is_e : absR (expTaylor 30 1.0 - e) < 0.0000001 := by eval
+
+-- e^2 = exp(2)
+def exp_2_target := 7.389056098930650
+theorem exp_2 : absR (expTaylor 30 2.0 - exp_2_target) < 0.0001 := by eval
+
+-- sin(π/4) = √2/2 ≈ 0.7071
+def sqrt2_over_2 := sqrt 2.0 / 2.0
+theorem sin_pi_4 : absR (sinTaylor 20 (pi / 4.0) - sqrt2_over_2) < 0.0000001 := by eval
+
+-- cos(π/3) = 0.5
+theorem cos_pi_3 : absR (cosTaylor 20 (pi / 3.0) - 0.5) < 0.0000001 := by eval
+
+-- ln(2) を Taylor で近似 (ln(1+x), x=1 で収束遅い)
+-- |x|<1 のところで精度を見る
+def ln_1_5 := 0.405465108108164
+theorem ln_at_half : absR (lnTaylor 50 0.5 - ln_1_5) < 0.0001 := by eval
+
+-- ===========================================================
+-- §4. 級数による定数の計算
+-- ===========================================================
+
+-- Leibniz: π/4 = 1 - 1/3 + 1/5 - 1/7 + ...
+-- 収束が遅い (~1/n) ので 1000 項で誤差 ~0.001
+theorem leibniz_pi_4
+  : absR (piLeibniz 1000 - pi / 4.0) < 0.01 := by eval
+
+-- 調和数 H_n = Σ_{k=1}^n 1/k
+-- H_4 = 1 + 1/2 + 1/3 + 1/4 = 25/12
+theorem harmonic_4
+  : absR (harmonicNumber 4 - 25.0 / 12.0) < 0.000001 := by eval
+
+-- ===========================================================
+-- §5. 極限・固定点
+-- ===========================================================
+
+-- 微分の極限定義: lim h→0 (f(x+h) - f(x))/h = f'(x)
+-- f(x) = x³ at x=2, f'(2) = 12
+def f_cube := \x -> x * x * x
+def hs := [0.1, 0.01, 0.001, 0.00001]
+
+theorem diff_limit_cube
+  : absR (diffLimit f_cube 2.0 hs - 12.0) < 0.001 := by eval
+
+-- Babylonian 法 (固定点反復) で √2 を求める
+def babylonian := \x -> (x + 2.0 / x) / 2.0
+def sqrt2_b := fixedPoint babylonian 1.0 20
+
+theorem babylonian_converges
+  : absR (sqrt2_b - sqrt 2.0) < 0.0000000001 := by eval
+
+-- 黄金比 φ: 反復 x ← 1 + 1/x の固定点
+def phi_iter := \x -> 1.0 + 1.0 / x
+def phi_fp := fixedPoint phi_iter 1.5 50
+
+theorem phi_converges
+  : absR (phi_fp - goldenRatio) < 0.0000001 := by eval
+
+-- ===========================================================
+-- §6. 微積分学の基本定理 (数値版)
+-- ===========================================================
+-- 数値微分と数値積分が逆操作: F(b) - F(a) = ∫_a^b f(x) dx
+-- ここでは f(x) = 3x²,  F(x) = x³,  F(2) - F(0) = 8
+
+def f_3x2 := \x -> 3.0 * x * x
+
+theorem ftc_numerical
+  : absR (integSimpson 200 f_3x2 0.0 2.0 - 8.0) < 0.000001 := by eval
+
+-- 同じく: ∫_0^a f(x) dx を微分すると元の f に戻る
+-- 数値的に: F(a+h) - F(a) ≈ h * f(a)
+def F := \a -> integSimpson 100 f_3x2 0.0 a
+def h := 0.001
+-- (F(a+h) - F(a))/h ≈ 3a² at a=2 → 12
+def reconstructed_at_2 := (F (2.0 + h) - F 2.0) / h
+theorem ftc_reverse
+  : absR (reconstructed_at_2 - 12.0) < 0.1 := by eval
+
+-- ===========================================================
+-- まとめ
+-- ===========================================================
+-- 解析学の中核 (数値微分・積分・Taylor・極限・固定点・FTC) を、
+-- すべて `lib/analysis/` の汎用ライブラリで構成。

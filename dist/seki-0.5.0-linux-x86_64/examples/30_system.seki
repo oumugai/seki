@@ -1,0 +1,181 @@
+-- ===========================================================
+-- 30: システム開発 — 文字列・ファイル I/O・CLI 引数・Ref・Dict
+--
+-- seki は集合論ベースの言語だが、汎用システム開発にも対応できる:
+--   * 文字列演算は **String = ⋃ₙ Char^n** の元に対する操作
+--   * `List String` は標準集合 — 集合的 forall/exists が成立
+--   * `Result E A` は disjoint union (E ⊔ A) — エラーは型で表現
+--   * `Ref A` は「A の値を保持する記憶セル」の集合
+--   * `Dict K V` は K × V の有限関数的部分集合
+-- ===========================================================
+
+-- ===========================================================
+-- §1. 文字列操作 (純粋関数)
+-- ===========================================================
+
+theorem str_len_hello : strLen "hello" == 5 := by eval
+theorem str_concat    : strConcat "foo" "bar" == "foobar" := by eval
+
+-- 大文字小文字変換
+theorem str_upper : strToUpper "Hello, World!" == "HELLO, WORLD!" := by eval
+theorem str_lower : strToLower "Hello, World!" == "hello, world!" := by eval
+
+-- 検索
+theorem str_contains_t : strContains "ell" "hello" == true  := by eval
+theorem str_contains_f : strContains "xyz" "hello" == false := by eval
+theorem str_index     : strIndexOf "ell" "hello world" == 1 := by eval
+theorem str_index_none : strIndexOf "xyz" "hello" == 0 - 1 := by eval
+
+-- 分割・結合 (List 集合との接続)
+def words := strSplit " " "the quick brown fox"
+theorem words_len : length words == 4 := by eval
+theorem words_join : strJoin "," words == "the,quick,brown,fox" := by eval
+
+-- 部分文字列
+theorem substr_basic : substring 0 5 "hello world" == "hello" := by eval
+theorem substr_mid   : substring 6 5 "hello world" == "world" := by eval
+
+-- 数値変換
+theorem int_to_str : intToStr 42 == "42" := by eval
+theorem str_to_int_ok : strToInt "123" == Some 123 := by eval
+theorem str_to_int_no : strToInt "abc" == None := by eval
+
+-- ===========================================================
+-- §2. ファイル I/O — Result 型でエラーを型に表現
+-- ===========================================================
+
+-- 一時ファイルに書き出し → 読込 → 内容一致を確認
+def tmp_path := "/tmp/seki_demo_30.txt"
+def demo_content := "line 1\nline 2\nline 3"
+
+-- 書込 (副作用)
+writeFile tmp_path demo_content
+
+-- 存在確認
+theorem tmp_exists : fileExists tmp_path == true := by eval
+
+-- 読込: readFile : String -> Result String String
+def read_result := readFile tmp_path
+theorem read_ok :
+    match read_result with
+    | Ok s  -> s == demo_content
+    | Err _ -> false
+  := by eval
+
+-- readLines (stdlib のヘルパ — readFile + strSplit "\n")
+def lines_result := readLines tmp_path
+theorem lines_count :
+    match lines_result with
+    | Ok ls -> length ls == 3
+    | Err _ -> false
+  := by eval
+
+-- クリーンアップ
+removeFile tmp_path
+
+-- 失敗するパスの読込
+def bad_result := readFile "/nonexistent/path/to/file.txt"
+theorem bad_read :
+    match bad_result with
+    | Err _ -> true
+    | Ok _  -> false
+  := by eval
+
+-- ===========================================================
+-- §3. 可変参照 Ref A
+-- 集合論的解釈: Ref A = 「A の値を保持する記憶セル」の集合。
+-- 同じ A の値を持つ 2 つのセルは Ref A の異なる元 (cell identity)。
+-- ===========================================================
+
+def counter := mkRef 0
+def step1 := incr counter
+def step2 := incr counter
+def step3 := incr counter
+theorem counter_3 : readRef counter == 3 := by eval
+
+-- 任意の関数で更新
+def accum := mkRef 1
+def _a1 := modifyRef accum (\x -> x * 2)
+def _a2 := modifyRef accum (\x -> x * 2)
+def _a3 := modifyRef accum (\x -> x * 2)
+theorem accum_8 : readRef accum == 8 := by eval
+
+-- ===========================================================
+-- §4. 辞書 Dict K V
+-- 集合論的解釈: Dict K V ⊂ K × V (関数的: 各キーは高々 1 つ)
+-- ===========================================================
+
+-- リストからの構築
+def scores := dictFromList [("alice", 95), ("bob", 87), ("carol", 92)]
+theorem dict_size : dictSize scores == 3 := by eval
+theorem dict_alice : dictGet "alice" scores == Some 95 := by eval
+theorem dict_missing : dictGet "dave" scores == None := by eval
+theorem dict_member : dictMember "bob" scores == true := by eval
+
+-- 関数的更新 (Dict 自体は immutable)
+def scores2 := dictInsert "dave" 78 scores
+theorem updated_size : dictSize scores2 == 4 := by eval
+theorem original_intact : dictSize scores == 3 := by eval  -- 元は不変
+
+-- 値の写像 (全員の点数を 10 点加算)
+def boosted := dictMap (\x -> x + 10) scores
+theorem boosted_alice : dictGet "alice" boosted == Some 105 := by eval
+
+-- ===========================================================
+-- §5. 実用デモ: 簡易 word-count
+-- 文字列から空白区切りで単語を取り出し、辞書で出現頻度を集計
+-- ===========================================================
+
+def text := "the quick brown fox jumps over the lazy dog the fox"
+
+-- 単語ごとに Dict のカウントを増やす
+def countWord := \d w ->
+    match dictGet w d with
+    | None   -> dictInsert w 1 d
+    | Some n -> dictInsert w (n + 1) d
+
+def wc := foldl countWord (emptyDict ()) (strSplit " " text)
+
+theorem wc_the : dictGet "the" wc == Some 3 := by eval
+theorem wc_fox : dictGet "fox" wc == Some 2 := by eval
+theorem wc_dog : dictGet "dog" wc == Some 1 := by eval
+theorem wc_xyz : dictGet "xyz" wc == None   := by eval
+
+-- ===========================================================
+-- §6. CLI 引数 — args : List String
+-- 実行: ./seki examples/30_system.seki arg1 arg2 arg3
+-- ===========================================================
+
+println "args ="
+println args
+
+-- 引数の有無で動作分岐
+def greeting :=
+    if null args then "Hello, world!"
+    else strConcat "Hello, " (head args)
+println greeting
+
+-- ===========================================================
+-- §7. 環境変数
+-- ===========================================================
+
+-- HOME はほぼ常に設定されている
+def home_opt := getEnv "HOME"
+println (match home_opt with
+    | Some p -> strConcat "HOME = " p
+    | None   -> "HOME is not set")
+
+-- ===========================================================
+-- まとめ
+-- ===========================================================
+-- 本サンプルでは以下が seki の汎用言語機能として動作:
+--   * 文字列演算: 連結・分割・置換・検索・大小変換
+--   * ファイル I/O: readFile/writeFile/appendFile/removeFile (Result 型で安全)
+--   * 可変参照: Ref A は記憶セルの集合 (cell identity の集合論的解釈)
+--   * 辞書: Dict K V は K × V の関数的部分集合 (O(1) 操作)
+--   * CLI/環境: args : List String、getEnv : String -> Option String
+--
+-- 集合論セマンティクスは保たれている:
+--   * String、List、Dict すべて「集合」として `forall x in S, P x` が成立
+--   * Result/Option は disjoint union (Sum 型)、ADT の `match` で網羅判定
+--   * `Ref A` は別個の集合 (同じ内容でも異なるセル ≠)

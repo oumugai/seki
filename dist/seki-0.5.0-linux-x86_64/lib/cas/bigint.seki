@@ -1,0 +1,55 @@
+-- ===========================================================
+-- lib/cas/bigint.seki — 任意精度整数 (デモ実装)
+--
+-- 表現: data BigInt = BigInt Bool (List Int)
+--   - Bool: 符号 (true = 正/0, false = 負)
+--   - List Int: 桁を 10^9 進数で **下位から** 並べる (各要素は 0..10^9-1)
+--
+-- 完全 BigInt 実装には減算・乗算・除算・比較・符号付き加減算が要るが、
+-- ここでは加算 (正数同士) のデモのみ提供。性能を求めるなら Rust 統合
+-- (criterion (b) で num-bigint 等を builtin 化) が現実的。
+-- ===========================================================
+
+data BigInt = BigInt Bool (List Int)
+
+def base := 1000000000             -- 10^9
+
+-- 整数を base 進数桁列に分解 (下位桁から)
+def intToDigits := \x ->
+    if x == 0 then nil
+    else cons (x mod base) (intToDigits (x / base))
+
+def fromInt := \n ->
+    if n == 0 then BigInt true nil
+    else if n > 0 then BigInt true (intToDigits n)
+    else BigInt false (intToDigits (0 - n))
+
+-- 桁ごと加算 + carry
+def addDigits := \xs ys carry ->
+    if (null xs) and (null ys) then
+        if carry == 0 then nil else cons carry nil
+    else
+        let a = if null xs then 0 else head xs in
+        let b = if null ys then 0 else head ys in
+        let s = a + b + carry in
+        let xt = if null xs then nil else tail xs in
+        let yt = if null ys then nil else tail ys in
+        cons (s mod base) (addDigits xt yt (s / base))
+
+-- 同符号の加算 (正 + 正、または 0 を含む)
+def bigAddPosPos := \a b ->
+    match a with
+    | BigInt _ ad ->
+        match b with
+        | BigInt _ bd -> BigInt true (addDigits ad bd 0)
+
+-- 桁列を Int に畳む (小さい値のみ、テスト用)
+def digitsToInt := \xs k acc ->
+    if null xs then acc
+    else digitsToInt (tail xs) (k * base) (acc + (head xs) * k)
+
+def toInt := \b ->
+    match b with
+    | BigInt s digs ->
+        let mag = digitsToInt digs 1 0 in
+        if s then mag else 0 - mag

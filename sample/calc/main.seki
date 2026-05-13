@@ -1,0 +1,36 @@
+-- ===========================================================
+-- sample/calc/main.seki — CLI driver
+-- ===========================================================
+-- 数学ロジックは sample/calc/lib.seki に分離.  ここは表示専門.
+
+import "lib.seki"
+
+-- ----- 結果を人間が読める形で表示 -----
+
+println "=== 検証付き電卓 ==="
+println ""
+println "対象多項式 f(x) = x^3 - 2x + 5"
+println ""
+
+println "f'(x) (記号計算):"
+println (toStr fp)
+println ""
+
+println "f''(x) (記号計算):"
+println (toStr fpp)
+println ""
+
+println "∫f dx (記号計算):"
+println (toStr fF)
+println ""
+
+def showAt := \x ->
+    println (strJoin "" ["  x=", intToStr x,
+                         ":  f=",   intToStr (eval_f x),
+                         "  f'=",   intToStr (eval_fp x),
+                         "  f''=",  intToStr (eval_fpp x)])
+
+println "値テーブル (x = -2 .. 2):"
+forEach [0 - 2, 0 - 1, 0, 1, 2] showAt
+println ""
+println "✓ 静的な定理証明は tests.seki を実行 (`seki sample/calc/tests.seki`)"

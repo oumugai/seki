@@ -1,0 +1,41 @@
+-- ===========================================================
+-- sample/wordcount/main.seki — CLI driver
+-- ===========================================================
+-- 純粋ロジックは sample/wordcount/lib.seki に分離.
+
+import "lib.seki"
+
+-- ----- CLI 引数の取得 -----
+def main_args := args
+def path := if null main_args then "sample/wordcount/sample.txt" else head main_args
+def topN_str := if null main_args or null (tail main_args)
+                then "10"
+                else head (tail main_args)
+def topN_count := match strToInt topN_str with
+    | Some n -> n
+    | None   -> 10
+
+-- ----- 入力読込 -----
+def content_result := readFile path
+def content := match content_result with
+    | Ok c  -> c
+    | Err e ->
+        let _ = eprintln (strConcat "wordcount: " e) in
+        let _ = exit 1 in
+        ""
+
+-- ----- 集計 -----
+def all_pairs := wordcount content
+def top := takeN topN_count all_pairs
+
+-- ----- 出力 -----
+println (strConcat "wordcount: " path)
+println (strJoin "" ["  total tokens: ", intToStr (length (tokenize content)),
+                     "  unique: ", intToStr (length all_pairs)])
+println ""
+println (strConcat "top " (strConcat (intToStr topN_count) ":"))
+
+def showPair := \p ->
+    println (strJoin "" ["  ", intToStr (snd p), "  ", fst p])
+
+forEach top showPair

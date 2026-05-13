@@ -1,0 +1,57 @@
+-- ===========================================================
+-- sample/todo_api/main.seki — CLI / server driver
+-- ===========================================================
+-- 純粋ロジックは lib.seki に分離.  ここはサーバ起動 + dry-run のみ.
+
+import "lib.seki"
+
+-- ----- 起動モード判定 -----
+def isServerMode := contains "--serve" args
+def port_arg := filter (\a -> not (a == "--serve")) args
+def port := if null port_arg then 8088
+            else match strToInt (head port_arg) with
+                | Some p -> p
+                | None   -> 8088
+
+if isServerMode then
+    let banner = strJoin "" ["seki TODO API listening on http://127.0.0.1:", intToStr port, " (Ctrl-C to stop)"] in
+    let _ = println banner in
+    match httpServe port handler with
+    | Err e ->
+        let _ = eprintln (strConcat "server error: " e) in
+        exit 1
+    | Ok _ -> ()
+else
+    -- Dry-run: 6 件の fake request をハンドラに通す
+    let _ = println "todo_api: dry-run (pass --serve to start the HTTP server)" in
+    let _ = println "" in
+    let req1 = HttpRequest "POST" "/todos" [] "{\"title\":\"buy milk\"}" in
+    let r1 = handler req1 in
+    let _ = println "POST /todos {title:buy milk}:" in
+    let _ = println (httpFormatResponse r1) in
+    let _ = println "" in
+    let req2 = HttpRequest "POST" "/todos" [] "{\"title\":\"write docs\"}" in
+    let r2 = handler req2 in
+    let _ = println "POST /todos {title:write docs}:" in
+    let _ = println (httpFormatResponse r2) in
+    let _ = println "" in
+    let req3 = HttpRequest "GET" "/todos" [] "" in
+    let r3 = handler req3 in
+    let _ = println "GET /todos:" in
+    let _ = println (httpFormatResponse r3) in
+    let _ = println "" in
+    let req4 = HttpRequest "GET" "/todos/1" [] "" in
+    let r4 = handler req4 in
+    let _ = println "GET /todos/1:" in
+    let _ = println (httpFormatResponse r4) in
+    let _ = println "" in
+    let req5 = HttpRequest "DELETE" "/todos/1" [] "" in
+    let r5 = handler req5 in
+    let _ = println "DELETE /todos/1:" in
+    let _ = println (httpFormatResponse r5) in
+    let _ = println "" in
+    let req6 = HttpRequest "GET" "/todos" [] "" in
+    let r6 = handler req6 in
+    let _ = println "GET /todos (after delete):" in
+    let _ = println (httpFormatResponse r6) in
+    println ""

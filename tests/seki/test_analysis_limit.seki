@@ -1,0 +1,47 @@
+-- ===========================================================
+-- tests/seki/test_analysis_limit.seki — 極限・収束・固定点
+-- ===========================================================
+
+import "../../lib/analysis/limit.seki"
+
+-- ----- 微分の極限定義: lim h→0 (f(x+h) - f(x)) / h ≈ f'(x) -----
+-- f(x) = x², f'(3) = 6
+def f_sq := \x -> x * x
+def hs := [0.1, 0.01, 0.001, 0.0001]
+def d_at_3 := diffLimit f_sq 3.0 hs
+
+theorem diff_limit_x2 : absR (d_at_3 - 6.0) < 0.001 := by eval
+
+-- ----- 固定点反復: g(x) = (x + 2/x) / 2 → √2 -----
+-- これは √2 を求める Babylonian 法
+def babylonian := \x -> (x + 2.0 / x) / 2.0
+
+def sqrt2_iter := fixedPoint babylonian 1.0 20
+theorem fixed_pt_sqrt2
+  : absR (sqrt2_iter - sqrt 2.0) < 0.000000001 := by eval
+
+-- ----- g(x) = (1 + x) / 2 → 1 (= 固定点) -----
+def half_avg := \x -> (1.0 + x) / 2.0
+def to_one := fixedPoint half_avg 0.0 50
+theorem fixed_pt_half_avg : absR (to_one - 1.0) < 0.0000001 := by eval
+
+-- ----- 黄金比 φ の Babylonian 風固定点 -----
+-- φ = 1 + 1/φ  ⇒  g(x) = 1 + 1/x の固定点
+def phi_iter := \x -> 1.0 + 1.0 / x
+def phi_approx := fixedPoint phi_iter 1.5 30
+theorem fixed_pt_golden
+  : absR (phi_approx - goldenRatio) < 0.000001 := by eval
+
+-- ----- Cauchy 列判定: 隣り合う差が小さくなれば Cauchy -----
+def fib_seq := \k ->
+    if k < 2 then intToReal k
+    else fib_seq (k - 1) + fib_seq (k - 2)
+
+-- f(k) = 1/k は Cauchy 列 (=実数の収束列)
+def harmonic_inv := \k ->
+    if k == 0 then 1.0
+    else 1.0 / (intToReal k)
+
+-- 隣り合う差 (1/k - 1/(k+1)) は小さくなる
+def hi_xs := [harmonic_inv 10, harmonic_inv 100, harmonic_inv 1000, harmonic_inv 10000]
+theorem cauchy_harmonic : isCauchy 0.1 hi_xs := by eval

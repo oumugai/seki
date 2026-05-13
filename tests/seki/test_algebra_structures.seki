@@ -1,0 +1,87 @@
+-- ===========================================================
+-- tests/seki/test_algebra_structures.seki — 構造体ベース代数構造
+-- ===========================================================
+
+import "../../lib/algebra/structures.seki"
+import "../../lib/algebra/modular.seki"
+
+-- ----- Group: (Z/nZ, +) を構造体としてバンドル -----
+def Z12_grp := MkGroup (Zn 12) (addMod 12) 0 (negMod 12)
+def Z5_grp  := MkGroup (Zn 5)  (addMod 5)  0 (negMod 5)
+def Z7_grp  := MkGroup (Zn 7)  (addMod 7)  0 (negMod 7)
+
+theorem z12_is_abelian : isAbelianGroupOn Z12_grp := by eval
+theorem z5_is_abelian  : isAbelianGroupOn Z5_grp  := by eval
+theorem z7_is_abelian  : isAbelianGroupOn Z7_grp  := by eval
+
+-- Bool xor 群
+def xorB := \a b -> if a then (not b) else b
+def Bool_grp := MkGroup Bool xorB false (\b -> b)
+theorem bool_is_abelian : isAbelianGroupOn Bool_grp := by eval
+
+-- ----- アクセサが期待値を返す -----
+theorem z12_e_is_zero : groupE Z12_grp == 0 := by eval
+
+-- ----- 構造体降格: Group → Monoid -----
+def Z12_mon := groupToMonoid Z12_grp
+theorem z12_as_monoid : isMonoidOn Z12_mon := by eval
+
+-- ----- Ring: (Z/6Z, 0, 1, neg, +, *) -----
+def Z6_ring := MkRing (Zn 6) 0 1 (negMod 6) (addMod 6) (mulMod 6)
+theorem z6_is_ring : isRingOn Z6_ring := by eval
+theorem z6_is_commring : isCommutativeRingOn Z6_ring := by eval
+
+-- 環を分解: 加法群を取り出す
+def Z6_addgrp := ringAddGroup Z6_ring
+theorem z6_addgrp_is_abelian : isAbelianGroupOn Z6_addgrp := by eval
+
+-- ----- Field: (Z/pZ, ..., invMod p) -----
+def F5_field := MkField (Zn 5) 0 1 (negMod 5) (addMod 5) (mulMod 5) (invMod 5)
+def F7_field := MkField (Zn 7) 0 1 (negMod 7) (addMod 7) (mulMod 7) (invMod 7)
+
+theorem f5_is_field : isFieldOn F5_field := by eval
+theorem f7_is_field : isFieldOn F7_field := by eval
+
+-- 体を Ring に降格
+def F5_ring := fieldToRing F5_field
+theorem f5_as_ring : isCommutativeRingOn F5_ring := by eval
+
+-- ----- 群準同型: Z/6 → Z/3, φ(x) = x mod 3 -----
+def Z6_grp := MkGroup (Zn 6) (addMod 6) 0 (negMod 6)
+def Z3_grp := MkGroup (Zn 3) (addMod 3) 0 (negMod 3)
+def phi := \x -> x mod 3
+
+theorem phi_image_ok : imageInOf Z6_grp Z3_grp phi := by eval
+theorem phi_is_homo : isHomomorphismGG Z6_grp Z3_grp phi := by eval
+
+-- ----- 部分群: {0, 2, 4} ⊆ Z/6Z は (Z/6Z, +) の部分群 -----
+def H := {0, 2, 4}
+theorem h_is_subgroup : isSubgroupOf Z6_grp H := by eval
+
+-- ----- 核と像 -----
+-- φ : Z/6 → Z/3, φ(x) = x mod 3
+-- kernel φ = {x ∈ Z/6 | x mod 3 == 0} = {0, 3}
+def K := kernelOfHomo Z6_grp Z3_grp phi
+theorem k_contains_0 : 0 in K := by eval
+theorem k_contains_3 : 3 in K := by eval
+
+-- 像 = {0, 1, 2} = Z/3 全体 (φ は全射)
+def I_phi := imageOfHomo Z6_grp Z3_grp phi
+theorem image_contains_0 : 0 in I_phi := by eval
+theorem image_contains_1 : 1 in I_phi := by eval
+theorem image_contains_2 : 2 in I_phi := by eval
+
+-- 全射判定: 像 = (Z/3) 全体
+theorem phi_surjective : isSurjectiveOnto Z6_grp (groupCarrier Z3_grp) phi := by eval
+
+-- φ は単射ではない (φ(0) = φ(3) = 0)
+def phi_inj := isInjectiveOn Z6_grp phi
+theorem phi_not_injective : phi_inj == false := by eval
+
+-- ----- 同型: Z/2Z ≅ Bool xor 群 -----
+-- ψ : Z/2 → Bool, ψ(0) = false, ψ(1) = true
+def Z2_grp := MkGroup (Zn 2) (addMod 2) 0 (negMod 2)
+def psi := \x -> if x == 0 then false else true
+
+theorem psi_is_homo : isHomomorphismGG Z2_grp Bool_grp psi := by eval
+theorem psi_is_iso  : isIsomorphismGG Z2_grp Bool_grp psi := by eval

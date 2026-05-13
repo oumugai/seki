@@ -1,0 +1,44 @@
+-- ===========================================================
+-- lib/numth/gcd.seki — 整数 GCD と拡張 Euclid
+--
+-- これは数論の最も基本層 (modular arithmetic 等の土台)。
+--
+-- 公開する名前:
+--   def gcd a b              — 通常の整数 GCD (非負)
+--   def lcm a b              — 最小公倍数
+--   def extGcd a b           — 拡張 Euclid: ((g, x), y) で g = a*x + b*y
+--   def egcd_g / egcd_x / egcd_y   — extGcd 結果のアクセサ
+-- ===========================================================
+
+def absI := \n -> if n < 0 then 0 - n else n
+
+-- gcd(a, 0) = |a|; gcd(a, b) = gcd(b, a mod b)
+def gcd := \a b ->
+    let a1 = absI a in
+    let b1 = absI b in
+    if b1 == 0 then a1
+    else gcd b1 (a1 mod b1)
+
+-- 最小公倍数
+def lcm := \a b ->
+    let g = gcd a b in
+    if g == 0 then 0
+    else (absI (a * b)) / g
+
+-- 拡張 Euclid: ((g, x), y) で g = a*x + b*y, g = gcd(a, b)
+def extGcdRec := \a b ->
+    if b == 0 then ((a, 1), 0)
+    else
+        let r = extGcdRec b (a mod b) in
+        let g = fst (fst r) in
+        let x1 = snd (fst r) in
+        let y1 = snd r in
+        let q = a / b in
+        ((g, y1), x1 - q * y1)
+
+def extGcd := \a b -> extGcdRec a b
+
+-- アクセサ
+def egcd_g := \t -> fst (fst t)
+def egcd_x := \t -> snd (fst t)
+def egcd_y := \t -> snd t

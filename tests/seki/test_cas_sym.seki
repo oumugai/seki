@@ -1,0 +1,30 @@
+-- ===========================================================
+-- tests/seki/test_cas_sym.seki — lib/cas/sym.seki の検証
+-- ===========================================================
+
+import "../../lib/cas/sym.seki"
+
+-- 加算の単位律
+theorem sym_add_zero_left  : simp1 (SAdd (SNum 0) (SVar "x")) == SVar "x" := by eval
+theorem sym_add_zero_right : simp1 (SAdd (SVar "x") (SNum 0)) == SVar "x" := by eval
+
+-- 定数畳み込み
+theorem sym_add_const   : simp1 (SAdd (SNum 3) (SNum 5)) == SNum 8 := by eval
+theorem sym_mul_const   : simp1 (SMul (SNum 4) (SNum 7)) == SNum 28 := by eval
+
+-- 乗算の零律 / 単位律
+theorem sym_mul_zero    : simp1 (SMul (SNum 0) (SVar "x")) == SNum 0 := by eval
+theorem sym_mul_one     : simp1 (SMul (SNum 1) (SVar "x")) == SVar "x" := by eval
+
+-- 二重否定除去
+theorem sym_neg_neg : simp1 (SNeg (SNeg (SVar "x"))) == SVar "x" := by eval
+
+-- べき乗の境界
+theorem sym_pow_zero : simp1 (SPow (SVar "x") 0) == SNum 1 := by eval
+theorem sym_pow_one  : simp1 (SPow (SVar "x") 1) == SVar "x" := by eval
+
+-- 不動点まで簡約
+-- (3 + 0) * 1 → 3 (after multiple simp1 passes)
+theorem sym_simplify_chain
+  : simplify (SMul (SAdd (SNum 3) (SNum 0)) (SNum 1)) == SNum 3
+  := by eval

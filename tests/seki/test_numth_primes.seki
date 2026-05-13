@@ -1,0 +1,34 @@
+-- ===========================================================
+-- tests/seki/test_numth_primes.seki — 素数判定・Eratosthenes
+-- ===========================================================
+
+import "../../lib/numth/primes.seki"
+
+-- 基本素数判定
+theorem prime_2  : isPrime 2  == true  := by eval
+theorem prime_3  : isPrime 3  == true  := by eval
+theorem prime_7  : isPrime 7  == true  := by eval
+theorem prime_17 : isPrime 17 == true  := by eval
+theorem prime_31 : isPrime 31 == true  := by eval
+
+-- 合成数
+theorem nprime_1  : isPrime 1  == false := by eval
+theorem nprime_4  : isPrime 4  == false := by eval
+theorem nprime_9  : isPrime 9  == false := by eval
+theorem nprime_15 : isPrime 15 == false := by eval
+theorem nprime_25 : isPrime 25 == false := by eval
+
+-- 最小因数
+theorem smallest_4   : smallestFactor 4 == 2 := by eval
+theorem smallest_15  : smallestFactor 15 == 3 := by eval
+theorem smallest_49  : smallestFactor 49 == 7 := by eval
+
+-- Eratosthenes: 20 以下の素数は 2, 3, 5, 7, 11, 13, 17, 19 (8 個)
+def p20 := primesUpTo 20
+theorem primes_count_20 : length p20 == 8 := by eval
+theorem primes_first    : head p20 == 2  := by eval
+
+-- k 番目の素数
+theorem nth_prime_1 : nthPrime 1 == 2  := by eval
+theorem nth_prime_5 : nthPrime 5 == 11 := by eval
+theorem nth_prime_10 : nthPrime 10 == 29 := by eval

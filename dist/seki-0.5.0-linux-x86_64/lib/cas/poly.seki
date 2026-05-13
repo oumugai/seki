@@ -1,0 +1,290 @@
+-- ===========================================================
+-- lib/cas/poly.seki — 1 変数多項式の正規化・演算・GCD・因数分解
+--
+-- 表現: Poly = List Int, インデックス i は x^i の係数。
+--   例: [3, 5, 2] = 2*x² + 5*x + 3
+--
+-- 公開する名前:
+--   def polyZero / polyConst / polyXmon
+--   def polyAdd / polySub / polyScale / polyShift1 / polyMul / polyPow
+--   def stripTail / polyDeg / polyLead
+--   def polyDivMod        — 整除可能な場合のみ Some
+--   def polyMod           — pseudo-remainder (GCD 用)
+--   def polyGCD / polyPrimitive / polyContent
+--   def evalPoly p c      — Horner 法で p(c)
+--   def toPoly / fromPoly / expand    — Sym ↔ Poly 変換
+--   def divisors / scanRoots / findRationalRoot / divByLinear
+--   def factor            — 有理根による因数分解
+-- ===========================================================
+
+import "sym.seki"
+import "numth/gcd.seki"
+
+-- ----- 多項式の基本構成 ----------------------------------------
+def polyZero := nil
+def polyConst := \c -> cons c nil
+def polyXmon := cons 0 (cons 1 nil)
+
+def polyAdd := \p q ->
+    if null p then q
+    else if null q then p
+    else cons ((head p) + (head q)) (polyAdd (tail p) (tail q))
+
+def polyScale := \c p ->
+    if null p then nil
+    else cons (c * (head p)) (polyScale c (tail p))
+
+def polySub := \p q -> polyAdd p (polyScale (0 - 1) q)
+
+def polyShift1 := \p -> cons 0 p
+
+def polyMul := \p q ->
+    if null p then nil
+    else polyAdd (polyScale (head p) q) (polyShift1 (polyMul (tail p) q))
+
+def polyPow := \p n ->
+    if n == 0 then polyConst 1
+    else polyMul p (polyPow p (n - 1))
+
+-- ----- Trim / 次数 / 主係数 ------------------------------------
+def dropLeadZeros := \xs ->
+    if null xs then nil
+    else if (head xs) == 0 then dropLeadZeros (tail xs)
+    else xs
+
+def stripTail := \p -> reverse (dropLeadZeros (reverse p))
+
+def polyDeg := \p ->
+    let t = stripTail p in
+    if null t then 0 - 1 else (length t) - 1
+
+def lastOf := \xs ->
+    if null xs then 0
+    else if null (tail xs) then head xs
+    else lastOf (tail xs)
+
+def polyLead := \p -> lastOf (stripTail p)
+
+-- ----- ホーナー法による値計算 ---------------------------------
+def evalPoly := \p c ->
+    if null p then 0
+    else (head p) + c * (evalPoly (tail p) c)
+
+-- ----- 0 を k 個前置 -------------------------------------------
+def kShifts := \pp n ->
+    if n == 0 then pp else cons 0 (kShifts pp (n - 1))
+
+-- ----- 整除可能な場合の多項式長除算 ----------------------------
+def polyDivMod := \p q ->
+    let dp = polyDeg p in
+    let dq = polyDeg q in
+    if dq < 0 then None
+    else if dp < dq then Some (polyZero, stripTail p)
+    else
+        let lp = polyLead p in
+        let lq = polyLead q in
+        if (lp mod lq) != 0 then None
+        else
+            let c = lp / lq in
+            let k = dp - dq in
+            let qShifted = kShifts (polyScale c q) k in
+            let p2 = polySub p qShifted in
+            match polyDivMod p2 q with
+            | None -> None
+            | Some pr ->
+                let q1 = fst pr in
+                let r1 = snd pr in
+                let qMono = kShifts (polyConst c) k in
+                Some (polyAdd qMono q1, r1)
+
+-- ----- 多項式 content / primitive (gcd は numth/gcd.seki から) -----
+-- 注: `gcd` と `absI` は numth/gcd.seki が提供。
+def polyContent := \p ->
+    if null p then 0
+    else gcd (head p) (polyContent (tail p))
+
+def polyDivByC := \c p ->
+    if null p then nil
+    else cons ((head p) / c) (polyDivByC c (tail p))
+
+def polyPrimitive := \p ->
+    let c = polyContent p in
+    if c == 0 then p
+    else
+        let r = polyDivByC c p in
+        if (polyLead r) < 0 then polyScale (0 - 1) r else r
+
+-- ----- 擬剰余 + Euclidean GCD ----------------------------------
+def polyMod := \p q ->
+    let dp = polyDeg p in
+    let dq = polyDeg q in
+    if dq < 0 then nil
+    else if dp < dq then stripTail p
+    else
+        let lp = polyLead p in
+        let lq = polyLead q in
+        let k = dp - dq in
+        let scaled_p = polyScale lq p in
+        let scaled_q = kShifts (polyScale lp q) k in
+        polyMod (polySub scaled_p scaled_q) q
+
+def polyGCDraw := \p q ->
+    if null q then p
+    else polyGCDraw q (polyMod p q)
+
+def polyGCD := \p q ->
+    polyPrimitive (polyGCDraw (stripTail p) (stripTail q))
+
+-- ----- Sym ↔ Poly 変換と expand --------------------------------
+def toPoly := \e ->
+    match e with
+    | SNum c -> polyConst c
+    | SVar _ -> polyXmon
+    | SNeg u -> polyScale (0 - 1) (toPoly u)
+    | SAdd u v -> polyAdd (toPoly u) (toPoly v)
+    | SSub u v -> polySub (toPoly u) (toPoly v)
+    | SMul u v -> polyMul (toPoly u) (toPoly v)
+    | SPow u n -> polyPow (toPoly u) n
+    | _ -> nil
+
+def termOf := \c i ->
+    if c == 0 then SNum 0
+    else if i == 0 then SNum c
+    else if (c == 1) and (i == 1) then SVar "x"
+    else if c == 1 then SPow (SVar "x") i
+    else if i == 1 then SMul (SNum c) (SVar "x")
+    else SMul (SNum c) (SPow (SVar "x") i)
+
+def termsAt := \p i ->
+    if null p then nil
+    else cons (termOf (head p) i) (termsAt (tail p) (i + 1))
+
+def keepNonZero := \xs ->
+    if null xs then nil
+    else
+        match (head xs) with
+        | SNum 0 -> keepNonZero (tail xs)
+        | other -> cons other (keepNonZero (tail xs))
+
+def sumTerms := \xs ->
+    if null xs then SNum 0
+    else if null (tail xs) then head xs
+    else SAdd (head xs) (sumTerms (tail xs))
+
+def fromPoly := \p -> sumTerms (keepNonZero (reverse (termsAt p 0)))
+
+def expand := \e -> fromPoly (toPoly e)
+
+-- ----- 有理根定理による因数分解 (整数係数・monic) -------------
+def divisorsAbs := \n acc d ->
+    if d > absI n then acc
+    else if (absI n) mod d == 0
+         then divisorsAbs n (cons d (cons (0 - d) acc)) (d + 1)
+         else divisorsAbs n acc (d + 1)
+
+def divisors := \n -> divisorsAbs n nil 1
+
+def hasRoot := \p r -> evalPoly p r == 0
+
+def divByLinear := \p r ->
+    polyDivMod p (cons (0 - r) (cons 1 nil))
+
+def scanRoots := \p rs ->
+    if null rs then None
+    else if hasRoot p (head rs) then Some (head rs)
+    else scanRoots p (tail rs)
+
+def findRationalRoot := \p ->
+    if null p then None
+    else
+        let const_term = head p in
+        let cands = if const_term == 0
+                    then cons 0 (divisors 1)
+                    else divisors const_term in
+        scanRoots p cands
+
+def factorRec := \p roots ->
+    match findRationalRoot p with
+    | None -> (roots, p)
+    | Some r ->
+        match divByLinear p r with
+        | None -> (roots, p)
+        | Some pr -> factorRec (fst pr) (cons r roots)
+
+-- 結果: (有理根のリスト, 残った既約因子と仮定する多項式)
+def factor := \p -> factorRec p nil
+
+-- ===========================================================
+-- §3. Resultant と Discriminant (Sylvester 行列ベース)
+-- ===========================================================
+--
+-- Resultant Res(p, q) = det(Sylvester(p, q))
+--   - p, q が共通根を持つ ⇔ Res(p, q) == 0
+-- Discriminant Δ(p) = (-1)^(n(n-1)/2) / a_n * Res(p, p')
+--   - p が重根を持つ ⇔ Δ(p) == 0
+--
+-- 2 次式 ax² + bx + c の判別式は b² - 4ac (常識通り)。
+-- 3 次以上では Sylvester 行列の行列式で計算。
+-- ===========================================================
+
+-- ----- 多項式の係数を highest-degree-first に並べ替え -----
+-- 内部表現は low-to-high なので、Sylvester 行列構築では reverse する。
+def revPoly := \p -> reverse (stripTail p)
+
+-- ----- 2 次方程式の判別式 (古典的形式) -----
+-- 多項式は [c, b, a] (= ax² + bx + c) の形を期待
+def discriminantQuad := \p ->
+    let t = stripTail p in
+    if (length t) != 3 then 0    -- 2 次でないなら 0 を返す (caller が判定)
+    else
+        let c = nth 0 t in
+        let b = nth 1 t in
+        let a = nth 2 t in
+        b * b - 4 * a * c
+
+-- リストの n 番目 (poly.seki 内部用)
+def nth := \i xs ->
+    if i == 0 then head xs
+    else nth (i - 1) (tail xs)
+
+-- ----- 3 次の判別式: Δ = 18abcd - 4b³d + b²c² - 4ac³ - 27a²d² -----
+-- 入力多項式は [d, c, b, a] (= ax³ + bx² + cx + d)
+def discriminantCubic := \p ->
+    let t = stripTail p in
+    if (length t) != 4 then 0
+    else
+        let d = nth 0 t in
+        let c = nth 1 t in
+        let b = nth 2 t in
+        let a = nth 3 t in
+        let t1 = 18 * a * b * c * d in
+        let t2 = 4 * b * b * b * d in
+        let t3 = b * b * c * c in
+        let t4 = 4 * a * c * c * c in
+        let t5 = 27 * a * a * d * d in
+        t1 - t2 + t3 - t4 - t5
+
+-- ----- 多項式の微分: p'(x) -----
+-- p = [a_0, a_1, ..., a_n] → p' = [a_1, 2*a_2, 3*a_3, ..., n*a_n]
+def polyDerivRec := \p k ->
+    if null p then nil
+    else if null (tail p) then nil
+    else cons (k * (head (tail p))) (polyDerivRec (tail p) (k + 1))
+
+def polyDeriv := \p -> polyDerivRec p 1
+
+-- ----- 簡易 Resultant (2 つの 2 次以下に限定) -----
+-- Res([c, b, a], [c', b', a']) = (ac' - a'c)² - (ab' - a'b)(bc' - b'c)
+-- (一般の Sylvester は高次で必要。ここでは 2 次同士のみ。)
+def resultant22 := \p q ->
+    let pt = stripTail p in
+    let qt = stripTail q in
+    if (length pt) != 3 then 0
+    else if (length qt) != 3 then 0
+    else
+        let c1 = nth 0 pt in let b1 = nth 1 pt in let a1 = nth 2 pt in
+        let c2 = nth 0 qt in let b2 = nth 1 qt in let a2 = nth 2 qt in
+        let t1 = a1 * c2 - a2 * c1 in
+        let t2 = a1 * b2 - a2 * b1 in
+        let t3 = b1 * c2 - b2 * c1 in
+        t1 * t1 - t2 * t3

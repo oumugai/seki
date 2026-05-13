@@ -1,0 +1,46 @@
+-- ===========================================================
+-- tests/seki/test_analysis_diff.seki — 数値微分
+-- ===========================================================
+
+import "../../lib/analysis/diff.seki"
+
+def absR := \r -> if r < 0.0 then 0.0 - r else r
+
+-- ----- f(x) = x²,  f'(x) = 2x.  f'(3) = 6 -----
+def f_sq := \x -> x * x
+theorem diff_sq_forward
+  : absR (diffForward 0.001 f_sq 3.0 - 6.0) < 0.01 := by eval
+
+theorem diff_sq_central
+  : absR (diffCentral 0.001 f_sq 3.0 - 6.0) < 0.000001 := by eval
+
+-- ----- f(x) = x³,  f'(x) = 3x².  f'(2) = 12 -----
+def f_cube := \x -> x * x * x
+theorem diff_cube_central
+  : absR (diffCentral 0.0001 f_cube 2.0 - 12.0) < 0.0001 := by eval
+
+-- ----- 2 階導関数: f''(x) = 2 for x²,  f''(3) = 2 -----
+theorem diff2_sq
+  : absR (diff2Central 0.001 f_sq 3.0 - 2.0) < 0.001 := by eval
+
+-- ----- 中心差分は前進差分より正確 (h 同じで) -----
+def err_forward_at_3 := absR (diffForward 0.01 f_sq 3.0 - 6.0)
+def err_central_at_3 := absR (diffCentral 0.01 f_sq 3.0 - 6.0)
+theorem central_more_accurate : err_central_at_3 < err_forward_at_3 := by eval
+
+-- ----- 多変数: f(x, y) = x² + y² の勾配 = (2x, 2y) -----
+def listAt0 := \xs -> head xs
+def listAt1 := \xs -> head (tail xs)
+
+def f_multi := \xs ->
+    let x = listAt0 xs in
+    let y = listAt1 xs in
+    x * x + y * y
+
+-- 勾配 at (3, 4) は (6, 8)
+def grad_at_34 := gradient 0.001 f_multi [3.0, 4.0]
+def gx := head grad_at_34
+def gy := head (tail grad_at_34)
+
+theorem grad_x_at_34 : absR (gx - 6.0) < 0.001 := by eval
+theorem grad_y_at_34 : absR (gy - 8.0) < 0.001 := by eval

@@ -1,0 +1,109 @@
+-- ===========================================================
+-- 12: 無限ケース検証 — by algebra と by induction
+--
+-- これらの定理は Int / Nat 全体に対して成立する。標本検証ではなく
+-- 多項式の正規化または数学的帰納法による「真の証明」。
+-- ===========================================================
+
+-- ----- by algebra: 多項式恒等式 ----------------------------------
+-- すべて ℤ 上の環恒等式として証明される (∞個の元に対して成立)
+
+theorem add_comm
+  : forall a in Int, forall b in Int, a + b == b + a
+  := by algebra
+
+theorem add_assoc
+  : forall a in Int, forall b in Int, forall c in Int,
+        (a + b) + c == a + (b + c)
+  := by algebra
+
+theorem mul_comm
+  : forall a in Int, forall b in Int, a * b == b * a
+  := by algebra
+
+theorem mul_assoc
+  : forall a in Int, forall b in Int, forall c in Int,
+        (a * b) * c == a * (b * c)
+  := by algebra
+
+theorem distrib_l
+  : forall a in Int, forall b in Int, forall c in Int,
+        a * (b + c) == a * b + a * c
+  := by algebra
+
+theorem distrib_r
+  : forall a in Int, forall b in Int, forall c in Int,
+        (a + b) * c == a * c + b * c
+  := by algebra
+
+theorem zero_id  : forall a in Int, a + 0 == a := by algebra
+theorem one_id   : forall a in Int, a * 1 == a := by algebra
+theorem zero_mul : forall a in Int, a * 0 == 0 := by algebra
+theorem neg_self : forall a in Int, a + (-a) == 0 := by algebra
+
+-- 複雑な恒等式
+theorem square_diff
+  : forall a in Int, forall b in Int,
+        (a + b) * (a - b) == a * a - b * b
+  := by algebra
+
+theorem cube_expansion
+  : forall x in Int,
+        (x + 1) * (x + 1) * (x + 1) == x*x*x + 3*x*x + 3*x + 1
+  := by algebra
+
+theorem sophie_germain
+  : forall a in Int, forall b in Int,
+        a*a*a*a + 4 * b*b*b*b
+            == (a*a + 2*b*b - 2*a*b) * (a*a + 2*b*b + 2*a*b)
+  := by algebra
+
+-- ----- by induction: 帰納法による無限ケース検証 -------------------
+
+def sum   : Nat -> Nat := \(n : Nat) ->
+    if n == 0 then 0 else n + sum (n - 1)
+
+def sumSq : Nat -> Nat := \(n : Nat) ->
+    if n == 0 then 0 else n * n + sumSq (n - 1)
+
+def sumCube : Nat -> Nat := \(n : Nat) ->
+    if n == 0 then 0 else n * n * n + sumCube (n - 1)
+
+-- Gauss の和の公式: 2*Σk = n(n+1)
+theorem gauss
+  : forall n in Nat, 2 * sum n == n * (n + 1)
+  := by induction
+
+-- 平方和: 6*Σk² = n(n+1)(2n+1)
+theorem squares
+  : forall n in Nat, 6 * sumSq n == n * (n + 1) * (2 * n + 1)
+  := by induction
+
+-- 立方和: Σk³ == (Σk)²  ⇒  4 * sumCube n == (n*(n+1))²
+theorem cubes_squared_sum
+  : forall n in Nat, 4 * sumCube n == (n * (n + 1)) * (n * (n + 1))
+  := by induction
+
+-- 同義の確認: 同じ命題は自明に通る
+theorem trivial_refl : forall n in Nat, sum n == sum n := by induction
+
+-- 三角数の漸化式: 2 (Σk + (n+1)) = (n+1)(n+2)
+theorem tri_step
+  : forall n in Nat, 2 * (sum n + (n + 1)) == (n + 1) * (n + 2)
+  := by induction
+
+-- ----- by algebra と他のタクティクの併用 ------------------------
+
+-- 「a²+2ab+b² と (a+b)² が等しい」は by algebra で済む
+theorem binomial_expansion
+  : forall a in Int, forall b in Int,
+        (a + b) * (a + b) == a*a + 2*a*b + b*b
+  := by algebra
+
+-- 「(a-b)² ≥ 0」は線形でないが、これは by eval (Bool は完全列挙) では無理
+-- 代わりに、書き換えて多項式恒等式にできる:
+-- (a - b)² + 2ab == a² + b²
+theorem diff_square_identity
+  : forall a in Int, forall b in Int,
+        (a - b) * (a - b) + 2 * a * b == a * a + b * b
+  := by algebra

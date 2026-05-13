@@ -1,0 +1,195 @@
+-- ===========================================================
+-- 33: Phase 4 — クロージャベース並行性・channel・FFI
+--
+-- Phase 4 で追加:
+--   §1. spawn / join — クロージャを取る本物のスレッド
+--   §2. channels (mpsc) — スレッド間メッセージング
+--   §3. FFI — libc などの shared object を直接呼べる (Linux/macOS)
+--
+-- 重要な基盤: Phase 4 では Value 全体を Rc/RefCell から Arc/Mutex に
+-- 移行した. これにより Value が Send + Sync になり、クロージャが
+-- スレッド境界を越えられるようになった.
+-- ===========================================================
+
+-- ===========================================================
+-- §1. クロージャベース spawn / join
+-- ===========================================================
+
+-- 単純なスレッド: クロージャを 1 つ走らせる
+def t1 := spawn (\_ -> 6 * 7)
+theorem spawn_simple : join t1 == 42 := by eval
+
+-- クロージャがキャプチャする変数も渡される
+def factor := 13
+def t2 := spawn (\_ -> factor * 100)
+theorem spawn_captures : join t2 == 1300 := by eval
+
+-- 共有 atomic を介した複数スレッドの協調
+def shared := atomicNew 0
+
+def workerN := \n ->
+    spawn (\_ ->
+        let _ = atomicAdd shared n in
+        n)
+
+-- 5 スレッドが atomic に 1, 2, 3, 4, 5 を加算
+def w1 := workerN 1
+def w2 := workerN 2
+def w3 := workerN 3
+def w4 := workerN 4
+def w5 := workerN 5
+
+-- 全部 join して結果合計を得る
+def sumReturned := (join w1) + (join w2) + (join w3) + (join w4) + (join w5)
+theorem spawn_results_sum : sumReturned == 15 := by eval
+theorem spawn_atomic_sum  : atomicGet shared == 15 := by eval
+
+-- ===========================================================
+-- §2. channels (mpsc)
+-- ===========================================================
+--
+-- chanNew      : Unit -> Channel A
+-- chanSend     : Channel A -> A -> Result Unit String
+-- chanRecv     : Channel A -> Result A String
+-- chanClose    : Channel A -> Unit
+
+-- Pipeline: producer がメッセージを送り、consumer が受信して合計
+def ch := chanNew ()
+
+-- Producer thread: 1..10 を送信
+def producer := spawn (\_ ->
+    let send = \n -> chanSend ch n in
+    let _ = send 1 in
+    let _ = send 2 in
+    let _ = send 3 in
+    let _ = send 4 in
+    let _ = send 5 in
+    let _ = send 6 in
+    let _ = send 7 in
+    let _ = send 8 in
+    let _ = send 9 in
+    let _ = send 10 in
+    0)
+
+-- Consumer thread: 10 個受け取って和を計算
+def unwrap := \r -> match r with | Ok x -> x | Err _ -> 0
+def consumer := spawn (\_ ->
+    let v1 = unwrap (chanRecv ch) in
+    let v2 = unwrap (chanRecv ch) in
+    let v3 = unwrap (chanRecv ch) in
+    let v4 = unwrap (chanRecv ch) in
+    let v5 = unwrap (chanRecv ch) in
+    let v6 = unwrap (chanRecv ch) in
+    let v7 = unwrap (chanRecv ch) in
+    let v8 = unwrap (chanRecv ch) in
+    let v9 = unwrap (chanRecv ch) in
+    let v10 = unwrap (chanRecv ch) in
+    v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8 + v9 + v10)
+
+def _prod := join producer
+def total := join consumer
+theorem chan_sum : total == 55 := by eval     -- 1 + 2 + ... + 10
+
+-- ----- multi-producer / single-consumer の例 -----
+def ch2 := chanNew ()
+def p1 := spawn (\_ -> let _ = chanSend ch2 100 in 0)
+def p2 := spawn (\_ -> let _ = chanSend ch2 200 in 0)
+def p3 := spawn (\_ -> let _ = chanSend ch2 300 in 0)
+
+def _ := join p1
+def _ := join p2
+def _ := join p3
+
+-- 3 メッセージを受信 (順序は非決定的だが合計は決定的)
+def m1 := unwrap (chanRecv ch2)
+def m2 := unwrap (chanRecv ch2)
+def m3 := unwrap (chanRecv ch2)
+theorem multi_producer_sum : m1 + m2 + m3 == 600 := by eval
+
+-- ===========================================================
+-- §3. FFI (libc 呼び出し)
+-- ===========================================================
+--
+-- ffiLoad        : String -> Result FfiLib String
+-- ffiCallIntInt  : FfiLib -> String -> Int -> Result Int String
+-- ffiCallStrInt  : FfiLib -> String -> String -> Result Int String
+-- ffiClose       : FfiLib -> Unit
+--
+-- 注意: dlopen 経由なので Linux / macOS のみ.
+-- 外部 Rust クレートには依存しない (raw dlopen を直接コール).
+
+def libcResult := ffiLoad "libc.so.6"
+def libc := match libcResult with
+    | Ok l  -> l
+    | Err _ -> error "libc not found (Linux only example)"
+
+-- strlen("hello world!") = 12
+def hello_len := match ffiCallStrInt libc "strlen" "hello world!" with
+    | Ok n  -> n
+    | Err _ -> 0 - 1
+theorem ffi_strlen : hello_len == 12 := by eval
+
+-- abs(-42) = 42
+def abs_minus_42 := match ffiCallIntInt libc "abs" (0 - 42) with
+    | Ok n  -> n
+    | Err _ -> 0 - 1
+theorem ffi_abs : abs_minus_42 == 42 := by eval
+
+-- abs(0) = 0
+def abs_zero := match ffiCallIntInt libc "abs" 0 with
+    | Ok n -> n
+    | Err _ -> 0 - 1
+theorem ffi_abs_zero : abs_zero == 0 := by eval
+
+-- 後始末
+def _close := ffiClose libc
+
+-- ===========================================================
+-- §4. 並列計算の例: parallel sum
+-- ===========================================================
+
+-- spawn で 4 つのワーカーを起こし、各々が部分和を計算して channel で
+-- 報告.  メインは 4 結果を集計.
+def parChannel := chanNew ()
+
+-- ワーカ: range [lo, hi) の和を計算して送信
+def parWorker := \lo hi ->
+    spawn (\_ ->
+        let sum = foldr (\x acc -> x + acc) 0 (range lo hi) in
+        let _ = chanSend parChannel sum in
+        sum)
+
+-- 1..100 を 4 つに分けて並列計算
+def w_1   := parWorker 1   26
+def w_26  := parWorker 26  51
+def w_51  := parWorker 51  76
+def w_76  := parWorker 76  101
+
+def _r1 := join w_1
+def _r2 := join w_26
+def _r3 := join w_51
+def _r4 := join w_76
+
+def part1 := unwrap (chanRecv parChannel)
+def part2 := unwrap (chanRecv parChannel)
+def part3 := unwrap (chanRecv parChannel)
+def part4 := unwrap (chanRecv parChannel)
+def totalSum := part1 + part2 + part3 + part4
+
+-- 1 + 2 + ... + 100 = 5050
+theorem parallel_sum_100 : totalSum == 5050 := by eval
+
+-- ===========================================================
+-- まとめ
+-- ===========================================================
+-- Phase 4 で seki は次の汎用言語機能を獲得:
+--   * Rc → Arc 全面移行 (Value: Send + Sync)
+--   * クロージャ並行 (`spawn` / `join`) — 任意のクロージャを別スレッドで実行
+--   * mpsc channels — 型安全なスレッド間通信
+--   * FFI — libc / 任意の shared object を呼び出し可能
+--
+-- 集合論セマンティクスは保持:
+--   * Thread A は集合論的に「A 値を生成する未完了の計算」の opaque token
+--   * Channel A は「順序付き A 値のキュー」(送信者と受信者の対)
+--   * FfiLib も同様に I/O escape hatch — set-theoretic content を持たない
+--   * Send + Sync は Rust 側の制約; seki 側ではこれを意識する必要はない

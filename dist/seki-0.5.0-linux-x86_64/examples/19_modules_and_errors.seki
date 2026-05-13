@@ -1,0 +1,98 @@
+-- ===========================================================
+-- 19: Option / Result / ? 演算子 / モジュールシステム
+--
+-- 今回追加された 3 機能:
+--   1. stdlib の Option / Result と関連ヘルパ
+--   2. ? 演算子による Result のエラー伝播 (let 内のみ)
+--   3. import "path" と import "path" as Name によるモジュール
+-- ===========================================================
+
+-- ----- Option を使う -----
+def safeDiv := \a b ->
+    if b == 0 then None else Some (a / b)
+
+safeDiv 10 2                          -- Some 5
+safeDiv 10 0                          -- None
+
+-- helper を活用
+mapOption (\x -> x + 1) (Some 5)      -- Some 6
+mapOption (\x -> x + 1) None          -- None
+
+unwrapOr 0 (Some 42)                  -- 42
+unwrapOr 0 None                       -- 0
+
+isSome (Some 1)                       -- true
+isNone None                           -- true
+
+-- bindOption で連鎖
+def safeDoubleDiv := \a b c ->
+    bindOption (safeDiv a b) (\x -> safeDiv x c)
+
+safeDoubleDiv 100 2 5                 -- Some 10  (= 100/2/5)
+safeDoubleDiv 100 0 5                 -- None
+safeDoubleDiv 100 2 0                 -- None
+
+-- ----- Result とエラー伝播 -----
+def parseDigit := \c ->
+    match c with
+    | "0" -> Ok 0
+    | "1" -> Ok 1
+    | "2" -> Ok 2
+    | "3" -> Ok 3
+    | "4" -> Ok 4
+    | "5" -> Ok 5
+    | _   -> Err "not a digit"
+
+-- 手作業で書いた場合 (深いネスト)
+def addManual := \c1 c2 c3 ->
+    match parseDigit c1 with
+    | Err e -> Err e
+    | Ok x -> match parseDigit c2 with
+        | Err e -> Err e
+        | Ok y -> match parseDigit c3 with
+            | Err e -> Err e
+            | Ok z -> Ok (x + y + z)
+
+-- ? 演算子で書き直すと劇的にすっきり
+def addQ := \c1 c2 c3 ->
+    let x = parseDigit c1 ? in
+    let y = parseDigit c2 ? in
+    let z = parseDigit c3 ? in
+    Ok (x + y + z)
+
+addManual "1" "2" "3"                 -- Ok 6
+addQ      "1" "2" "3"                 -- Ok 6
+addQ      "x" "2" "3"                 -- Err "not a digit"
+addQ      "1" "y" "3"                 -- Err "not a digit"
+addQ      "1" "2" "z"                 -- Err "not a digit"
+
+-- bindResult や mapResult も使える
+mapResult (\n -> n * 10) (Ok 5)        -- Ok 50
+mapResult (\n -> n * 10) (Err "oops")  -- Err "oops"
+
+-- Option ↔ Result 変換
+okOr "missing" (Some 42)              -- Ok 42
+okOr "missing" None                   -- Err "missing"
+resultToOption (Ok 5)                 -- Some 5
+resultToOption (Err "x")              -- None
+
+-- ----- モジュールのインポート -----
+-- ./helpers_mod.seki に補助関数が定義されている
+import "helpers_mod.seki" as H
+
+-- 修飾名でアクセス
+H.factorial 5                         -- 120
+H.fib 10                              -- 55
+H.gcd 84 132                          -- 12
+H.powInt 2 10                         -- 1024
+H.sum [1, 2, 3, 4, 5]                 -- 15
+
+-- 全部 unqualified でも import できる (ここではしないがコメント)
+-- import "helpers_mod.seki"
+-- factorial 5
+
+-- ----- まとめ ----------------------------------------------------
+-- ? 演算子はネストの深い Result の連鎖を平坦化する。これにより
+-- 「実用システムでもエラーパスを書ける」言語になった。
+-- import で大規模プロジェクトの分割もできる (./M.seki に処理を切り出して
+-- main で M.foo として参照)。

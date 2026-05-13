@@ -1,0 +1,68 @@
+-- ===========================================================
+-- 05: 数論 — 再帰関数・素数集合・theorem 検証
+-- ===========================================================
+
+-- ----- 再帰関数 -----
+-- グローバル定義は名前で自己参照可能 (再帰 OK)
+def fact : Nat -> Nat := \(n : Nat) ->
+    if n == 0 then 1 else n * fact (n - 1)
+
+def fib  : Nat -> Nat := \(n : Nat) ->
+    if n < 2 then n else fib (n - 1) + fib (n - 2)
+
+def gcd  : Nat -> Nat -> Nat := \(a : Nat) (b : Nat) ->
+    if b == 0 then a else gcd b (a mod b)
+
+fact 6                  -- 720
+fib  10                 -- 55
+gcd  84 132             -- 12
+
+-- ----- 素数判定 -----
+-- divisorCount: 2..n-1 の中で n を割る数の個数。helperは末尾再帰っぽく書く。
+def hasDivBetween : Nat -> Nat -> Nat -> Bool
+    := \(n : Nat) (lo : Nat) (hi : Nat) ->
+        if lo > hi then false
+        else if n mod lo == 0 then true
+        else hasDivBetween n (lo + 1) hi
+
+def isPrime : Nat -> Bool := \(n : Nat) ->
+    if n < 2 then false
+    else if n == 2 then true
+    else not (hasDivBetween n 2 (n - 1))
+
+isPrime 1                -- false
+isPrime 2                -- true
+isPrime 17               -- true
+isPrime 21               -- false (= 3*7)
+
+-- ----- 素数集合 (内包的定義 + 範囲制限) -----
+def UpTo30 := {x in Nat | x <= 30}
+def PrimesUpTo30 := {x in UpTo30 | isPrime x}
+
+-- 集合内の各要素を確認 (intersect で具体化)
+PrimesUpTo30 intersect {2, 3, 5, 7, 11, 13, 17, 19, 23, 29}
+-- → {2, 3, 5, 7, 11, 13, 17, 19, 23, 29}  (= 30以下の全素数)
+
+-- ----- 素数に関する theorem -----
+-- 1. 単純な事実
+theorem two_prime    : isPrime 2  == true  := by eval
+theorem nine_not_prime : isPrime 9 == false := by eval
+
+-- 2. 30以下に素数が存在する (witness による証明)
+theorem prime_in_range : exists p in UpTo30, isPrime p
+    := 7
+
+-- 3. 30以下の各素数候補が素数であることを全列挙で確認
+theorem all_listed_are_prime
+    : forall p in {2, 3, 5, 7, 11, 13, 17, 19, 23, 29}, isPrime p
+    := by eval
+
+-- 4. gcd の冪等律: gcd a a == a
+def Range10 := {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+theorem gcd_idem : forall a in Range10, gcd a a == a := by eval
+
+-- 5. 階乗の単調性: n <= n+1 ⇒ fact n <= fact (n+1)
+def Range7 := {0, 1, 2, 3, 4, 5, 6}
+theorem fact_monotone
+    : forall n in Range7, fact n <= fact (n + 1)
+    := by eval

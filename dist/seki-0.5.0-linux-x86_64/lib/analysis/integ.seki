@@ -1,0 +1,50 @@
+-- ===========================================================
+-- lib/analysis/integ.seki — 数値積分
+--
+-- ∫_a^b f(x) dx を有限分割で近似。
+--
+-- 公開する名前:
+--   def integTrap n f a b      — 台形則 (n 分割)
+--   def integSimpson n f a b   — Simpson 1/3 則 (n 分割、n は偶数を推奨)
+--   def integMidpoint n f a b  — 中点則
+-- ===========================================================
+
+-- ----- 台形則 ------------------------------------
+-- T_n = h * [(f(a) + f(b))/2 + Σ_{k=1}^{n-1} f(a + k*h)],  h = (b-a)/n
+def trapSumInner := \f a h k n acc ->
+    if k >= n then acc
+    else trapSumInner f a h (k + 1) n (acc + f (a + (intToReal k) * h))
+
+def integTrap := \n f a b ->
+    let h = (b - a) / (intToReal n) in
+    let endpoints = (f a + f b) / 2.0 in
+    let inner = trapSumInner f a h 1 n 0.0 in
+    h * (endpoints + inner)
+
+-- ----- Simpson 1/3 則 ----------------------------
+-- S_n = (h/3) * [f(a) + f(b) + 4*Σ_odd + 2*Σ_even]
+--       h = (b-a)/n,  n は偶数
+def simpSumInner := \f a h k n acc ->
+    if k >= n then acc
+    else
+        let coef = if (k mod 2) == 1 then 4.0 else 2.0 in
+        let term = coef * f (a + (intToReal k) * h) in
+        simpSumInner f a h (k + 1) n (acc + term)
+
+def integSimpson := \n f a b ->
+    let h = (b - a) / (intToReal n) in
+    let endpoints = f a + f b in
+    let inner = simpSumInner f a h 1 n 0.0 in
+    h * (endpoints + inner) / 3.0
+
+-- ----- 中点則 ------------------------------------
+-- M_n = h * Σ_{k=0}^{n-1} f(a + (k + 0.5) * h),  h = (b-a)/n
+def midSumInner := \f a h k n acc ->
+    if k >= n then acc
+    else
+        let x = a + ((intToReal k) + 0.5) * h in
+        midSumInner f a h (k + 1) n (acc + f x)
+
+def integMidpoint := \n f a b ->
+    let h = (b - a) / (intToReal n) in
+    h * (midSumInner f a h 0 n 0.0)

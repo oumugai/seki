@@ -1,0 +1,132 @@
+-- ===========================================================
+-- 17: 集合論的構築 ─ ペア符号化された ADT
+--
+-- リスト・木・有理数 etc. はすべて seki 言語自身で順序対 (Tuple)
+-- を用いて構築されている。Rust 層は最小限のプリミティブ (タプル
+-- の構成と分解 / 算術 / Bool / Int / Real の atomic 集合) のみ提供。
+-- ===========================================================
+
+-- ----- リストはタグ付きペア --------------------------------------
+-- src/stdlib.seki より:
+--   def nil  := (0, ())
+--   def cons := \x xs -> (1, (x, xs))
+--   def null := \xs -> fst xs == 0
+--   def head := \xs -> fst (snd xs)
+--   def tail := \xs -> snd (snd xs)
+
+-- 内部表現を直接観察できる
+nil                                  -- []  (= (0, ()) — タグ 0)
+cons 1 nil                           -- [1] (= (1, (1, (0, ()))))
+
+-- リストは [..] リテラルで書ける (parser が cons へ desugar)
+[1, 2, 3]                            -- [1, 2, 3]
+
+-- これは厳密に等価
+[1, 2, 3] == cons 1 (cons 2 (cons 3 nil))
+
+-- 演算もすべて seki 定義
+length [1, 2, 3, 4, 5]               -- 5
+head [10, 20, 30]                    -- 10
+tail [10, 20, 30]                    -- [20, 30]
+reverse [1, 2, 3]                    -- [3, 2, 1]
+append [1, 2] [3, 4]                 -- [1, 2, 3, 4]
+map (\n -> n * n) [1, 2, 3]          -- [1, 4, 9]
+filter isEven [1, 2, 3, 4]           -- [2, 4]
+
+-- ----- 木もタグ付きペア -----------------------------------------
+-- src/stdlib.seki より:
+--   def leaf := (2, ())
+--   def node := \l v r -> (3, (l, (v, r)))
+--   def isLeaf  := \t -> fst t == 2
+--   def treeLeft  := \t -> fst (snd t)
+--   def treeVal   := \t -> fst (snd (snd t))
+--   def treeRight := \t -> snd (snd (snd t))
+
+leaf                                 -- leaf (= (2, ()))
+node leaf 1 leaf                     -- (node leaf 1 leaf)
+
+def t := node (node leaf 1 leaf) 2 (node leaf 3 leaf)
+treeSize t                           -- 3
+treeSum t                            -- 6
+treeHeight t                         -- 2
+
+-- ----- 集合論的所属判定 -----------------------------------------
+-- List Int の所属は再帰述語で判定される
+[1, 2, 3] in (List Int)              -- true
+[1, "two", 3] in (List Int)          -- false (String ∉ Int)
+[] in (List Int)                     -- true (空リストは List Int に属する)
+
+-- Tree Int も再帰判定
+leaf in (Tree Int)                   -- true
+(node leaf 5 leaf) in (Tree Int)     -- true
+(node (node leaf 1 leaf) 2 (node leaf 3 leaf)) in (Tree Int)  -- true
+
+-- ----- 検証で使う ------------------------------------------------
+-- リスト構造帰納法 (cons-based)
+theorem list_len_nn
+  : forall xs in (List Int), length xs >= 0
+  := by induction
+
+-- treeSize >= 0 の検証
+theorem tree_size_nn
+  : forall t in (Tree Int), treeSize t >= 0
+  := by induction
+
+-- 自明な等価性 (refl で証明可能なもの)
+theorem cons_unfolds
+  : cons 1 nil == (1, (1, (0, ())))
+  := refl
+
+theorem leaf_unfolds
+  : leaf == (2, ())
+  := refl
+
+-- リストと木の "空" は異なるタグ
+theorem nil_neq_leaf
+  : nil != leaf
+  := by eval
+
+-- ----- 有理数も seki 定義 ---------------------------------------
+-- Rat = Int × Pos, mkRat, addRat, mulRat 等もすべて seki 層
+def half := mkRat 1 2
+def third := mkRat 1 3
+addRat half third                    -- (5, 6)  = 1/2 + 1/3
+mulRat half third                    -- (1, 6)  = 1/2 * 1/3
+eqRat (mkRat 1 2) (mkRat 2 4)        -- true (1/2 = 2/4)
+
+theorem rat_add_id
+  : forall q in {(0, 1), (1, 1), (1, 2), (-1, 3), (5, 7)},
+        eqRat (addRat q (intToRat 0)) q
+  := by eval
+
+-- ----- 算術ヘルパも seki 定義 ----------------------------------
+succ 5                               -- 6
+pred 5                               -- 4
+abs (-7)                             -- 7
+maxOf 3 5                            -- 5
+minOf 3 5                            -- 3
+square 7                             -- 49
+cube 3                               -- 27
+isEven 10                            -- true
+isOdd 11                             -- true
+powInt 2 8                           -- 256
+
+-- ----- Rust 層に残る最小プリミティブの確認 -----------------------
+-- これらは seki 言語では表現できないため Rust 層で提供:
+--   * 算術演算子 + - * / mod (構文レベル)
+--   * 比較演算子 < <= == != > >=
+--   * Bool 演算 and or not
+--   * fst, snd, pair        (タプルプリミティブ)
+--   * print, card           (I/O・基数)
+--   * intToReal, floor, ceil, round, sqrt, pow  (機械実数演算)
+--   * List, Tree            (集合型コンストラクタ)
+--   * 組込 atomic 集合 Nat, Int, Real, String, Set
+--   * Bool = {false, true}  (literal Enum 集合)
+
+-- 上記以外のすべて (リスト・木・有理数・桁範囲・算術ヘルパ・畳み込み
+-- 等) は src/stdlib.seki で seki 言語自身で構築されている。
+
+-- ----- まとめ ---------------------------------------------------
+-- リスト・木のコンストラクタとデストラクタはタグ付き 2-tuple として
+-- 集合論的に符号化され、すべて seki で実装されている。Rust 層は
+-- タプル原始演算と機械算術のみを提供する真にミニマルなコアとなった。

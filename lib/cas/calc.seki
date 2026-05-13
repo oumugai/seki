@@ -1,0 +1,106 @@
+-- ===========================================================
+-- lib/cas/calc.seki — 記号微分・積分・代入と数値評価
+--
+-- Sym ADT (lib/cas/sym.seki) を前提。
+--
+-- 公開する名前:
+--   def derive v e     — 記号微分 (連鎖律対応)
+--   def differ v e     — derive + simplify
+--   def integ v e      — 記号積分 (線形 + 単項式 + 初等関数)
+--   def integS v e     — integ + simplify
+--   def subst v c e    — 変数を Int に代入
+--   def evalNum e      — 完全数値化 (Option Int)
+--   def evalAt v c e   — subst + evalNum
+-- ===========================================================
+
+import "sym.seki"
+
+-- ----- 記号微分 (連鎖律含む) ---------------------------------
+def derive := \v e ->
+    match e with
+    | SNum _ -> SNum 0
+    | SVar w -> if w == v then SNum 1 else SNum 0
+    | SNeg u -> SNeg (derive v u)
+    | SAdd u w -> SAdd (derive v u) (derive v w)
+    | SSub u w -> SSub (derive v u) (derive v w)
+    | SMul u w -> SAdd (SMul (derive v u) w) (SMul u (derive v w))
+    | SDiv u w -> SDiv (SSub (SMul (derive v u) w) (SMul u (derive v w))) (SPow w 2)
+    | SPow u n -> SMul (SMul (SNum n) (SPow u (n - 1))) (derive v u)
+    | SSin u -> SMul (SCos u) (derive v u)
+    | SCos u -> SMul (SNeg (SSin u)) (derive v u)
+    | SExp u -> SMul (SExp u) (derive v u)
+    | SLn u  -> SDiv (derive v u) u
+
+def differ := \v e -> simplify (derive v e)
+
+-- ----- 記号積分 (線形 + 単項式 + 初等関数) -----------------
+def integ := \v e ->
+    match e with
+    | SNum c -> SMul (SNum c) (SVar v)
+    | SVar w ->
+        if w == v
+        then SDiv (SPow (SVar v) 2) (SNum 2)
+        else SMul (SVar w) (SVar v)
+    | SNeg u -> SNeg (integ v u)
+    | SAdd u w -> SAdd (integ v u) (integ v w)
+    | SSub u w -> SSub (integ v u) (integ v w)
+    | SMul (SNum c) u -> SMul (SNum c) (integ v u)
+    | SMul u (SNum c) -> SMul (SNum c) (integ v u)
+    | SPow (SVar w) n ->
+        if w == v
+        then SDiv (SPow (SVar v) (n + 1)) (SNum (n + 1))
+        else SMul (SPow (SVar w) n) (SVar v)
+    | SSin (SVar w) ->
+        if w == v then SNeg (SCos (SVar v))
+        else SMul (SSin (SVar w)) (SVar v)
+    | SCos (SVar w) ->
+        if w == v then SSin (SVar v)
+        else SMul (SCos (SVar w)) (SVar v)
+    | SExp (SVar w) ->
+        if w == v then SExp (SVar v)
+        else SMul (SExp (SVar w)) (SVar v)
+    | SLn (SVar w) ->
+        if w == v
+        then SSub (SMul (SVar v) (SLn (SVar v))) (SVar v)
+        else SMul (SLn (SVar w)) (SVar v)
+    | other -> SMul other (SVar v)
+
+def integS := \v e -> simplify (integ v e)
+
+-- ----- 変数代入 (Int → Sym 内のシンボル変数を Num に置換) -----
+def subst := \v c e ->
+    match e with
+    | SNum _ -> e
+    | SVar w -> if w == v then SNum c else e
+    | SNeg u -> SNeg (subst v c u)
+    | SAdd u w -> SAdd (subst v c u) (subst v c w)
+    | SSub u w -> SSub (subst v c u) (subst v c w)
+    | SMul u w -> SMul (subst v c u) (subst v c w)
+    | SDiv u w -> SDiv (subst v c u) (subst v c w)
+    | SPow u n -> SPow (subst v c u) n
+    | SSin u -> SSin (subst v c u)
+    | SCos u -> SCos (subst v c u)
+    | SExp u -> SExp (subst v c u)
+    | SLn u  -> SLn (subst v c u)
+
+-- 完全数値化: simplify 後に SNum か否かで Option Int
+def evalNum := \e ->
+    let s = simplify e in
+    match s with
+    | SNum n -> Some n
+    | _ -> None
+
+-- e に v=c を代入して数値化
+def evalAt := \v c e -> evalNum (subst v c e)
+
+-- 多項式専用の値取り出し (None 時 0): substN v c e |> simplify |> 数値抽出
+def evalSym := \e ->
+    let s = simplify e in
+    match s with
+    | SNum n -> n
+    | _ -> 0
+
+-- n 階微分 (繰り返し differ)
+def derivN := \v n e ->
+    if n == 0 then e
+    else derivN v (n - 1) (differ v e)

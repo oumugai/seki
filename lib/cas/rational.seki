@@ -1,0 +1,115 @@
+-- ===========================================================
+-- lib/cas/rational.seki — 有理関数の正規化と演算
+--
+-- 表現: data RatFn = MkRatFn Poly Poly  (分子, 分母)
+--   Poly は lib/cas/poly.seki の List Int 表現。
+--
+-- 操作は正規化 (約分) 付き。GCD は polyGCD で計算し、両辺を割って簡約。
+--
+-- 公開する名前:
+--   data RatFn = MkRatFn Poly Poly
+--   def numerator / denominator      — アクセサ
+--   def mkRatFn p q                  — 構築 (約分も行う)
+--   def rfAdd / rfSub / rfMul / rfDiv — 演算
+--   def rfNeg / rfInv                — 単項
+--   def rfEq                         — 等価判定 (約分後の構造的)
+--   def rfFromPoly p                 — 多項式から (分母 1)
+-- ===========================================================
+
+import "poly.seki"
+
+data RatFn = MkRatFn Poly Poly
+
+-- ----- アクセサ -----
+def numerator   := \r -> match r with | MkRatFn p _ -> p
+def denominator := \r -> match r with | MkRatFn _ q -> q
+
+-- ----- 整数 GCD (ヘルパ) ※ poly.seki にあるが念のため -----
+-- (poly.seki から polyContent, polyDivByC, polyGCD などを使う)
+
+-- ----- 構築: 自動で約分 -----
+def mkRatFn := \p q ->
+    let g = polyGCD p q in
+    let pn = stripTail p in
+    let qn = stripTail q in
+    if null qn then MkRatFn pn (cons 1 nil)  -- 0 除算回避: 形式的に 1
+    else
+        -- g で割る。g が 1 多項式以外なら polyDivMod で除算。
+        match polyDivMod pn g with
+        | None -> MkRatFn pn qn   -- 約分失敗時はそのまま
+        | Some pr_p ->
+            match polyDivMod qn g with
+            | None -> MkRatFn pn qn
+            | Some pr_q ->
+                let p2 = fst pr_p in
+                let q2 = fst pr_q in
+                -- 分母の主係数が負なら両辺を反転
+                if (polyLead q2) < 0
+                then MkRatFn (polyScale (0 - 1) p2) (polyScale (0 - 1) q2)
+                else MkRatFn p2 q2
+
+def rfFromPoly := \p -> MkRatFn p (cons 1 nil)
+def rfZero := MkRatFn nil (cons 1 nil)
+def rfOne  := MkRatFn (cons 1 nil) (cons 1 nil)
+
+-- ----- 加減算 -----
+-- a/b + c/d = (a*d + c*b) / (b*d)、約分付き
+def rfAdd := \r s ->
+    let a = numerator r in
+    let b = denominator r in
+    let c = numerator s in
+    let d = denominator s in
+    let num = polyAdd (polyMul a d) (polyMul c b) in
+    let den = polyMul b d in
+    mkRatFn num den
+
+def rfSub := \r s ->
+    let a = numerator r in
+    let b = denominator r in
+    let c = numerator s in
+    let d = denominator s in
+    let num = polySub (polyMul a d) (polyMul c b) in
+    let den = polyMul b d in
+    mkRatFn num den
+
+-- ----- 乗算 / 除算 -----
+def rfMul := \r s ->
+    let a = numerator r in
+    let b = denominator r in
+    let c = numerator s in
+    let d = denominator s in
+    mkRatFn (polyMul a c) (polyMul b d)
+
+def rfDiv := \r s ->
+    let a = numerator r in
+    let b = denominator r in
+    let c = numerator s in
+    let d = denominator s in
+    mkRatFn (polyMul a d) (polyMul b c)
+
+def rfNeg := \r ->
+    MkRatFn (polyScale (0 - 1) (numerator r)) (denominator r)
+
+def rfInv := \r ->
+    mkRatFn (denominator r) (numerator r)
+
+-- ----- 数値評価: 分子 / 分母 を c で評価 (有理数) -----
+def rfEvalNum := \r c ->
+    let pv = evalPoly (numerator r) c in
+    let qv = evalPoly (denominator r) c in
+    (pv, qv)
+
+-- ----- 構造的等価 (約分後比較) -----
+-- リストの同一性
+def listEq := \xs ys ->
+    if (null xs) and (null ys) then true
+    else if null xs then false
+    else if null ys then false
+    else if (head xs) != (head ys) then false
+    else listEq (tail xs) (tail ys)
+
+def rfEq := \r s ->
+    let r2 = mkRatFn (numerator r) (denominator r) in
+    let s2 = mkRatFn (numerator s) (denominator s) in
+    (listEq (numerator r2) (numerator s2)) and
+    (listEq (denominator r2) (denominator s2))

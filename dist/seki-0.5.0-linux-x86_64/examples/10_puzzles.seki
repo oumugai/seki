@@ -1,0 +1,74 @@
+-- ===========================================================
+-- 10: 論理パズル — 集合内包と量化子で制約問題を解く
+--
+-- ピタゴラス数, 三人の年齢当て, ナイト・ノーブパズル など
+-- ===========================================================
+
+-- ----- ピタゴラス数 (a, b, c) with a*a + b*b == c*c, a <= b <= c -----
+def UpTo20 := {1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+               11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
+
+def isPyth := \a b c -> a * a + b * b == c * c
+
+-- 5 が斜辺となるピタゴラス数 (3-4-5) は存在する
+theorem pyth_345
+    : exists a in UpTo20, exists b in UpTo20, exists c in UpTo20,
+        a * a + b * b == c * c and a == 3 and b == 4 and c == 5
+    := 3
+
+-- 6-8-10 もある
+theorem pyth_6_8_10
+    : exists c in UpTo20, isPyth 6 8 c
+    := 10
+
+-- ----- 三人の年齢パズル ---------------------------------------
+-- 「Alice, Bob, Carol の年齢の和は 27 で、Alice は Bob より 3 歳上、
+--   Carol は Bob の倍齢」 という条件を満たす年齢の組を探す。
+-- 連立して解くと Bob=6, Alice=9, Carol=12.
+def Ages := {1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+             11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
+
+def constraint := \alice bob carol ->
+    (alice + bob + carol == 27)
+        and (alice == bob + 3)
+        and (carol == 2 * bob)
+
+-- 解の存在 (witness は Alice の年齢 = 9)
+theorem ages_solvable
+    : exists a in Ages, exists b in Ages, exists c in Ages,
+        constraint a b c
+    := 9
+
+-- 解の一意性: 上記制約を満たす Alice の年齢は 9 のみ
+theorem ages_unique_alice
+    : forall a in Ages,
+        (exists b in Ages, exists c in Ages, constraint a b c)
+            == (a == 9)
+    := by eval
+
+-- ----- ピタゴラス数の対称性 ------------------------------------
+theorem pyth_sym
+    : forall a in {3, 4, 5, 6}, forall b in {3, 4, 5, 6}, forall c in {3, 4, 5, 6, 7, 8, 9, 10},
+        isPyth a b c == isPyth b a c
+    := by eval
+
+-- ----- 「3 で割った余り」が等しい類どうしの和は同じ余り --------
+-- 任意の a, b, n in {0..20}, n > 0:  ((a mod n) + (b mod n)) mod n == (a + b) mod n
+def Twenty := {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+               11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
+def Mods := {2, 3, 5, 7}    -- いくつかの法
+
+theorem mod_add_invariant
+    : forall n in Mods,
+        forall a in Twenty, forall b in Twenty,
+            ((a mod n) + (b mod n)) mod n == (a + b) mod n
+    := by eval
+
+-- ----- 鳩の巣原理 (有限版) ------------------------------------
+-- 5 を 6 で割った余りは 0..5 のどれか (5 個の鳩を 6 個の巣に入れる
+-- ことはできるが、6 個入れると必ず重複する)
+def Bins6 := {0, 1, 2, 3, 4, 5}
+theorem mod6_in_bins
+    : forall x in {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13},
+        (x mod 6) in Bins6
+    := by eval

@@ -1,0 +1,81 @@
+-- ===========================================================
+-- sample/ledger/main.seki — CLI driver
+-- ===========================================================
+-- 不変条件と取引適用ロジックは sample/ledger/lib.seki に分離.
+
+import "lib.seki"
+
+-- ===========================================================
+-- 静的: 「取引適用で総和保存」の代数恒等式
+-- ===========================================================
+theorem transfer_preserves_total
+  : forall (a b amt) in Int, (a - amt) + (b + amt) == a + b
+  := by algebra
+
+-- ===========================================================
+-- CLI: JSON 取引履歴を読み込み、適用して結果表示
+-- ===========================================================
+
+def path := if null args then "sample/ledger/transactions.json" else head args
+
+def src_result := readFile path
+def src := match src_result with
+    | Ok s  -> s
+    | Err e ->
+        let _ = eprintln (strConcat "ledger: " e) in
+        let _ = exit 1 in
+        ""
+
+def parsed := jsonParse src
+def doc := match parsed with
+    | Ok j  -> j
+    | Err e ->
+        let _ = eprintln (strConcat "ledger: bad JSON: " e) in
+        let _ = exit 1 in
+        JNull
+
+def asArr := \j -> match j with | JArr xs -> xs | _ -> nil
+def asStr := \j -> match j with | JStr s  -> s  | _ -> ""
+def asInt := \j -> match j with | JNum r  -> floor r | _ -> 0
+
+def parseTx := \j ->
+    let from = match jsonField j "from"   with | Some v -> asStr v | None -> "?" in
+    let to   = match jsonField j "to"     with | Some v -> asStr v | None -> "?" in
+    let amt  = match jsonField j "amount" with | Some v -> asInt v | None -> 0  in
+    mkTx from to amt
+
+def txList := map parseTx (asArr doc)
+
+def seedBalance := 1000
+def names := accountsOf txList
+def initialDict := initialLedger names seedBalance
+def initialTotal := totalOf initialDict
+def finalResult := applyAll txList initialDict
+
+-- ----- 結果表示 -----
+println (strJoin "" ["ledger: ", path])
+println (strJoin "" ["  accounts: ", intToStr (length names),
+                     "   initial total: ", intToStr initialTotal])
+println (strJoin "" ["  transactions: ", intToStr (length txList)])
+println ""
+
+match finalResult with
+| Err e ->
+    let _ = eprintln (strConcat "TRANSACTION FAILED: " e) in
+    exit 2
+| Ok finalDict ->
+    let finalTotal = totalOf finalDict in
+    let showBal = \name ->
+        let bal = match dictGet name finalDict with | Some v -> v | None -> 0 in
+        println (strJoin "" ["  ", name, " : ", intToStr bal])
+    in
+    let _ = println "final balances:" in
+    let _ = forEach names showBal in
+    let _ = println "" in
+    let _ = println (strJoin "" ["initial total: ", intToStr initialTotal]) in
+    let _ = println (strJoin "" ["final   total: ", intToStr finalTotal]) in
+    if initialTotal == finalTotal then
+        println "✓ 総和保存 OK (`by algebra` で証明済)"
+    else
+        let _ = eprintln "✗ 総和が一致しません!" in
+        exit 3

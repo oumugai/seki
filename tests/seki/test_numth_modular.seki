@@ -1,0 +1,26 @@
+-- ===========================================================
+-- tests/seki/test_numth_modular.seki — モジュラー算術 (powMod) + Fermat
+--
+-- 注: lib/numth/modular.seki は廃止された。
+-- modPow は algebra/modular.seki の powMod に統一、
+-- fermatLittle は numth/primes.seki に移動した。
+-- ===========================================================
+
+import "../../lib/algebra/modular.seki"
+import "../../lib/numth/primes.seki"
+
+-- ----- 繰り返し二乗法: powMod n b e = b^e mod n -----
+theorem powmod_2_10_1000 : powMod 1000 2 10 == 24 := by eval     -- 1024 mod 1000
+theorem powmod_3_5_7     : powMod 7 3 5 == 5 := by eval          -- 243 mod 7
+theorem powmod_5_0_13    : powMod 13 5 0 == 1 := by eval
+
+-- 大きい指数: 2^20 mod 1000003 (1000003 は素数)
+theorem powmod_big : powMod 1000003 2 20 == 48573 := by eval     -- 2^20 = 1048576
+
+-- ----- フェルマー小テスト -----
+theorem fermat_2_7   : fermatLittle 2 7 := by eval
+theorem fermat_3_11  : fermatLittle 3 11 := by eval
+theorem fermat_5_13  : fermatLittle 5 13 := by eval
+
+-- 合成数では (Carmichael 数を除き) 大抵失敗
+theorem fermat_composite_2_9 : fermatLittle 2 9 == false := by eval

@@ -1,0 +1,94 @@
+-- ===========================================================
+-- 24: 環と体
+--
+-- 汎用 `isRing` / `isCommutativeRing` / `isField` 述語と Z/nZ 演算で、
+-- **複数の体 (GF(p)) を同じテストで検証**。
+-- ===========================================================
+
+import "algebra/axioms.seki"
+import "algebra/modular.seki"
+
+-- ===========================================================
+-- (ℤ, +, ·) は可換環
+-- ===========================================================
+
+-- 環の公理は forall + by algebra で無限域でも検証
+theorem int_add_assoc
+  : forall (a b c) in Int, (a + b) + c == a + (b + c) := by algebra
+theorem int_add_comm  : forall (a b) in Int, a + b == b + a := by algebra
+theorem int_mul_assoc
+  : forall (a b c) in Int, (a * b) * c == a * (b * c) := by algebra
+theorem int_left_distrib
+  : forall (a b c) in Int, a * (b + c) == a * b + a * c := by algebra
+
+-- 環の派生定理
+theorem int_mul_zero : forall a in Int, a * 0 == 0 := by algebra
+theorem int_neg_mul
+  : forall (a b) in Int, (-a) * b == -(a * b) := by algebra
+
+-- 二項定理
+theorem binom_square
+  : forall (a b) in Int, (a + b) * (a + b) == a*a + 2*a*b + b*b
+  := by algebra
+
+theorem diff_squares
+  : forall (a b) in Int, (a + b) * (a - b) == a*a - b*b
+  := by algebra
+
+-- ===========================================================
+-- 有限環: Z/nZ は任意の n で可換環
+-- ===========================================================
+
+theorem z6_is_commring
+  : isCommutativeRing (Zn 6) 0 1 (negMod 6) (addMod 6) (mulMod 6)
+  := by eval
+
+theorem z10_is_commring
+  : isCommutativeRing (Zn 10) 0 1 (negMod 10) (addMod 10) (mulMod 10)
+  := by eval
+
+theorem z12_is_commring
+  : isCommutativeRing (Zn 12) 0 1 (negMod 12) (addMod 12) (mulMod 12)
+  := by eval
+
+-- ===========================================================
+-- 有限体: GF(p) は p が素数のとき体
+-- ===========================================================
+
+-- GF(2), GF(3), GF(5), GF(7) — 全て体 (p 素数)
+theorem gf2_is_field
+  : isField (Zn 2) 0 1 (negMod 2) (addMod 2) (mulMod 2) (invMod 2)
+  := by eval
+
+theorem gf3_is_field
+  : isField (Zn 3) 0 1 (negMod 3) (addMod 3) (mulMod 3) (invMod 3)
+  := by eval
+
+theorem gf5_is_field
+  : isField (Zn 5) 0 1 (negMod 5) (addMod 5) (mulMod 5) (invMod 5)
+  := by eval
+
+theorem gf7_is_field
+  : isField (Zn 7) 0 1 (negMod 7) (addMod 7) (mulMod 7) (invMod 7)
+  := by eval
+
+-- ===========================================================
+-- 反例: Z/6Z は体ではない (6 が合成数なので 2, 3 に逆元なし)
+-- isField が false を返すことを反証として表現:
+-- ===========================================================
+
+def z6_not_field := isField (Zn 6) 0 1 (negMod 6) (addMod 6) (mulMod 6) (invMod 6)
+theorem z6_field_false : z6_not_field == false := by eval
+
+-- Z/8Z も同様 (合成数)
+def z8_not_field := isField (Zn 8) 0 1 (negMod 8) (addMod 8) (mulMod 8) (invMod 8)
+theorem z8_field_false : z8_not_field == false := by eval
+
+-- ===========================================================
+-- まとめ
+-- ===========================================================
+-- 汎用述語 `isField` / `isCommutativeRing` で:
+--   * GF(2), GF(3), GF(5), GF(7) を体として検証 — 各 p が素数なので
+--   * Z/6Z, Z/8Z, Z/10Z, Z/12Z を可換環として検証
+--   * Z/6Z, Z/8Z は体でないことを反証
+--   * (ℤ, +, ·) を可換環として `by algebra` で無限域検証

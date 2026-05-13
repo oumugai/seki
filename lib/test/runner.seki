@@ -1,0 +1,181 @@
+-- ===========================================================
+-- lib/test/runner.seki — seki 集合論ベースのテストフレームワーク
+-- ===========================================================
+--
+-- 設計:
+--   Layer 1 (静的) — `theorem` + `by eval` / `by algebra` / `by induction`
+--     ファイル読込時に評価. 失敗すれば即 exit (proof error).
+--     例: `theorem t1 : forall x in {1, 2, 3}, identity x == x := by eval`
+--
+--   Layer 2 (動的) — このフレームワークが提供する `assert*` 関数
+--     ランタイムで結果を `TestResult` として収集. `runMain` で集計し
+--     失敗が 1 件でもあれば exit 1.
+--
+-- 集合論的アサーション:
+--   `assertMember` / `assertNotMember` — `in` / `notin`
+--   `assertSubset`                     — `⊆`
+--   `assertSetEq`                      — 双方向包含 (順序非依存)
+--   `forAllInList`                     — リスト全要素に対する property
+--
+-- 通常のアサーション:
+--   `assertEq` / `assertNeq`           — 値の構造的等価
+--   `assertTrue` / `assertFalse`       — Bool
+--   `assertSome` / `assertNone`        — Option
+--   `assertOk` / `assertErr`           — Result
+-- ===========================================================
+
+data TestResult = Pass | FailMsg String
+data TestCase = TestCase String TestResult
+
+-- ----- 述語 -----
+def isPass := \r ->
+    match r with
+    | Pass -> true
+    | FailMsg _ -> false
+
+def isFail := \r -> not (isPass r)
+
+-- ----- 基本アサーション -----
+
+def assertTrue := \cond msg ->
+    if cond then Pass
+    else FailMsg msg
+
+def assertFalse := \cond msg ->
+    if not cond then Pass
+    else FailMsg msg
+
+def assertEq := \expected actual ->
+    if expected == actual then Pass
+    else FailMsg (strJoin "" ["expected ", toStr expected, " but got ", toStr actual])
+
+def assertNeq := \forbidden actual ->
+    if not (forbidden == actual) then Pass
+    else FailMsg (strJoin "" ["forbidden value ", toStr forbidden, " was produced"])
+
+-- ----- 集合論的アサーション -----
+-- 集合の所属・包含・等価.  seki の `in` / `subset` / `==` 演算子を直接使う.
+
+def assertMember := \elem s ->
+    if elem in s then Pass
+    else FailMsg (strJoin "" [toStr elem, " is not a member of set ", toStr s])
+
+def assertNotMember := \elem s ->
+    if elem notin s then Pass
+    else FailMsg (strJoin "" [toStr elem, " is unexpectedly a member of set ", toStr s])
+
+def assertSubset := \a b ->
+    if a subset b then Pass
+    else FailMsg (strJoin "" [toStr a, " is not a subset of ", toStr b])
+
+def assertSetEq := \a b ->
+    if (a subset b) and (b subset a) then Pass
+    else FailMsg (strJoin "" ["set inequality: ", toStr a, " vs ", toStr b])
+
+-- ----- Option / Result -----
+
+def assertSome := \opt ->
+    match opt with
+    | Some _ -> Pass
+    | None   -> FailMsg "expected Some, got None"
+
+def assertNone := \opt ->
+    match opt with
+    | None   -> Pass
+    | Some v -> FailMsg (strConcat "expected None, got Some " (toStr v))
+
+def assertSomeEq := \expected opt ->
+    match opt with
+    | None   -> FailMsg (strJoin "" ["expected Some ", toStr expected, ", got None"])
+    | Some v ->
+        if v == expected then Pass
+        else FailMsg (strJoin "" ["expected Some ", toStr expected, ", got Some ", toStr v])
+
+def assertOk := \res ->
+    match res with
+    | Ok _  -> Pass
+    | Err e -> FailMsg (strConcat "expected Ok, got Err: " (toStr e))
+
+def assertErr := \res ->
+    match res with
+    | Err _ -> Pass
+    | Ok v  -> FailMsg (strConcat "expected Err, got Ok: " (toStr v))
+
+-- ----- 文字列アサーション (テキスト出力検査用) -----
+
+def assertContains := \needle hay ->
+    if strContains needle hay then Pass
+    else FailMsg (strJoin "" ["substring '", needle, "' not found in '", hay, "'"])
+
+def assertNotContains := \needle hay ->
+    if not (strContains needle hay) then Pass
+    else FailMsg (strJoin "" ["substring '", needle, "' unexpectedly found in '", hay, "'"])
+
+-- ----- combinator -----
+
+-- 複数の TestResult を fail-fast で結合
+def allOf := \results ->
+    if null results then Pass
+    else match head results with
+        | FailMsg e -> FailMsg e
+        | Pass -> allOf (tail results)
+
+-- リスト全要素に対して assertion を実行 (forall ベースの property test)
+-- f : Element -> TestResult.  最初の失敗で fail-fast.
+def forAllInList := \xs f ->
+    if null xs then Pass
+    else
+        let r = f (head xs) in
+        match r with
+        | FailMsg e -> FailMsg (strJoin "" ["at element ", toStr (head xs), ": ", e])
+        | Pass -> forAllInList (tail xs) f
+
+-- 列挙集合に対する forall — `toList` で集合の要素列を取り出して forAllInList.
+-- 注意: 内包集合 (Comp) や無限集合は対象外.  そうした集合は seki の `theorem`
+-- + `by eval` / `by algebra` を直接使うべし (階層 2 / 階層 1).
+def forAllInSet := \s f ->
+    -- seki の集合は構築されるとき `Enum` か `Comp` のどちらか.
+    -- 安全のためここでは finite-list 経由でしか確認できない事を docstring 化.
+    -- 実用上は、テスト側で `def xs := [a, b, c]; def s := toSet xs` の形で
+    -- 同じものを生成し forAllInList xs f を呼ぶのが推奨.
+    FailMsg "forAllInSet: prefer `forAllInList` over a List of representative elements; see docs/spec/09-testing.md"
+
+-- 性質を「名前 + 検証関数」で組にする宣言的 API.
+-- 例: describeProperty "factorial is positive" (\() ->
+--          forAllInList [0, 1, 2, 5, 10] (\n -> assertTrue (fact n > 0) "non-positive"))
+def describeProperty := \name check -> TestCase name (check ())
+
+-- ----- テストランナー -----
+-- 与えられた TestCase リストを走らせ、結果を表示し pass/fail を返す.
+
+-- ヘルパ: top-level の再帰関数 (`let rec` よりシンプル)
+def runSuiteImpl := \cs passed failed ->
+    if null cs then (passed, failed)
+    else
+        match head cs with
+        | TestCase name result ->
+            match result with
+            | Pass ->
+                let _ = println (strConcat "  ✓ " name) in
+                runSuiteImpl (tail cs) (passed + 1) failed
+            | FailMsg msg ->
+                let _ = println (strConcat "  ✗ " name) in
+                let _ = println (strConcat "      " msg) in
+                runSuiteImpl (tail cs) passed (failed + 1)
+
+def runSuite := \cases -> runSuiteImpl cases 0 0
+
+-- CLI 向け: スイート名を表示 + サマリ表示 + 失敗時 exit 1
+def runMain := \suiteName cases ->
+    let _ = println (strJoin "" ["=== ", suiteName, " ==="]) in
+    let result = runSuite cases in
+    let passed = fst result in
+    let failed = snd result in
+    let _ = println "" in
+    let summary = strJoin "" ["total: ", intToStr (passed + failed), "  passed: ", intToStr passed, "  failed: ", intToStr failed] in
+    let _ = println summary in
+    if failed > 0 then
+        let _ = eprintln "TEST SUITE FAILED" in
+        exit 1
+    else
+        ()

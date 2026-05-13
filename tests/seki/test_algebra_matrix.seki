@@ -1,0 +1,70 @@
+-- ===========================================================
+-- tests/seki/test_algebra_matrix.seki — 汎用 n×m 行列
+-- ===========================================================
+
+import "../../lib/algebra/matrix.seki"
+
+-- ----- 2x2 行列 -----
+def a := [[1, 2], [3, 4]]
+def b := [[5, 6], [7, 8]]
+
+theorem mat_add
+  : matEq (matAdd a b) [[6, 8], [10, 12]] == true
+  := by eval
+
+theorem mat_sub
+  : matEq (matSub b a) [[4, 4], [4, 4]] == true
+  := by eval
+
+theorem mat_smul
+  : matEq (matSmul 2 a) [[2, 4], [6, 8]] == true
+  := by eval
+
+theorem mat_mul
+  : matEq (matMul a b) [[19, 22], [43, 50]] == true
+  := by eval
+
+theorem mat_transp
+  : matEq (matTranspose a) [[1, 3], [2, 4]] == true
+  := by eval
+
+-- ----- 単位行列 / ゼロ行列 -----
+def i2 := matIdentity 2
+def i3 := matIdentity 3
+
+theorem mat_id_2
+  : matEq i2 [[1, 0], [0, 1]] == true := by eval
+
+theorem mat_id_3
+  : matEq i3 [[1, 0, 0], [0, 1, 0], [0, 0, 1]] == true := by eval
+
+-- ----- 単位行列との積 = 元の行列 -----
+theorem mat_id_left  : matEq (matMul i2 a) a == true := by eval
+theorem mat_id_right : matEq (matMul a i2) a == true := by eval
+
+-- ----- ゼロ行列 -----
+theorem mat_zero23
+  : matEq (matZero 2 3) [[0, 0, 0], [0, 0, 0]] == true := by eval
+
+-- ----- 3x3 行列 -----
+def m3 := [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+
+theorem mat_3x3_id_mul
+  : matEq (matMul i3 m3) m3 == true := by eval
+
+-- 転置の対合: T(T(m)) == m
+theorem mat_transp_involutive
+  : matEq (matTranspose (matTranspose m3)) m3 == true := by eval
+
+-- ----- 矩形行列: 2x3 × 3x2 = 2x2 -----
+def c := [[1, 2, 3], [4, 5, 6]]
+def d := [[7, 8], [9, 10], [11, 12]]
+theorem mat_rect_mul
+  : matEq (matMul c d) [[58, 64], [139, 154]] == true
+  := by eval
+
+-- ----- サイズ -----
+theorem mat_rows : matRows m3 == 3 := by eval
+theorem mat_cols : matCols m3 == 3 := by eval
+theorem mat_rect_rows : matRows c == 2 := by eval
+theorem mat_rect_cols : matCols c == 3 := by eval

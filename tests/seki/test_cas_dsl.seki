@@ -1,0 +1,84 @@
+-- ===========================================================
+-- tests/seki/test_cas_dsl.seki — smart constructor + parseSym
+-- ===========================================================
+
+import "cas/sym_dsl.seki"
+import "cas/calc.seki"
+
+-- ===========================================================
+-- §1. smart constructor 経由の構築 vs 旧 ADT 直接
+-- ===========================================================
+
+-- 旧来: 冗長
+def expr_old := SAdd (SMul (SNum 2) (SPow (SVar "x") 2)) (SNum 3)
+
+-- 新: smart constructor DSL
+def expr_dsl := add (mul (num 2) (sq sx)) (num 3)
+
+-- 新: parseSym で math notation 直書き
+def expr_parsed := parseSym "2 * pow x 2 + 3"
+
+-- 3 通りの構築が同じ Sym になる
+theorem dsl_matches_old   : sym_eq expr_dsl expr_old   := by eval
+theorem parsed_matches_old : sym_eq expr_parsed expr_old := by eval
+
+-- ===========================================================
+-- §2. DSL を使った微積分
+-- ===========================================================
+
+-- f(x) = x³ + 2x² + 5
+def cubic := add (add (cube sx) (scaleBy 2 (sq sx))) (num 5)
+
+-- f'(x) = 3x² + 4x  → at x=2 → 20
+theorem cubic_diff_at_2 : evalAt "x" 2 (differ "x" cubic) == Some 20 := by eval
+
+-- ∫f dx を微分すると f に戻る (at x=1: 1+2+5 = 8)
+def back_cubic := differ "x" (integ "x" cubic)
+theorem cubic_ftc_at_1 : evalAt "x" 1 back_cubic == Some 8 := by eval
+
+-- ===========================================================
+-- §3. parseSym で記法直書き → 微積分
+-- ===========================================================
+
+-- d/dx (x² + 3x + 5) = 2x + 3 (at x=4 → 11)
+def poly := parseSym "pow x 2 + 3 * x + 5"
+theorem parse_diff_at_4 : evalAt "x" 4 (differ "x" poly) == Some 11 := by eval
+
+-- d/dx (sin x) = cos x
+def trig := parseSym "sin x"
+def d_trig := differ "x" trig
+-- 構造的に cos x になっているか
+theorem parse_sin_derives_to_cos
+  : sym_eq d_trig (sym_cos sx) := by eval
+
+-- d/dx (-x + 5) = -1 (at x=10 → -1)
+def linear := parseSym "-x + 5"
+theorem parse_linear_diff : evalAt "x" 100 (differ "x" linear) == Some (0 - 1) := by eval
+
+-- ===========================================================
+-- §4. ネスト・関数合成
+-- ===========================================================
+
+-- d/dx (sin (cos x)) = -sin x * sin (cos x)  (連鎖律)
+def nested := parseSym "sin (cos x)"
+-- at x=0: cos 0 = 1, so derivative = -sin 0 * sin(cos 0) = 0
+-- 構造を見るのみ (数値計算は sin/cos が記号のままなので評価不可)
+def d_nested := differ "x" nested
+d_nested
+
+-- ===========================================================
+-- §5. 数値検証: ライプニッツ規則 (fg)' = f'g + fg'
+-- ===========================================================
+
+def f := parseSym "pow x 2"
+def g := parseSym "pow x 3"
+def fg := mul f g                              -- = x^5
+def lhs := differ "x" fg
+def rhs_part1 := mul (differ "x" f) g
+def rhs_part2 := mul f (differ "x" g)
+def rhs := add rhs_part1 rhs_part2
+
+-- 数値テスト: lhs と rhs が複数点で一致
+theorem leibniz_dsl_at_1 : evalAt "x" 1 lhs == evalAt "x" 1 rhs := by eval
+theorem leibniz_dsl_at_2 : evalAt "x" 2 lhs == evalAt "x" 2 rhs := by eval
+theorem leibniz_dsl_at_3 : evalAt "x" 3 lhs == evalAt "x" 3 rhs := by eval

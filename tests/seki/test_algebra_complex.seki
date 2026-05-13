@@ -1,0 +1,97 @@
+-- ===========================================================
+-- tests/seki/test_algebra_complex.seki — 複素数の検証
+-- ===========================================================
+
+import "../../lib/algebra/complex.seki"
+
+-- ----- 構築とアクセサ -----
+def z1 := mkC 3.0 4.0
+def z2 := mkC 1.0 2.0
+
+theorem re_z1 : reC z1 == 3.0 := by eval
+theorem im_z1 : imC z1 == 4.0 := by eval
+
+-- ----- 加減算 -----
+theorem add_basic
+  : cEq (cAdd z1 z2) (mkC 4.0 6.0) := by eval
+
+theorem sub_basic
+  : cEq (cSub z1 z2) (mkC 2.0 2.0) := by eval
+
+-- ----- 乗算 -----
+-- (3+4i)(1+2i) = (3-8) + (6+4)i = -5 + 10i
+theorem mul_basic
+  : cEq (cMul z1 z2) (mkC (0.0 - 5.0) 10.0) := by eval
+
+-- ----- 虚数単位 -----
+-- i² = -1
+theorem i_squared : cEq (cMul cI cI) (mkC (0.0 - 1.0) 0.0) := by eval
+
+-- (1 + i)² = 2i
+theorem one_plus_i_sq
+  : cEq (cMul (mkC 1.0 1.0) (mkC 1.0 1.0)) (mkC 0.0 2.0) := by eval
+
+-- ----- 共役と絶対値 -----
+-- conj(3 + 4i) = 3 - 4i
+theorem conj_basic
+  : cEq (cConj z1) (mkC 3.0 (0.0 - 4.0)) := by eval
+
+-- |3 + 4i|² = 25
+theorem abs2_basic : cAbs2 z1 == 25.0 := by eval
+
+-- |3 + 4i| = 5
+theorem abs_basic : cAbs z1 == 5.0 := by eval
+
+-- z * conj(z) = |z|² (実数として)
+theorem z_times_conj
+  : cEqApprox 0.0001
+        (cMul z1 (cConj z1))
+        (mkC (cAbs2 z1) 0.0)
+  := by eval
+
+-- ----- 除算 -----
+-- (3+4i) / (1+2i) = ((3+4i)(1-2i))/5 = (3+8 + (-6+4)i)/5 = (11 - 2i)/5 = 2.2 - 0.4i
+theorem div_basic
+  : cEqApprox 0.0001 (cDiv z1 z2) (mkC 2.2 (0.0 - 0.4))
+  := by eval
+
+-- z / z = 1 (z ≠ 0)
+theorem self_div : cEqApprox 0.0001 (cDiv z1 z1) cOne := by eval
+
+-- ----- 環の公理 (代数的): (z1 + z2) + z3 = z1 + (z2 + z3) -----
+def z3 := mkC 5.0 (0.0 - 1.0)
+
+theorem add_assoc
+  : cEqApprox 0.0001
+        (cAdd (cAdd z1 z2) z3)
+        (cAdd z1 (cAdd z2 z3))
+  := by eval
+
+theorem add_comm
+  : cEqApprox 0.0001 (cAdd z1 z2) (cAdd z2 z1)
+  := by eval
+
+theorem mul_comm
+  : cEqApprox 0.0001 (cMul z1 z2) (cMul z2 z1)
+  := by eval
+
+theorem mul_assoc
+  : cEqApprox 0.0001
+        (cMul (cMul z1 z2) z3)
+        (cMul z1 (cMul z2 z3))
+  := by eval
+
+theorem distrib
+  : cEqApprox 0.0001
+        (cMul z1 (cAdd z2 z3))
+        (cAdd (cMul z1 z2) (cMul z1 z3))
+  := by eval
+
+-- ----- 単位元 -----
+theorem add_zero : cEqApprox 0.0001 (cAdd z1 cZero) z1 := by eval
+theorem mul_one  : cEqApprox 0.0001 (cMul z1 cOne) z1 := by eval
+
+-- ----- 加法逆元 -----
+theorem add_neg
+  : cEqApprox 0.0001 (cAdd z1 (cNeg z1)) cZero
+  := by eval

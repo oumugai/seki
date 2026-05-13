@@ -1,0 +1,113 @@
+-- ===========================================================
+-- 15: 集合の定義から forall / exists を検証する
+--
+-- seki の評価器は forall / exists を、集合の*定義*から直接判定できる
+-- 場合は要素を列挙せず即座に答えを返す。これにより無限集合上でも
+-- 健全な検証が by eval だけで可能になる。
+--
+-- 判定される自明ケース:
+--
+--   1. 内包の述語が body と一致:
+--      forall x in {y in S | P(y)}, P(x)  →  true
+--
+--   2. 多項式関係が領域の符号解析で証明可能:
+--      forall n in Nat, n >= 0           →  true (Nat 上で多項式 ≥ 0)
+--      forall x in Int, x*x >= 0         →  true (PSD 2次形式)
+--
+--   3. vacuous:
+--      forall x in {}, anything          →  true
+--      exists x in {}, anything          →  false
+--      exists x in {y | false}, ...       →  false
+--
+-- ===========================================================
+
+-- ----- 内包定義からの自明真 ------------------------------------
+def Pos     := {x in Int | x > 0}
+def NonNeg  := {x in Nat | x >= 0}
+def Even    := {x in Nat | x mod 2 == 0}
+def Within3 := {x in Int | (-3 <= x) and (x <= 3)}
+
+-- 集合の定義に書かれた制約は、その集合の元すべてが満たす
+theorem all_pos_are_pos     : forall x in Pos,     x > 0           := by eval
+theorem all_nn_are_nn       : forall n in NonNeg,  n >= 0          := by eval
+theorem all_even_are_even   : forall n in Even,    n mod 2 == 0    := by eval
+theorem all_w3_in_range     : forall x in Within3, x <= 3          := by eval
+theorem all_w3_in_range_lo  : forall x in Within3, -3 <= x         := by eval
+
+-- bound 変数の名前は無関係 (α-同値)
+def Big := {y in Nat | y > 1000}
+theorem rename_works : forall x in Big, x > 1000 := by eval
+
+-- ----- atomic 集合の定義から従う関係 (代数判定) ------------------
+-- これらはサンプルではなく代数的に判定される
+theorem nat_nonneg     : forall n in Nat, n >= 0       := by eval
+theorem nat_succ_pos   : forall n in Nat, n + 1 > 0    := by eval
+theorem nat_succ_gt    : forall n in Nat, n + 1 > n    := by eval
+theorem int_sq_nn      : forall x in Int, x * x >= 0   := by eval
+theorem int_zero_id    : forall a in Int, a + 0 == a   := by eval
+
+-- 多変数の場合
+theorem int_distrib_eval
+  : forall a in Int, forall b in Int, forall c in Int,
+        a * (b + c) == a * b + a * c
+  := by eval                       -- by algebra と同じ判定が走る
+
+-- ----- 有限集合上の反例検出 -----------------------------------
+-- 列挙集合では完全に判定される
+forall x in {1, 2, 3, 4, 5}, x > 3   -- false (反例: 1, 2, 3)
+forall x in Bool, x                  -- false (反例: false)
+
+-- 注意: 無限 atomic 集合上の `by eval` で代数判定が決まらない場合、
+-- SAMPLE_BOUND までの標本検証にフォールバックする (健全ではない)。
+-- 例: `forall n in Nat, n < 1000` は 0..200 のサンプルで成立するため
+-- true を返してしまう。健全な無限域証明には by algebra / by induction
+-- などの専用戦術を使うこと。
+
+-- ----- 内包の predicate ⇒ body の含意 (現状は予期した body のみ) -
+-- predicate 自体が body と一致する場合は OK
+def StrongPos := {x in Int | x > 100}
+theorem sp_pos : forall x in StrongPos, x > 100 := by eval     -- 自明真
+
+-- 「StrongPos の元は Pos の元」のような含意は現状は厳密には対応していない
+-- (述語の含意 P → Q を一般に解析する手段は今のところない)。
+-- ただし algebra 判定で証明できる範囲なら OK:
+theorem nat_in_pos_succ
+  : forall n in Nat, n + 1 > 0
+  := by eval                       -- n+1 > 0 は Nat 上の代数的事実
+
+-- ----- exists の trivial ----------------------------------------
+exists x in {1, 2, 3}, x == 2         -- true (列挙ベース)
+exists x in {}, x == 0                -- false (空集合)
+
+def Empty := {x in Int | false}
+exists x in Empty, x == 0             -- false (filter empty)
+
+-- 「true は何かの元として存在する」(domain non-empty かつ body=true)
+exists n in Nat, true                 -- true (Nat is non-empty)
+exists x in {1, 2}, true              -- true (集合 non-empty)
+
+-- ----- 内包定義の複合 -------------------------------------------
+-- 二重内包
+def DoubleFiltered := {x in {y in Int | y > 0} | x < 100}
+forall x in DoubleFiltered, x < 100   -- true (述語が body と一致)
+-- forall x in DoubleFiltered, x > 0  -- これも本来真だが、現在は外側の述語のみ参照
+
+-- ----- 「集合 = 型」哲学の実証 -----------------------------------
+-- Bool は文字通り {false, true}
+theorem bool_def : Bool == {false, true} := refl
+
+-- forall x in Bool, x or not x (排中律) は 2 元集合の性質
+theorem em : forall x in Bool, x or (not x) := by eval
+
+-- Nat = {x in Int | x >= 0} と同等であることの確認 (有限範囲)
+def NatPredicate := {x in Int | x >= 0}
+theorem nat_subset_check
+  : forall x in {-3, -2, -1, 0, 1, 2, 3}, (x in Nat) == (x in NatPredicate)
+  := by eval
+
+-- ----- まとめ ---------------------------------------------------
+-- forall / exists は集合の定義から判定できる場合、
+-- (a) サンプリングではなく定義から
+-- (b) 健全な真偽判定で
+-- 答えを返す。これにより `by eval` が無限集合上でも有用になる場面が
+-- 多くなった。

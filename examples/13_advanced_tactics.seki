@@ -1,0 +1,129 @@
+-- ===========================================================
+-- 13: 高度な証明戦術 — 不等式・div/mod・構造帰納法・強帰納法
+-- ===========================================================
+
+-- ----- 不等式 (by algebra) ---------------------------------------
+-- Nat 上の単純な不等式
+theorem nat_nonneg     : forall n in Nat, n >= 0 := by algebra
+theorem succ_gt_self   : forall n in Nat, n + 1 > n := by algebra
+theorem succ_neq_self  : forall n in Nat, n + 1 != n := by algebra
+
+-- Int 上の整数恒等式
+theorem square_nonneg  : forall x in Int, x * x >= 0 := by algebra
+
+-- Cauchy-Schwarz の特殊版: (a-b)² ≥ 0 ⇔ a² + b² ≥ 2ab
+theorem cauchy_2var
+  : forall a in Int, forall b in Int,
+        a*a + b*b >= 2 * a * b
+  := by algebra
+
+-- 完全平方の自然版
+theorem perfect_square
+  : forall x in Int, forall y in Int,
+        x*x + 2*x*y + y*y >= 0
+  := by algebra
+
+-- 3変数の半正定値2次形式
+theorem psd_3var
+  : forall a in Int, forall b in Int, forall c in Int,
+        a*a + b*b + c*c >= 0
+  := by algebra
+
+-- ----- 整数除算と mod (定数除数) ---------------------------------
+theorem half_double
+  : forall n in Int, (2 * n) / 2 == n
+  := by algebra
+
+theorem div_floor
+  : forall n in Int, (3 * n + 6) / 3 == n + 2
+  := by algebra
+
+theorem even_mod
+  : forall n in Int, (2 * n) mod 2 == 0
+  := by algebra
+
+theorem odd_mod
+  : forall n in Int, (2 * n + 1) mod 2 == 1
+  := by algebra
+
+theorem mod7_const
+  : forall n in Int, (7 * n + 3) mod 7 == 3
+  := by algebra
+
+-- 倍数判定: 2*n は 2 で割り切れる
+theorem two_divides
+  : forall n in Int, ((2 * n) / 2) * 2 == 2 * n
+  := by algebra
+
+-- ----- 帰納法 + 不等式 ------------------------------------------
+def sum := \n -> if n == 0 then 0 else n + sum (n - 1)
+
+theorem sum_nonneg : forall n in Nat, sum n >= 0 := by induction
+theorem sum_grows : forall n in Nat, sum (n + 1) > sum n := by induction
+
+-- ----- リスト構造帰納法 -----------------------------------------
+def listLen := \xs -> if null xs then 0 else 1 + listLen (tail xs)
+def listSum := \xs -> if null xs then 0 else (head xs) + listSum (tail xs)
+
+theorem list_len_nonneg
+  : forall xs in (List Int), listLen xs >= 0
+  := by induction
+
+theorem list_len_succ_gt
+  : forall xs in (List Int), 1 + listLen xs > listLen xs
+  := by induction
+
+-- append (右恒等元): xs ++ [] = xs (長さ・和が保たれる)
+def appendL := \xs ys -> if null xs then ys else cons (head xs) (appendL (tail xs) ys)
+
+theorem app_len_id
+  : forall xs in (List Int), listLen (appendL xs nil) == listLen xs
+  := by induction
+
+theorem app_sum_id
+  : forall xs in (List Int), listSum (appendL xs nil) == listSum xs
+  := by induction
+
+-- ----- 木構造帰納法 ---------------------------------------------
+def treeSize := \t ->
+    if isLeaf t then 0
+    else 1 + treeSize (treeLeft t) + treeSize (treeRight t)
+
+def treeSum := \t ->
+    if isLeaf t then 0
+    else (treeVal t) + treeSum (treeLeft t) + treeSum (treeRight t)
+
+-- 構築の確認
+def t1 := node (node leaf 1 leaf) 2 (node leaf 3 leaf)
+treeSize t1            -- 3
+treeSum t1             -- 6 (=1+2+3)
+
+theorem tree_size_nonneg
+  : forall t in (Tree Int), treeSize t >= 0
+  := by induction
+
+theorem tree_size_refl
+  : forall t in (Tree Int), treeSize t == treeSize t
+  := by induction
+
+theorem tree_sum_refl
+  : forall t in (Tree Int), treeSum t == treeSum t
+  := by induction
+
+-- ----- 強帰納法 (Fibonacci) -------------------------------------
+def fib := \n -> if n < 2 then n else fib (n - 1) + fib (n - 2)
+
+fib 0                  -- 0
+fib 1                  -- 1
+fib 10                 -- 55
+
+-- fib n ≥ 0:  通常の帰納法では一段だけでは届かない
+-- (fib(k+1) は fib k と fib (k-1) に依存するため)
+theorem fib_nonneg : forall n in Nat, fib n >= 0 := by strong_induction
+
+-- ----- 累積効果: combine all -----------------------------------
+-- xs の長さは 0 以上 AND xs の長さは tail xs の長さ + 1 (cons の場合)
+-- これらは構造帰納法で一気に証明できる
+theorem combined_list_props
+  : forall xs in (List Int), listLen xs + 1 > listLen xs
+  := by induction

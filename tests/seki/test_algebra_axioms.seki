@@ -1,0 +1,47 @@
+-- ===========================================================
+-- tests/seki/test_algebra_axioms.seki — 汎用代数公理 + modular
+-- ===========================================================
+
+import "../../lib/algebra/axioms.seki"
+import "../../lib/algebra/modular.seki"
+
+-- ----- 個別公理 (Z/12Z, +) -----
+theorem z12_assoc : isAssoc (Zn 12) (addMod 12) := by eval
+theorem z12_comm  : isCommutative (Zn 12) (addMod 12) := by eval
+theorem z12_id    : isIdentity (Zn 12) (addMod 12) 0 := by eval
+theorem z12_inv   : hasInverses (Zn 12) (addMod 12) 0 (negMod 12) := by eval
+theorem z12_closed : isClosed (Zn 12) (addMod 12) := by eval
+
+-- ----- 構造段階の確認 -----
+theorem z12_is_monoid : isMonoid (Zn 12) (addMod 12) 0 := by eval
+theorem z12_is_group  : isGroup (Zn 12) (addMod 12) 0 (negMod 12) := by eval
+theorem z12_is_abelian : isAbelianGroup (Zn 12) (addMod 12) 0 (negMod 12) := by eval
+
+-- ----- 他の Z/nZ も同じ公理で検証 -----
+theorem z3_is_abelian : isAbelianGroup (Zn 3) (addMod 3) 0 (negMod 3) := by eval
+theorem z6_is_abelian : isAbelianGroup (Zn 6) (addMod 6) 0 (negMod 6) := by eval
+
+-- ----- Bool xor は Z/2Z と同型 -----
+def xorB := \a b -> if a then (not b) else b
+theorem bool_xor_assoc : isAssoc Bool xorB := by eval
+theorem bool_xor_comm  : isCommutative Bool xorB := by eval
+theorem bool_xor_group : isAbelianGroup Bool xorB false (\b -> b) := by eval
+
+-- ----- 環: (Z/5Z, +, ·) -----
+theorem z5_is_ring
+  : isRing (Zn 5) 0 1 (negMod 5) (addMod 5) (mulMod 5)
+  := by eval
+
+theorem z5_is_commring
+  : isCommutativeRing (Zn 5) 0 1 (negMod 5) (addMod 5) (mulMod 5)
+  := by eval
+
+-- ----- 体: Z/5Z は素数 5 を法とする体 = GF(5) -----
+theorem z5_is_field
+  : isField (Zn 5) 0 1 (negMod 5) (addMod 5) (mulMod 5) (invMod 5)
+  := by eval
+
+-- 同様に GF(7), GF(11) も体 (素数を法とする)
+theorem z7_is_field
+  : isField (Zn 7) 0 1 (negMod 7) (addMod 7) (mulMod 7) (invMod 7)
+  := by eval

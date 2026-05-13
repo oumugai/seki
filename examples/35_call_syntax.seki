@@ -1,0 +1,111 @@
+-- ===========================================================
+-- 35: 関数呼出構文 — curried と C 流の共存 (Phase 11)
+-- ===========================================================
+--
+-- seki は 2 種類の呼出構文を持つ:
+--
+--   1. ML/Haskell 流 (curried, 空白区切り):
+--        f a b c           -- App(f, [a, b, c])
+--
+--   2. C 流 (Phase 11 で追加, 括弧 + カンマ):
+--        f(a, b, c)        -- App(f, [a, b, c])
+--
+-- どちらも **意味的に等価** で、混在可能.  `f` と `(` が **隣接**
+-- (空白なし) であることが C 流の識別子.
+-- ===========================================================
+
+-- ----- 等価性: 各組は同じ結果 -----
+
+theorem same_strLen
+  : strLen("hello") == strLen "hello"
+  := by eval
+
+theorem same_strConcat
+  : strConcat("ab", "cd") == strConcat "ab" "cd"
+  := by eval
+
+theorem same_intToStr
+  : intToStr(42) == intToStr 42
+  := by eval
+
+theorem same_bitXor
+  : bitXor(255, 15) == bitXor 255 15
+  := by eval
+
+-- ----- 高階関数も両流 -----
+
+def addOne := \n -> n + 1
+def double := \n -> n * 2
+
+-- C 流で書く
+theorem c_style_addOne  : addOne(41) == 42 := by eval
+theorem c_style_double  : double(21) == 42 := by eval
+
+-- ----- 関数のチェーン -----
+
+theorem chain_c_style
+  : double(addOne(20)) == 42
+  := by eval
+
+theorem chain_curried
+  : double (addOne 20) == 42
+  := by eval
+
+-- ----- f(a)(b): 高階呼出のチェーン -----
+
+def adder := \x -> \y -> x + y
+
+theorem chain_higher_order_c
+  : adder(3)(4) == 7
+  := by eval
+
+theorem chain_higher_order_curried
+  : adder 3 4 == 7
+  := by eval
+
+-- ----- f() で unit 引数呼出 -----
+
+def constantly42 := \_ -> 42
+
+theorem unit_call_c   : constantly42() == 42 := by eval
+theorem unit_call_old : constantly42 () == 42 := by eval
+
+-- ----- 即時呼出 (\x -> ...)(value) -----
+
+theorem iife
+  : (\x -> x * x)(7) == 49
+  := by eval
+
+-- ----- タプル渡しと C 流の disambiguation -----
+-- `fst (1, 2)` (空白あり) → fst にタプル渡し → 1
+-- `fst((1, 2))` (隣接 `(`) → call fst with 1 arg, the inner `(1, 2)` is a tuple
+-- 両方とも結果は 1 (fst が 1 引数だから)
+
+theorem fst_curried : fst (1, 2) == 1 := by eval
+theorem fst_c_style : fst((1, 2)) == 1 := by eval
+
+-- ----- 混在 -----
+
+-- map(\x -> x*x, [1, 2, 3]) と map (\x -> x*x) [1, 2, 3] は同じ
+def squared_c       := map((\n -> n * n), [1, 2, 3, 4, 5])
+def squared_curried := map (\n -> n * n) [1, 2, 3, 4, 5]
+
+theorem squared_eq : squared_c == squared_curried := by eval
+
+-- ----- 集合論的に: C 流呼出を入れた `forall` -----
+
+-- finite forall + by eval を使うと、C 流呼出を含む式の universal claim
+-- が証明できる.
+theorem fp_c_style
+  : forall x in {0 - 2, 0 - 1, 0, 1, 2}, double(x) == 2 * x
+  := by eval
+
+-- ===========================================================
+-- まとめ
+-- ===========================================================
+-- * curried `f a b c` と C 流 `f(a, b, c)` は意味的に等価
+-- * 識別子: `f` と `(` の **隣接** (空白なし) で C 流と判定
+-- * `f(a, b)` → 2 引数呼出、`f (a, b)` → タプル 1 引数渡し
+-- * `f()` → unit 引数呼出 (`f ()` と同じ)
+-- * チェーン: `f(a)(b)` で高階呼出
+-- * 即時呼出: `(\x -> ...)(5)`

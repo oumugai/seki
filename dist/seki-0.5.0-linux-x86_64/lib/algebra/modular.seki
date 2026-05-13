@@ -1,0 +1,48 @@
+-- ===========================================================
+-- lib/algebra/modular.seki — モジュラー算術 Z/nZ
+--
+-- すべての演算は法 n でパラメータ化。負数も `(x mod n + n) mod n` で
+-- 0..n-1 に正規化する。
+--
+-- gcd / extGcd の実装は `numth/gcd.seki` を import。invMod (乗法逆元) は
+-- 拡張 Euclid を使う。
+--
+-- 公開する名前:
+--   def Zn n                — 集合 {0, 1, ..., n-1}
+--   def normMod n a         — a mod n を 0..n-1 に正規化
+--   def addMod n a b        — (a + b) mod n
+--   def subMod n a b        — (a - b) mod n
+--   def mulMod n a b        — (a * b) mod n
+--   def negMod n a          — -a mod n
+--   def powMod n b e        — b^e mod n (繰り返し二乗)
+--   def invMod n a          — a の乗法逆元 (gcd(a,n)=1 のとき)、なければ 0
+-- ===========================================================
+
+import "numth/gcd.seki"
+
+def Zn := \n -> {x in Int | (0 <= x) and (x < n)}
+
+-- 負数を含む int を 0..n-1 に正規化
+def normMod := \n a -> ((a mod n) + n) mod n
+
+def addMod := \n a b -> normMod n (a + b)
+def subMod := \n a b -> normMod n (a - b)
+def mulMod := \n a b -> normMod n (a * b)
+def negMod := \n a -> normMod n (0 - a)
+
+-- 繰り返し二乗による b^e mod n
+def powMod := \n b e ->
+    if e == 0 then 1 mod n
+    else if e mod 2 == 0 then
+        let half = powMod n b (e / 2) in
+        mulMod n half half
+    else mulMod n b (powMod n b (e - 1))
+
+-- ----- 乗法逆元 -----
+-- a * x ≡ 1 (mod n) を満たす x ∈ [0, n)。gcd(a, n) ≠ 1 なら 0 を返す。
+def invMod := \n a ->
+    let t = extGcd a n in
+    let g = egcd_g t in
+    let x = egcd_x t in
+    if g != 1 then 0
+    else normMod n x

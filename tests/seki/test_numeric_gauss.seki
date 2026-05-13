@@ -1,0 +1,31 @@
+-- ===========================================================
+-- tests/seki/test_numeric_gauss.seki — Gauss 消去 (連立線形方程式)
+-- ===========================================================
+
+import "../../lib/numeric/gauss.seki"
+
+def absR := \r -> if r < 0.0 then 0.0 - r else r
+
+-- ----- 2 元連立: x+y=3, 2x-y=0 → x=1, y=2 -----
+def sys1 := [[1.0, 1.0, 3.0], [2.0, 0.0 - 1.0, 0.0]]
+def sol1 := gauss sys1
+
+theorem gauss_2x : absR ((nth 0 sol1) - 1.0) < 0.00001 := by eval
+theorem gauss_2y : absR ((nth 1 sol1) - 2.0) < 0.00001 := by eval
+
+-- ----- 3 元連立: x+y+z=6, 2x+y-z=1, x-y+2z=5 → x=1, y=2, z=3 -----
+def sys2 := [[1.0, 1.0, 1.0, 6.0],
+             [2.0, 1.0, 0.0 - 1.0, 1.0],
+             [1.0, 0.0 - 1.0, 2.0, 5.0]]
+def sol2 := gauss sys2
+
+theorem gauss_3x : absR ((nth 0 sol2) - 1.0) < 0.00001 := by eval
+theorem gauss_3y : absR ((nth 1 sol2) - 2.0) < 0.00001 := by eval
+theorem gauss_3z : absR ((nth 2 sol2) - 3.0) < 0.00001 := by eval
+
+-- ----- 別例: 2x+y=5, x-y=1 → x=2, y=1 -----
+def sys3 := [[2.0, 1.0, 5.0], [1.0, 0.0 - 1.0, 1.0]]
+def sol3 := gauss sys3
+
+theorem gauss_b_x : absR ((nth 0 sol3) - 2.0) < 0.00001 := by eval
+theorem gauss_b_y : absR ((nth 1 sol3) - 1.0) < 0.00001 := by eval

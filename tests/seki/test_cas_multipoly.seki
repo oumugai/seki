@@ -1,0 +1,77 @@
+-- ===========================================================
+-- tests/seki/test_cas_multipoly.seki — 多変数多項式
+-- ===========================================================
+
+import "../../lib/cas/multipoly.seki"
+
+-- x = (1, [1, 0]) のみのリスト
+-- y = (1, [0, 1]) のみのリスト
+
+-- ----- 基本構築 -----
+-- 0 多項式
+theorem mp_zero_empty : null mpZero == true := by eval
+
+-- 1 多項式 (定数 1)
+def mp1 := mp_const 1
+theorem mp_one_size : length mp1 == 1 := by eval
+
+-- ----- 加算 -----
+-- x + y = [(1,[1,0]), (1,[0,1])]
+def mp_xpy := mpAdd mp_x mp_y
+theorem mp_add_size : length mp_xpy == 2 := by eval
+
+-- 2x = [(2,[1,0])]
+def mp_2x := mpAdd mp_x mp_x
+theorem mp_2x_size  : length mp_2x == 1 := by eval
+theorem mp_2x_coef  : fst (head mp_2x) == 2 := by eval
+
+-- x - x = 0
+def mp_diff := mpSub mp_x mp_x
+theorem mp_diff_zero : null mp_diff == true := by eval
+
+-- ----- 乗算 -----
+-- x * y = [(1, [1, 1])]
+def mp_xy := mpMul mp_x mp_y
+theorem mp_xy_size : length mp_xy == 1 := by eval
+theorem mp_xy_coef : fst (head mp_xy) == 1 := by eval
+
+-- x * x = x^2 = [(1, [2, 0])]
+def mp_xx := mpMul mp_x mp_x
+theorem mp_xx_size : length mp_xx == 1 := by eval
+-- expvec[0] = 2
+def mp_xx_exp0 := head (snd (head mp_xx))
+theorem mp_xx_x_deg : mp_xx_exp0 == 2 := by eval
+
+-- 分配律: x * (x + y) == x^2 + xy
+def mp_lhs := mpMul mp_x (mpAdd mp_x mp_y)
+def mp_rhs := mpAdd (mpMul mp_x mp_x) (mpMul mp_x mp_y)
+
+-- LHS と RHS が同じ構造かどうか: 引き算が空 (= 0)
+def mp_check := mpSub mp_lhs mp_rhs
+theorem mp_distrib : null mp_check == true := by eval
+
+-- ----- 主項 / 主係数 -----
+-- p = x^2 + 2xy + 3y^2 (lex で x^2 > xy > y^2 なので主項は x^2)
+def mp_x2 := mpMul mp_x mp_x
+def mp_xy_doubled := mpScale 2 (mpMul mp_x mp_y)
+def mp_y2_tripled := mpScale 3 (mpMul mp_y mp_y)
+def mp_poly := mpAdd mp_x2 (mpAdd mp_xy_doubled mp_y2_tripled)
+
+theorem mp_lc : mpLC mp_poly == 1 := by eval   -- 主係数 1 (x^2 の係数)
+-- 主指数ベクトル [2, 0] (= x^2)
+def mp_le := mpLE mp_poly
+def mp_le_x := head mp_le
+def mp_le_y := head (tail mp_le)
+theorem mp_le_x_is_2 : mp_le_x == 2 := by eval
+theorem mp_le_y_is_0 : mp_le_y == 0 := by eval
+
+-- ----- 多変数除算: F = x^2 + 2xy + y^2 = (x+y)^2 を G = x+y で割ると x+y -----
+def mp_xpy_sq := mpMul mp_xpy mp_xpy
+def mp_rem_test := mpRem mp_xpy_sq (cons mp_xpy nil)
+theorem mp_div_rem_zero : null mp_rem_test == true := by eval
+
+-- ----- S-多項式: spol(x, y) = ? -----
+-- LCM(x, y) = xy, S = (xy/x)*x - (xy/y)*y = y*x - x*y = 0
+-- (簡易整数係数版なので符号と係数調整の結果が 0)
+def mp_spol_xy := spol mp_x mp_y
+theorem mp_spol_xy_zero : null mp_spol_xy == true := by eval

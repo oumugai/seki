@@ -1,0 +1,140 @@
+-- ===========================================================
+-- 34: Phase 5 — Bytecode VM / parMap / IO 強制 / SMT-lite / LSP
+--
+-- Phase 5 で追加:
+--   §1. Bytecode VM (`vmEval` / `vmTime` / `vmCompiles`)
+--   §2. parMap — 真の並列写像
+--   §3. IO モナド強制 (`Int -> IO Int` 型のサンプル検査をスキップ)
+--   §4. SMT-lite (`linarithProve` / `linarithCounter`) — 線形整数決定手続き
+--   §5. LSP — 別バイナリ `seki-lsp` (デモは別途 JSON-RPC で)
+-- ===========================================================
+
+-- ===========================================================
+-- §1. Bytecode VM
+-- ===========================================================
+
+-- vmEval は算術 + if/let/Bool をコンパイルし stack VM で実行
+theorem vm_arith    : vmEval "1 + 2 * 3 - 4" == 3 := by eval
+theorem vm_let      : vmEval "let x = 10 in let y = 20 in x * y" == 200 := by eval
+theorem vm_if       : vmEval "if 7 < 10 then 1 else 0" == 1 := by eval
+theorem vm_nested   : vmEval "let x = 5 in if x > 0 then x * x else 0 - x" == 25 := by eval
+theorem vm_mod      : vmEval "100 mod 7" == 2 := by eval
+theorem vm_compound : vmEval "let n = 6 in (n * (n + 1)) / 2" == 21 := by eval
+
+-- 短絡評価
+theorem vm_and_short : vmEval "false and (1 / 0 == 0)" == false := by eval
+theorem vm_or_short  : vmEval "true or (1 / 0 == 0)"  == true  := by eval
+
+-- vmCompiles は subset 判定
+theorem vm_can_arith   : vmCompiles "1 + 2 * 3" == true := by eval
+theorem vm_cant_lambda : vmCompiles "\\x -> x" == false := by eval
+theorem vm_cant_set    : vmCompiles "{1, 2, 3}" == false := by eval
+
+-- ベンチマーク: 100,000 回の評価で速度を測定 (環境依存なのでテストは緩い)
+def bench_n := 100000
+def bench_expr := "let x = 42 in let y = 17 in (x * y + x - y) mod 1000"
+def bench_ms := vmTime bench_n bench_expr
+-- 普通の環境で 100k 回が 1 秒以内に収まることだけ確認
+theorem vm_fast : bench_ms < 1000 := by eval
+
+-- ===========================================================
+-- §2. parMap — 真の並列写像
+-- ===========================================================
+
+-- 純粋関数を並列に適用
+def squares := parMap (\n -> n * n) [1, 2, 3, 4, 5]
+theorem par_squares : squares == [1, 4, 9, 16, 25] := by eval
+
+-- 副作用は共有 atomic 経由で観測可能
+def parCnt := atomicNew 0
+def parWork := \n -> let _ = atomicAdd parCnt n in n * 10
+def parResults := parMap parWork [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+theorem par_results_ok : parResults == [10, 20, 30, 40, 50, 60, 70, 80, 90, 100] := by eval
+theorem par_atomic_sum : atomicGet parCnt == 55 := by eval     -- 1+2+...+10
+
+-- ===========================================================
+-- §3. IO モナド強制
+-- ===========================================================
+--
+-- `def f : A -> IO B := \x -> 副作用付き body` のサンプル検査が
+-- 副作用を実行しないようになった (Phase 5 で IO を「効果マーカ」
+-- として認識し、型注釈時の eval をスキップする).
+
+-- これは IO 関数 — 型注釈の検証時に呼ばれてはいけない
+def announcer : Int -> IO Int := \n ->
+    let _ = atomicAdd parCnt n in    -- もし呼ばれたら parCnt が増える
+    n * 2
+
+-- announcer を一度も呼ばないので、parCnt は §2 から変化していないはず
+theorem io_not_called_during_check : atomicGet parCnt == 55 := by eval
+
+-- 実際に呼ぶと副作用が走る
+def callOnce := announcer 100
+theorem io_called_actually : atomicGet parCnt == 155 := by eval     -- 55 + 100
+theorem io_returns_correct : callOnce == 200 := by eval
+
+-- ===========================================================
+-- §4. SMT-lite — 線形整数決定手続き
+-- ===========================================================
+--
+-- linarithProve var hyps goal: var に関する線形不等式の体系で
+-- hyps が成り立つすべての整数 var について goal が成り立つかを決定.
+
+-- 単純な仮説からの導出
+theorem li_basic : linarithProve "x" ["x > 0"] "x + 1 > 0" == Some true := by eval
+theorem li_chain : linarithProve "x" ["x > 0", "x < 100"] "x + 1 > 0" == Some true := by eval
+theorem li_neg   : linarithProve "x" ["x > 0"] "x > 0 - 5" == Some true := by eval
+
+-- 反証可能なケース
+theorem li_refute_strong :
+    linarithProve "x" ["x > 0"] "x > 1000" == Some false
+  := by eval
+
+-- 反例の取得
+theorem li_counter_at_1 :
+    linarithCounter "x" ["x > 0", "x < 100"] "x > 50" == Some 1
+  := by eval
+
+-- 真な不等式の counter は None
+theorem li_no_counter :
+    linarithCounter "x" ["x > 0"] "x + 1 > 0" == None
+  := by eval
+
+-- 矛盾仮説からは何でも証明可能 (vacuous)
+theorem li_vacuous :
+    linarithProve "x" ["x > 10", "x < 5"] "x == 999" == Some true
+  := by eval
+
+-- 範囲が決定する強い結論
+theorem li_strict_bound :
+    linarithProve "x" ["x >= 5", "x <= 5"] "x == 5" == Some true
+  := by eval
+
+-- ===========================================================
+-- §5. LSP — 別バイナリ
+-- ===========================================================
+--
+-- `cargo run --bin seki-lsp` で LSP サーバ起動.
+-- JSON-RPC over stdio で:
+--   * initialize / shutdown / exit
+--   * textDocument/didOpen / didChange / didSave / didClose
+--   * publishDiagnostics (parse error を診断として送信)
+--
+-- VS Code / Neovim クライアントから接続すると seki ファイル中の
+-- パースエラーが下線で表示される.
+
+-- ===========================================================
+-- まとめ — Phase 5 で seki に追加された機能
+-- ===========================================================
+-- 1. Bytecode VM: スタック型 VM、算術/制御フロー subset を最低 ~10x 高速化
+-- 2. parMap: List 上で関数を並列適用 (OS thread pool)
+-- 3. IO 強制: `IO X` を返す関数のサンプル検査をスキップ — 副作用が型検査時に走らない
+-- 4. SMT-lite: 一変数線形整数決定手続き (Fourier-Motzkin の縮退版)
+-- 5. LSP: 別バイナリで JSON-RPC + 診断発行
+--
+-- これらを集合論セマンティクスの上に重ねることで、seki は
+-- 「証明できる Mathematica + 検証付きスクリプト」の方向に
+-- 大きく前進した. ただし production レベルにはまだ距離があり、
+-- 性能の更なる改善 (ネイティブコンパイル)、多変数 SMT、async 本体、
+-- LSP の機能拡張 (hover/completion) は次フェーズ以降.

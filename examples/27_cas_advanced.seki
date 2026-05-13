@@ -1,0 +1,125 @@
+-- ===========================================================
+-- 27: 高度な CAS — 多項式・GCD・factor・solve・BigInt
+--
+-- `lib/cas/poly.seki`, `lib/cas/solve.seki`, `lib/cas/bigint.seki` を
+-- import。多項式正規化・GCD・因数分解・方程式求解・任意精度整数の demo。
+-- ===========================================================
+
+import "cas/poly.seki"
+import "cas/solve.seki"
+import "cas/bigint.seki"
+
+-- ===========================================================
+-- §1. 多項式展開: (x+1)^n を多項式正規形に
+--    parseSym で数式を直接書ける。
+-- ===========================================================
+
+def quint := toPoly (parseSym "pow (x + 1) 5")
+-- 二項定理: (x+1)^5 の値検証
+theorem binom5_at_0 : evalPoly quint 0 == 1   := by eval
+theorem binom5_at_1 : evalPoly quint 1 == 32  := by eval     -- 2^5
+theorem binom5_at_2 : evalPoly quint 2 == 243 := by eval     -- 3^5
+
+-- (x+1)² と x²+2x+1 の同値性
+def lhsSq := toPoly (parseSym "pow (x + 1) 2")
+def rhsSq := toPoly (parseSym "pow x 2 + 2 * x + 1")
+theorem expand_eq_3 : evalPoly lhsSq 3 == evalPoly rhsSq 3 := by eval
+theorem expand_eq_7 : evalPoly lhsSq 7 == evalPoly rhsSq 7 := by eval
+
+-- ===========================================================
+-- §2. 多項式 GCD: gcd(x²-1, x²-3x+2) = x-1 (PRS algorithm)
+-- ===========================================================
+
+def p_sq_minus_1 := cons (0 - 1) (cons 0 (cons 1 nil))
+def p_quad := cons 2 (cons (0 - 3) (cons 1 nil))
+def gcd_result := polyGCD p_sq_minus_1 p_quad
+
+theorem gcd_at_1 : evalPoly gcd_result 1 == 0 := by eval
+theorem gcd_at_2 : evalPoly gcd_result 2 == 1 := by eval
+theorem gcd_at_3 : evalPoly gcd_result 3 == 2 := by eval
+
+-- ===========================================================
+-- §3. 因数分解: x³ - 6x² + 11x - 6 = (x-1)(x-2)(x-3)
+-- ===========================================================
+
+def p_cubic := cons (0 - 6) (cons 11 (cons (0 - 6) (cons 1 nil)))
+def fact_cubic := factor p_cubic
+def roots_cubic := fst fact_cubic
+
+def sumOfList := \rs -> foldr (\x y -> x + y) 0 rs
+def productOfList := \rs -> foldr (\x y -> x * y) 1 rs
+
+theorem cubic_sum     : sumOfList roots_cubic == 6 := by eval
+theorem cubic_product : productOfList roots_cubic == 6 := by eval
+
+-- x² - 5x + 6 = (x-2)(x-3)
+def p_625 := cons 6 (cons (0 - 5) (cons 1 nil))
+def fact_quad := factor p_625
+def roots_quad := fst fact_quad
+theorem quad_sum     : sumOfList roots_quad == 5 := by eval
+theorem quad_product : productOfList roots_quad == 6 := by eval
+
+-- ===========================================================
+-- §4. 方程式求解: 線形 / 2 次
+-- ===========================================================
+
+-- 2x + 6 = 0 → x = -3
+theorem solve_lin_2x6 : checkRat (solveLinear 2 6) (0 - 3) 1 := by eval
+
+-- 5x - 15 = 0 → x = 3
+theorem solve_lin_5x15 : checkRat (solveLinear 5 (0 - 15)) 3 1 := by eval
+
+-- a = 0 で b ≠ 0: 解なし
+theorem solve_lin_degen :
+    match solveLinear 0 5 with
+    | None -> true
+    | _ -> false
+  := by eval
+
+-- 2 次方程式: x² - 5x + 6 = 0 → 2 実根
+theorem solve_quad_2roots :
+    match solveQuad 1 (0 - 5) 6 with
+    | TwoSol _ _ -> true
+    | _ -> false
+  := by eval
+
+-- x² + 1 = 0 → 実数解なし
+theorem solve_quad_noreal :
+    match solveQuad 1 0 1 with
+    | NoRealSol -> true
+    | _ -> false
+  := by eval
+
+-- x² - 2x + 1 = 0 → 重根
+theorem solve_quad_double :
+    match solveQuad 1 (0 - 2) 1 with
+    | OneSol _ -> true
+    | _ -> false
+  := by eval
+
+-- ===========================================================
+-- §5. BigInt (任意精度整数の demo)
+-- ===========================================================
+
+-- 往復: fromInt → toInt
+theorem bigint_roundtrip : toInt (fromInt 12345) == 12345 := by eval
+theorem bigint_neg       : toInt (fromInt (0 - 999)) == 0 - 999 := by eval
+
+-- 加算: 1_500_000_000 + 1_500_000_000 = 3_000_000_000 (i64 越え値も OK)
+def bigSum := bigAddPosPos (fromInt 1500000000) (fromInt 1500000000)
+theorem bigint_overflow_safe : toInt bigSum == 3000000000 := by eval
+
+-- 桁繰り上がり: 999_999_999 + 1 = 1_000_000_000
+def bigSum2 := bigAddPosPos (fromInt 999999999) (fromInt 1)
+theorem bigint_carry : toInt bigSum2 == 1000000000 := by eval
+
+-- ===========================================================
+-- まとめ
+-- ===========================================================
+-- このサンプルでは:
+--   * 多項式正規化と二項展開 (lib/cas/poly.seki)
+--   * 多項式 GCD (擬剰余アルゴリズム)
+--   * 有理根定理による因数分解
+--   * 線形・2 次方程式の求解 (lib/cas/solve.seki)
+--   * 任意精度整数の加算 (lib/cas/bigint.seki)
+-- を、それぞれ専用ライブラリを import するだけで使える。

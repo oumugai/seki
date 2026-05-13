@@ -1,0 +1,97 @@
+-- ===========================================================
+-- lib/algebra/axioms.seki — 代数的構造の公理 (汎用述語)
+--
+-- 与えられた (台集合 S, 演算 op, 単位元 e, 逆元関数 inv) に対して
+-- 群/環/体などの公理を Bool で返す predicate 群。
+--
+-- 公開する名前:
+--   def isAssoc s op                — 結合律
+--   def isCommutative s op          — 可換律
+--   def isLeftId / isRightId s op e — 左/右単位元
+--   def hasLeftInverse / hasRightInverse s op e inv — 逆元
+--   def isClosed s op               — op が S で閉じている (S 有限のみ)
+--   def isMagma / isSemigroup / isMonoid s op (e) — 段階別構造
+--   def isGroup / isAbelianGroup s op e inv
+--   def isLeftDistrib / isRightDistrib s add mul — 分配律
+--   def isRing s zero one neg add mul
+--   def isCommutativeRing / isField s ...
+-- ===========================================================
+
+-- ----- 結合律 -----
+def isAssoc := \s op ->
+    forall (a b c) in s, op (op a b) c == op a (op b c)
+
+-- ----- 可換律 -----
+def isCommutative := \s op ->
+    forall (a b) in s, op a b == op b a
+
+-- ----- 単位元 -----
+def isLeftId := \s op e ->
+    forall a in s, op e a == a
+
+def isRightId := \s op e ->
+    forall a in s, op a e == a
+
+def isIdentity := \s op e ->
+    (isLeftId s op e) and (isRightId s op e)
+
+-- ----- 逆元 -----
+def hasLeftInverse := \s op e inv ->
+    forall a in s, op (inv a) a == e
+
+def hasRightInverse := \s op e inv ->
+    forall a in s, op a (inv a) == e
+
+def hasInverses := \s op e inv ->
+    (hasLeftInverse s op e inv) and (hasRightInverse s op e inv)
+
+-- ----- 閉性 (有限集合のみ確認可能) -----
+def isClosed := \s op ->
+    forall a in s, forall b in s, (op a b) in s
+
+-- ----- 構造段階 -----
+-- Magma:     台集合 + 二項演算
+def isMagma := \s op -> isClosed s op
+
+-- Semigroup: Magma + 結合律
+def isSemigroup := \s op -> (isClosed s op) and (isAssoc s op)
+
+-- Monoid:    Semigroup + 単位元
+def isMonoid := \s op e ->
+    (isSemigroup s op) and (isIdentity s op e)
+
+-- Group:     Monoid + 各元に逆元
+def isGroup := \s op e inv ->
+    (isMonoid s op e) and (hasInverses s op e inv)
+
+-- Abelian Group: Group + 可換律
+def isAbelianGroup := \s op e inv ->
+    (isGroup s op e inv) and (isCommutative s op)
+
+-- ----- 分配律 -----
+def isLeftDistrib := \s add mul ->
+    forall (a b c) in s, mul a (add b c) == add (mul a b) (mul a c)
+
+def isRightDistrib := \s add mul ->
+    forall (a b c) in s, mul (add a b) c == add (mul a c) (mul b c)
+
+def isDistrib := \s add mul ->
+    (isLeftDistrib s add mul) and (isRightDistrib s add mul)
+
+-- ----- 環 (加法可換群 + 乗法モノイド + 分配律) -----
+def isRing := \s zero one neg add mul ->
+    (isAbelianGroup s add zero neg) and
+    (isMonoid s mul one) and
+    (isDistrib s add mul)
+
+-- ----- 可換環 -----
+def isCommutativeRing := \s zero one neg add mul ->
+    (isRing s zero one neg add mul) and (isCommutative s mul)
+
+-- ----- 体 (可換環 + 非零元すべて可逆) -----
+-- 補助: 非零集合
+def nonzeroOf := \s zero -> {x in s | x != zero}
+
+def isField := \s zero one neg add mul inv_mul ->
+    (isCommutativeRing s zero one neg add mul) and
+    (hasInverses (nonzeroOf s zero) mul one inv_mul)

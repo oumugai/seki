@@ -1,0 +1,55 @@
+-- ===========================================================
+-- sample/wordcount/lib.seki — wordcount の純粋ロジック
+-- ===========================================================
+-- text 文字列を入力にとり、(word, count) ペアのリスト (降順) を返す.
+-- ファイル I/O / CLI は main.seki 側で行う.
+
+-- 文字列を空白で単語に切る (改行も空白扱い)
+def tokenize := \text ->
+    let lines = strSplit "\n" text in
+    let splitLine = \line -> strSplit " " (strTrim line) in
+    let collectWords = \line acc -> append (splitLine line) acc in
+    let all_words = foldr collectWords nil lines in
+    -- 小文字化 + 空単語除去
+    filter (\w -> strLen w > 0) (map strToLower all_words)
+
+-- 単語リスト → Dict (word → count)
+def addWord := \w d ->
+    match dictGet w d with
+    | None   -> dictInsert w 1 d
+    | Some n -> dictInsert w (n + 1) d
+
+def countWords := \words -> foldl (\d w -> addWord w d) (emptyDict ()) words
+
+-- Dict → (word, count) のペアリスト
+def dictToPairs := \d ->
+    let kvOf = \k ->
+        match dictGet k d with
+        | Some n -> (k, n)
+        | None   -> (k, 0)
+    in
+    map kvOf (dictKeys d)
+
+-- ペアリストを count 降順で sort (insertion sort)
+def insertDesc := \p xs ->
+    if null xs then cons p nil
+    else if snd p > snd (head xs) then cons p xs
+    else cons (head xs) (insertDesc p (tail xs))
+
+def sortByCountDesc := \xs ->
+    if null xs then nil
+    else insertDesc (head xs) (sortByCountDesc (tail xs))
+
+-- 上位 N 件
+def takeN := \n xs ->
+    if n <= 0 or null xs then nil
+    else cons (head xs) (takeN (n - 1) (tail xs))
+
+-- ===========================================================
+-- 公開 API: text → (word, count) ペアのソート済リスト
+-- ===========================================================
+def wordcount := \text ->
+    sortByCountDesc (dictToPairs (countWords (tokenize text)))
+
+-- text → top N 件
+def topN := \n text -> takeN n (wordcount text)

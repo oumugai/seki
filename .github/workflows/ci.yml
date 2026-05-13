@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # ---- core build matrix ------------------------------------------------
+  build:
+    name: build / ${{ matrix.os }} / rust ${{ matrix.rust }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        rust: [stable, "1.70"]    # MSRV is 1.70 (Edition 2021 + a few stable APIs)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust ${{ matrix.rust }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt, clippy
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.rust }}-${{ hashFiles('Cargo.lock') }}
+      - name: Build (release)
+        run: cargo build --release --all-targets
+      - name: Unit + integration tests
+        run: cargo test --release
+      - name: Run every example
+        shell: bash
+        run: |
+          fail=0
+          for f in examples/*.seki; do
+            # helpers_mod is imported, not standalone
+            if [ "$f" = "examples/helpers_mod.seki" ]; then continue; fi
+            if ! ./target/release/seki "$f" > /dev/null 2>&1; then
+              echo "FAIL: $f"
+              fail=1
+            fi
+          done
+          exit $fail
+      - name: Run seki test suite
+        shell: bash
+        run: |
+          fail=0
+          for f in tests/seki/test_*.seki; do
+            if ! ./target/release/seki "$f" > /dev/null 2>&1; then
+              echo "FAIL: $f"
+              fail=1
+            fi
+          done
+          exit $fail
+
+  # ---- lint / format (stable Rust only) ---------------------------------
+  lint:
+    name: clippy + rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: rustfmt check
+        # Don't fail the run on formatting yet — call it out for now.
+        run: cargo fmt --all -- --check || true
+      - name: clippy (warnings allowed)
+        # We allow warnings for now; the lint job exists to surface them.
+        run: cargo clippy --release --all-targets || true

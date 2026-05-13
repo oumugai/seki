@@ -1,0 +1,161 @@
+-- ===========================================================
+-- 37: Python 風の for 文 (Phase 12)
+-- ===========================================================
+--
+-- seki に `for x in xs do <body>` 構文を追加した.  これは
+-- `forEach xs (\x -> body)` の syntactic sugar.
+--
+-- 違い: seki は indentation-sensitive ではないので、Python の `:`
+-- + indented block ではなく **`do` + 単一式 body** とした.  複数式は
+-- `let _ = ... in ...` チェーンか括弧で.
+
+-- ===========================================================
+-- §1. 基本: Python と seki の対応
+-- ===========================================================
+
+-- Python:                   seki:
+-- for x in [1,2,3]:         for x in [1,2,3] do
+--     print(x)                  println(x)
+
+for x in [1, 2, 3] do println(x)
+
+-- ===========================================================
+-- §2. range
+-- ===========================================================
+
+-- Python: for i in range(5): print(i*i)
+for i in rangeTo(5) do println(intToStr(i * i))
+
+-- Python: for i in range(2, 7): print(i)
+for i in range(2, 7) do println(intToStr(i))
+
+-- ===========================================================
+-- §3. List 反復
+-- ===========================================================
+
+-- Python: for name in ["alice", "bob", "carol"]: greet(name)
+for name in ["alice", "bob", "carol"] do
+    println(strConcat("hello, ", name))
+
+-- ===========================================================
+-- §4. 複数文の body (let _ = ... in ...)
+-- ===========================================================
+
+-- Python:
+--   for i in range(3):
+--       print(f"iter {i}")
+--       print(i * 100)
+--
+-- seki:
+for i in rangeTo(3) do
+    let _ = println(strConcat("iter ", intToStr(i))) in
+    println(intToStr(i * 100))
+
+-- ===========================================================
+-- §5. ネストした for
+-- ===========================================================
+
+-- Python:
+--   for i in range(3):
+--       for j in range(3):
+--           print(i, j)
+
+for i in rangeTo(3) do
+    for j in rangeTo(3) do
+        println(strJoin("", [intToStr(i), ",", intToStr(j)]))
+
+-- ===========================================================
+-- §6. Dict 反復
+-- ===========================================================
+
+-- Python: for k, v in scores.items(): print(f"{k}: {v}")
+def scores := dictInsert("alice", 95, dictInsert("bob", 87, emptyDict()))
+
+for k in dictKeys(scores) do
+    match dictGet(k, scores) with
+    | Some v -> println(strJoin("", [k, ": ", intToStr(v)]))
+    | None   -> ()
+
+-- ===========================================================
+-- §7. 条件付き処理 (Python の `if ... continue` は filter で)
+-- ===========================================================
+
+-- Python:
+--   for x in range(10):
+--       if x % 2 != 0: continue
+--       print(x)
+--
+-- seki: filter してから for
+
+for x in filter((\n -> n mod 2 == 0), rangeTo(10)) do
+    println(intToStr(x))
+
+-- ===========================================================
+-- §8. 集約 (sum, count など) — map/filter/foldr の方が自然
+-- ===========================================================
+
+-- Python: total = sum(x*x for x in range(10) if x % 2 == 0)
+def total :=
+    foldr((\x acc -> x + acc), 0,
+          map((\x -> x * x),
+              filter((\n -> n mod 2 == 0), rangeTo(10))))
+
+theorem total_eq : total == 120 := by eval     -- 0+4+16+36+64 = 120
+
+-- ===========================================================
+-- §9. 静的検証も組み合わせ可能
+-- ===========================================================
+
+-- for で実行する集合と forall で証明する集合は同じ
+def TestSet := {0, 1, 2, 3, 4}
+
+-- 実行: 副作用
+for x in [0, 1, 2, 3, 4] do
+    println(strConcat("running on ", intToStr(x)))
+
+-- 証明: すべての要素について x*x >= 0
+theorem all_squares_nonneg_in_test_set
+  : forall x in TestSet, x * x >= 0
+  := by eval
+
+-- ===========================================================
+-- §10. C 流呼出と組み合わせ — Python に最も近い書き方
+-- ===========================================================
+--
+-- Phase 11 (call syntax) + Phase 12 (for syntax) で、Python に
+-- 驚くほど近い書き方が可能:
+--
+--   for name in ["alice", "bob"] do
+--       println(strConcat("hello, ", name))
+--
+-- vs Python:
+--   for name in ["alice", "bob"]:
+--       print("hello, " + name)
+--
+-- 主な違い:
+--   * `:` の代わりに `do`
+--   * 改行 + インデントの代わりに **単一式 + let**
+--   * Python の `str + str` は seki では `strConcat(a, b)`
+--   * Python の `f"..."` (format string) は seki では `strJoin("", [...])`
+
+-- ===========================================================
+-- まとめ
+-- ===========================================================
+-- | Python                              | seki                                       |
+-- |-------------------------------------|--------------------------------------------|
+-- | for x in xs:                        | for x in xs do                             |
+-- | for i in range(n):                  | for i in rangeTo(n) do                     |
+-- | for i in range(a, b):               | for i in range(a, b) do                    |
+-- | nested for                          | nested for ... do                          |
+-- | for ... continue: ...               | for ... in filter(p, xs) do                |
+-- | break                               | 再帰関数で表現                              |
+-- | sum / count / etc                   | foldr / length (filter ...)                |
+-- | for k, v in d.items()               | for k in dictKeys(d) do match dictGet ...  |
+-- | 全要素について真であることを **証明** | forall x in S, P x := by algebra/eval     |
+--
+-- Phase 11 (C 流呼出) + Phase 12 (for 構文) で、seki は
+-- **Python 風の表記** と **集合論的証明** の両方を共存させる
+-- 唯一の言語に近づいた.
+
+println("")
+println("✓ Python 風 for 文すべて動作確認")

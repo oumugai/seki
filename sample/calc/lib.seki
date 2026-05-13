@@ -1,0 +1,19 @@
+-- ===========================================================
+-- sample/calc/lib.seki — calc の純粋ロジック
+-- ===========================================================
+-- main.seki (CLI driver) と tests.seki (検証) の両方から import される.
+
+import "cas/calc.seki"
+
+-- 解析対象: f(x) = x^3 - 2x + 5
+def f := parseSym "pow x 3 - 2 * x + 5"
+
+-- 派生量
+def fp  := differ "x" f          -- f'(x)
+def fpp := differ "x" fp         -- f''(x)
+def fF  := integS "x" f          -- ∫f dx
+
+-- f(x), f'(x), f''(x) の整数評価 (None なら 0 を返す)
+def eval_f   := \x -> match evalAt "x" x f   with | Some v -> v | None -> 0
+def eval_fp  := \x -> match evalAt "x" x fp  with | Some v -> v | None -> 0
+def eval_fpp := \x -> match evalAt "x" x fpp with | Some v -> v | None -> 0

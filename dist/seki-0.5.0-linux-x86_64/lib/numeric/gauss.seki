@@ -1,0 +1,68 @@
+-- ===========================================================
+-- lib/numeric/gauss.seki — 連立線形方程式の Gauss 消去
+--
+-- 入力: List (List Real) で n×(n+1) の拡大係数行列
+-- 出力: 解ベクトル List Real
+--
+-- 公開する名前:
+--   def addScaledRow
+--   def eliminate / forwardElim
+--   def sumKnown / backSubstAt
+--   def gauss aug
+--
+-- `nth` は algebra/matrix.seki から (汎用リストアクセサ)。
+-- ===========================================================
+
+import "algebra/matrix.seki"
+
+-- ----- 行に行のスカラー倍を加える -----
+def addScaledRow := \c rowJ rowI ->
+    if null rowI then nil
+    else if null rowJ then rowI
+    else cons ((head rowI) + c * (head rowJ)) (addScaledRow c (tail rowJ) (tail rowI))
+
+-- ----- 1 ピボットで複数行を消去 -----
+def eliminate := \col pivotRow rows ->
+    if null rows then nil
+    else
+        let r = head rows in
+        let lead = nth col r in
+        let pLead = nth col pivotRow in
+        if pLead == 0.0 then cons r (eliminate col pivotRow (tail rows))
+        else
+            let c = 0.0 - lead / pLead in
+            cons (addScaledRow c pivotRow r) (eliminate col pivotRow (tail rows))
+
+-- ----- 前進消去 (上三角化) -----
+def forwardElim := \col rows ->
+    if null rows then nil
+    else if col >= (length (head rows) - 1) then rows
+    else
+        let p = head rows in
+        let rest = tail rows in
+        let elimRest = eliminate col p rest in
+        cons p (forwardElim (col + 1) elimRest)
+
+-- ----- 既知解の累積和ヘルパ -----
+def sumKnown := \row n i xs j acc ->
+    if j >= n then acc
+    else
+        let aij = nth j row in
+        let xj = nth (j - i - 1) xs in
+        sumKnown row n i xs (j + 1) (acc + aij * xj)
+
+-- ----- 後退代入 -----
+def backSubstAt := \i rows xs ->
+    if i < 0 then xs
+    else
+        let row = nth i rows in
+        let n = length row - 1 in
+        let bVal = nth n row in
+        let s = sumKnown row n i xs (i + 1) 0.0 in
+        let aii = nth i row in
+        let xi = (bVal - s) / aii in
+        backSubstAt (i - 1) rows (cons xi xs)
+
+def gauss := \aug ->
+    let upper = forwardElim 0 aug in
+    backSubstAt ((length aug) - 1) upper nil

@@ -1,0 +1,116 @@
+-- ===========================================================
+-- 23: 値で添字付けされた ADT (Indexed ADTs / GADTs 風)
+--
+-- seki は専用の `data Vec : Nat -> Set` 構文は (まだ) ないが、
+-- 既存の依存型 + refinement + match 機構を組み合わせることで、
+-- Lean / Coq の `Vec n A` / `Fin n` のような **値で添字付けされた
+-- 型族** を表現できる。
+-- ===========================================================
+
+-- ----- Vec n : 長さ n のリスト -------------------------------
+-- 構築子は通常の data として宣言、添字付き集合は refinement で。
+
+data IList = INil | ICons Int IList
+
+-- 長さ計算
+def ilength := \xs ->
+    match xs with
+    | INil -> 0
+    | ICons _ rest -> 1 + ilength rest
+
+-- 添字付き型族: Vec n = {v : IList | ilength v == n}
+def Vec := \n -> {v in (List Int) | length v == n}
+
+-- ----- 構築 -----
+-- 注: 既存のリスト構築子を使う方が型集合と整合する。
+[1, 2, 3] in (Vec 3)            -- true
+[1, 2]    in (Vec 3)            -- false
+[]        in (Vec 0)            -- true
+
+-- ----- 操作: 依存関数型を活かす -----
+-- replicate : (n : Nat) -> Int -> Vec n
+def replicate : (n : Nat) -> Int -> Vec n := \(n : Nat) (v : Int) ->
+    if n == 0 then nil else cons v (replicate (n - 1) v)
+
+replicate 4 7                   -- [7,7,7,7]
+replicate 0 99                  -- []
+
+-- map_vec : (n : Nat) -> (Int -> Int) -> Vec n -> Vec n
+-- 長さ保持 map。
+def map_vec : (n : Nat) -> (Int -> Int) -> Vec n -> Vec n :=
+    \(n : Nat) (f : Int -> Int) (xs : Vec n) -> map f xs
+
+map_vec 3 (\x -> x * 2) [1, 2, 3]   -- [2, 4, 6]
+map_vec 0 (\x -> x + 1) []          -- []
+
+-- ----- Fin n : 0 から n-1 までの自然数 ---------------------
+-- 型族: Fin n = {x in Nat | x < n}
+def Fin := \n -> {x in Nat | x < n}
+
+3 in (Fin 5)                    -- true
+5 in (Fin 5)                    -- false
+0 in (Fin 1)                    -- true
+
+-- Fin n の長さ保持変換
+def fin_to_int : (n : Nat) -> Fin n -> Int := \(n : Nat) (i : Fin n) -> i
+
+fin_to_int 10 7                 -- 7
+-- fin_to_int 10 10  -- ← コメント外すと型エラー (10 ∉ Fin 10)
+
+-- ----- 長さ保持の検証 (theorem ベース) ----------------------
+-- map は長さを保つ。これを induction で証明する。
+
+def myMap := \f xs ->
+    if null xs then nil
+    else cons (f (head xs)) (myMap f (tail xs))
+
+theorem map_preserves_length
+  : forall xs in (List Int), length (myMap (\y -> y + 1) xs) == length xs
+  := by induction
+
+-- ----- replicate の長さ保証 -----
+def myReplicate := \n v ->
+    if n == 0 then nil else cons v (myReplicate (n - 1) v)
+
+-- replicate n の結果は Vec n に属する: サンプリングで検証
+def rep5 := myReplicate 5 0
+def rep0 := myReplicate 0 7
+
+rep5 in (Vec 5)                 -- true
+rep0 in (Vec 0)                 -- true
+
+-- ----- Pair 型族: 2 つの値が同じ値を持つ pair -------------
+-- Pair v = {(a, b) | a == v and b == v}
+def Pair := \v -> {x in (Int times Int) | (fst x == v) and (snd x == v)}
+
+(3, 3) in (Pair 3)              -- true
+(3, 4) in (Pair 3)              -- false
+
+-- ----- Sigma 型 (依存ペア) もどき --------------------------
+-- Σ (n : Nat), Vec n の代わりに refinement で:
+-- "長さ情報付きリスト" = {(n, xs) in (Nat times List Int) | length xs == n}
+def WithLength := {p in (Nat times (List Int)) | length (snd p) == fst p}
+
+(3, [1, 2, 3]) in WithLength    -- true
+(3, [1, 2])    in WithLength    -- false
+(0, [])        in WithLength    -- true
+
+-- ----- Decidable 風: 命題を Bool に落とす -------------------
+-- `decide` 戦術はまだないが、Bool で記述すれば eval で済む。
+def Even := {x in Nat | x mod 2 == 0}
+
+theorem zero_is_even : 0 in Even := by eval
+theorem four_is_even : 4 in Even := by eval
+
+-- ===========================================================
+-- まとめ
+-- ===========================================================
+-- 値添字付き ADT は seki では以下の素材で書ける:
+--   1. `data` 宣言で平坦な構築子を作る
+--   2. `(x : A) -> B(x)` で添字に依存した関数を書く
+--   3. 添字付き集合は `def Vec := \n -> {v | P v n}` の refinement
+--   4. 検証は `by induction` で長さ保持 theorem を書ける
+--
+-- Lean 4 の `inductive Vec : Nat -> Type where` のような直接構文は
+-- 今のところないが、上記の組み合わせで実用的には同等の表現力。
+-- (型レベル計算で本当に静的に検査される版は Phase 3 の課題。)

@@ -1,0 +1,63 @@
+-- ===========================================================
+-- tests/seki/test_cas_calc.seki — 微分・積分・代入の検証
+-- ===========================================================
+
+import "../../lib/cas/calc.seki"
+
+def x_ := SVar "x"
+def n0 := SNum 0
+def n1 := SNum 1
+def n2 := SNum 2
+
+-- ----- 多項式微分の数値検証 -----
+def poly1 := SAdd (SAdd (SPow x_ 2) (SMul (SNum 3) x_)) (SNum 5)
+def dpoly1 := differ "x" poly1
+-- 2x + 3: at x=0,1,2,5 → 3, 5, 7, 13
+
+theorem diff_quad_at_0 : evalAt "x" 0 dpoly1 == Some 3 := by eval
+theorem diff_quad_at_1 : evalAt "x" 1 dpoly1 == Some 5 := by eval
+theorem diff_quad_at_2 : evalAt "x" 2 dpoly1 == Some 7 := by eval
+theorem diff_quad_at_5 : evalAt "x" 5 dpoly1 == Some 13 := by eval
+
+-- ----- 多項式積分の数値検証 -----
+def poly_for_integ := SAdd (SAdd (SNum 3) (SMul n2 x_)) (SPow x_ 2)
+def int_poly := integS "x" poly_for_integ
+-- ∫(3 + 2x + x^2) dx = 3x + x^2 + x^3/3
+-- at x=3 → 27, at x=0 → 0
+
+theorem int_at_3 : evalAt "x" 3 int_poly == Some 27 := by eval
+theorem int_at_0 : evalAt "x" 0 int_poly == Some 0  := by eval
+
+-- ----- 微積分学の基本定理: d/dx (∫f dx) = f -----
+def f := SPow x_ 2
+def back := differ "x" (integ "x" f)
+
+theorem ftc_x2_at_0 : evalAt "x" 0 back == Some 0 := by eval
+theorem ftc_x2_at_1 : evalAt "x" 1 back == Some 1 := by eval
+theorem ftc_x2_at_3 : evalAt "x" 3 back == Some 9 := by eval
+
+-- ----- ライプニッツ規則: (fg)' = f'g + fg' -----
+def fg := SMul (SPow x_ 2) (SPow x_ 3)
+def d_fg := differ "x" fg
+def d_x5 := differ "x" (SPow x_ 5)
+
+theorem leibniz_at_1 : (evalAt "x" 1 d_fg) == (evalAt "x" 1 d_x5) := by eval
+theorem leibniz_at_2 : (evalAt "x" 2 d_fg) == (evalAt "x" 2 d_x5) := by eval
+theorem leibniz_at_3 : (evalAt "x" 3 d_fg) == (evalAt "x" 3 d_x5) := by eval
+
+-- ----- 高階微分: d²/dx² (x^4) = 12x^2 -----
+def x4 := SPow x_ 4
+def d1_x4 := differ "x" x4
+def d2_x4 := differ "x" d1_x4
+
+theorem d2_x4_at_1 : evalAt "x" 1 d2_x4 == Some 12 := by eval
+theorem d2_x4_at_2 : evalAt "x" 2 d2_x4 == Some 48 := by eval
+
+-- ----- 線形性: d(5f + 7g) = 5f' + 7g' -----
+def f_lin := SAdd (SPow x_ 2) x_
+def g_lin := SPow x_ 3
+def combined := SAdd (SMul (SNum 5) f_lin) (SMul (SNum 7) g_lin)
+def d_combined := differ "x" combined
+
+theorem linearity_at_0 : evalAt "x" 0 d_combined == Some 5  := by eval
+theorem linearity_at_1 : evalAt "x" 1 d_combined == Some 36 := by eval

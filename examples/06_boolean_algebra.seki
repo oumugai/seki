@@ -1,0 +1,94 @@
+-- ===========================================================
+-- 06: ブール代数 — De Morgan / 二重否定 / 排中律 / 分配律
+--
+-- Bool は組み込み 2 元集合 {false, true}.
+-- forall x in Bool, ... は両元での厳密な検査になる(完全列挙)。
+-- ===========================================================
+
+-- ----- 基本 -----
+theorem dn : forall a in Bool, not (not a) == a
+    := by eval
+
+theorem em : forall a in Bool, a or (not a)
+    := by eval
+
+theorem nc : forall a in Bool, not (a and (not a))
+    := by eval
+
+-- ----- 交換律・結合律 -----
+theorem and_comm
+    : forall a in Bool, forall b in Bool, (a and b) == (b and a)
+    := by eval
+
+theorem or_comm
+    : forall a in Bool, forall b in Bool, (a or b) == (b or a)
+    := by eval
+
+theorem and_assoc
+    : forall a in Bool, forall b in Bool, forall c in Bool,
+        ((a and b) and c) == (a and (b and c))
+    := by eval
+
+theorem or_assoc
+    : forall a in Bool, forall b in Bool, forall c in Bool,
+        ((a or b) or c) == (a or (b or c))
+    := by eval
+
+-- ----- 単位元 / 吸収律 -----
+theorem and_id  : forall a in Bool, (a and true) == a := by eval
+theorem or_id   : forall a in Bool, (a or false) == a := by eval
+theorem and_zero: forall a in Bool, (a and false) == false := by eval
+theorem or_one  : forall a in Bool, (a or true)  == true  := by eval
+
+theorem absorb_and
+    : forall a in Bool, forall b in Bool, (a and (a or b)) == a
+    := by eval
+
+theorem absorb_or
+    : forall a in Bool, forall b in Bool, (a or (a and b)) == a
+    := by eval
+
+-- ----- De Morgan の法則 -----
+theorem demorgan_and
+    : forall a in Bool, forall b in Bool,
+        not (a and b) == ((not a) or (not b))
+    := by eval
+
+theorem demorgan_or
+    : forall a in Bool, forall b in Bool,
+        not (a or b) == ((not a) and (not b))
+    := by eval
+
+-- ----- 分配律 -----
+theorem dist_and_over_or
+    : forall a in Bool, forall b in Bool, forall c in Bool,
+        (a and (b or c)) == ((a and b) or (a and c))
+    := by eval
+
+theorem dist_or_over_and
+    : forall a in Bool, forall b in Bool, forall c in Bool,
+        (a or (b and c)) == ((a or b) and (a or c))
+    := by eval
+
+-- ----- 含意の基本 (含意 a -> b は (not a or b) と等価) -----
+def implies := \a b -> (not a) or b
+
+theorem modus_ponens_like
+    : forall a in Bool, forall b in Bool,
+        (a and (implies a b)) == (a and b)
+    := by eval
+
+-- 対偶: (a -> b)  ⇔  ((not b) -> (not a))
+theorem contrapositive
+    : forall a in Bool, forall b in Bool,
+        (implies a b) == (implies (not b) (not a))
+    := by eval
+
+-- ----- XOR の性質 (派生演算) -----
+def xor := \a b -> (a or b) and (not (a and b))
+
+theorem xor_self_zero : forall a in Bool, (xor a a) == false := by eval
+theorem xor_id        : forall a in Bool, (xor a false) == a := by eval
+theorem xor_comm
+    : forall a in Bool, forall b in Bool, (xor a b) == (xor b a)
+    := by eval

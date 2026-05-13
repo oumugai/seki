@@ -1,0 +1,64 @@
+-- ===========================================================
+-- lib/cas/sym_dsl.seki — Sym のための smart constructor DSL
+--
+-- `lib/cas/sym.seki` の冗長な `SAdd (SMul (SNum 2) (SPow (SVar "x") 2)) (SNum 3)`
+-- を、短い構築子 (`add`, `mul`, `pow`, `num`, `var` 等) で書けるようにする。
+-- math notation 直書きには `parseSym "2 * pow x 2 + 3"` (Rust builtin) を使う。
+--
+-- 公開する名前:
+--   num n        — 数値 (= SNum n)
+--   var s        — 変数 (= SVar s)
+--   sX           — よく使う変数 (x, y, z, t, n, k)
+--   add / sub / mul / div / pow / neg
+--   sym_sin / sym_cos / sym_exp / sym_ln
+--   sym_eq                 — 構造的等価判定
+--   sym_zero / sym_one     — 0 / 1 の Sym 表現
+-- ===========================================================
+
+import "sym.seki"
+
+-- ----- 構築子の短縮形 -----
+def num := \n -> SNum n
+def var := \s -> SVar s
+
+-- 頻出の symbolic 変数 (ショートカット)
+def sx := SVar "x"
+def sy := SVar "y"
+def sz := SVar "z"
+def st := SVar "t"
+def sn := SVar "n"
+def sk := SVar "k"
+
+def sym_zero := SNum 0
+def sym_one  := SNum 1
+
+-- ----- 演算子 (Sym -> Sym -> Sym) -----
+def add := \a b -> SAdd a b
+def sub := \a b -> SSub a b
+def mul := \a b -> SMul a b
+def div_ := \a b -> SDiv a b      -- `div` は予約語に近いので `div_`
+def pow := \b n -> SPow b n
+def neg := \a -> SNeg a
+
+-- ----- 初等関数 -----
+def sym_sin := \a -> SSin a
+def sym_cos := \a -> SCos a
+def sym_exp := \a -> SExp a
+def sym_ln  := \a -> SLn a
+
+-- ----- 構造的等価 -----
+-- 2 つの Sym 値が同じ AST 構造を持つか (簡略版)
+def sym_eq := \a b -> a == b
+
+-- ----- 便利な複合関数 -----
+-- a² (二乗)
+def sq := \a -> SPow a 2
+
+-- a³ (三乗)
+def cube := \a -> SPow a 3
+
+-- 多項式の定数項追加: addConst e c -> e + c
+def addConst := \e c -> SAdd e (SNum c)
+
+-- スカラー倍: scaleBy c e -> c * e
+def scaleBy := \c e -> SMul (SNum c) e

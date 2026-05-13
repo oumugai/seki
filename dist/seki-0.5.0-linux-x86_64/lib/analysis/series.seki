@@ -1,0 +1,96 @@
+-- ===========================================================
+-- lib/analysis/series.seki — 級数と Taylor 展開
+--
+-- 公開する名前:
+--   def partialSum n a       — 部分和 Σ_{k=0}^{n-1} a(k)
+--   def factorial n          — n! (Int)
+--   def expTaylor n x        — e^x の n 次 Taylor 多項式
+--   def sinTaylor n x        — sin x の n 次 Taylor 多項式
+--   def cosTaylor n x        — cos x
+--   def lnTaylor n x         — ln(1+x) の n 次 Taylor 多項式 ( |x| < 1 )
+--   def piLeibniz n          — π/4 = 1 - 1/3 + 1/5 - ... の n 項和
+--   def harmonicNumber n     — H_n = 1 + 1/2 + ... + 1/n
+-- ===========================================================
+
+-- ----- 部分和: 関数 a : Int → Real から最初の n 項を取って和を計算 -----
+def partialSumRec := \a k n acc ->
+    if k >= n then acc
+    else partialSumRec a (k + 1) n (acc + a k)
+
+def partialSum := \n a -> partialSumRec a 0 n 0.0
+
+-- ----- 階乗 (Int) -----
+def factorial := \n ->
+    if n <= 1 then 1 else n * factorial (n - 1)
+
+-- ----- 整数べき乗 x^n (Real) -----
+-- 注: base case を `intToReal 1` で書くのは、shape 推論が
+-- `Unknown * Unknown` を Int に倒すのを避けるため (両分岐とも Unknown 形にする)。
+def powR := \x n ->
+    if n == 0 then intToReal 1
+    else x * powR x (n - 1)
+
+-- ----- e^x の Taylor: Σ_{k=0}^{n-1} x^k / k! -----
+-- 注: factorial を Int で先に評価すると n > 20 で i64 オーバーフローする。
+-- 各項を term_{k+1} = term_k * x / (k+1) で逐次的に Real 計算で求める。
+def expAccum := \x k n term acc ->
+    if k >= n then acc
+    else
+        let new_term = if k == 0 then intToReal 1
+                       else term * x / (intToReal k) in
+        expAccum x (k + 1) n new_term (acc + new_term)
+
+def expTaylor := \n x -> expAccum x 0 n (intToReal 1) (intToReal 0)
+
+-- ----- sin x の Taylor: Σ_{k=0}^{n-1} (-1)^k x^(2k+1) / (2k+1)! -----
+-- term_0 = x
+-- term_{k+1} = -term_k * x² / ((2k+2)(2k+3))
+def sinAccum := \x k n term acc ->
+    if k >= n then acc
+    else
+        let new_term = if k == 0 then x
+                       else
+                           let denom = intToReal ((2 * k) * (2 * k + 1)) in
+                           (0.0 - term) * x * x / denom in
+        sinAccum x (k + 1) n new_term (acc + new_term)
+
+def sinTaylor := \n x -> sinAccum x 0 n (intToReal 0) (intToReal 0)
+
+-- ----- cos x の Taylor: Σ_{k=0}^{n-1} (-1)^k x^(2k) / (2k)! -----
+-- term_0 = 1
+-- term_{k+1} = -term_k * x² / ((2k+1)(2k+2))
+def cosAccum := \x k n term acc ->
+    if k >= n then acc
+    else
+        let new_term = if k == 0 then intToReal 1
+                       else
+                           let denom = intToReal ((2 * k - 1) * (2 * k)) in
+                           (0.0 - term) * x * x / denom in
+        cosAccum x (k + 1) n new_term (acc + new_term)
+
+def cosTaylor := \n x -> cosAccum x 0 n (intToReal 0) (intToReal 0)
+
+-- ----- ln(1+x) の Taylor: Σ_{k=1}^{n} (-1)^(k+1) x^k / k    (|x| < 1) -----
+-- ※ ln(1+0) = 0、収束は |x| < 1 で
+def lnTermAt := \x k ->
+    if k == 0 then 0.0  -- 慣習的に k=0 項は 0
+    else
+        let sign = if (k mod 2) == 1 then 1.0 else 0.0 - 1.0 in
+        sign * (powR x k) / (intToReal k)
+
+def lnTaylor := \n x -> partialSum n (lnTermAt x)
+
+-- ----- Leibniz 級数: π/4 = 1 - 1/3 + 1/5 - 1/7 + ... -----
+def leibnizTermAt := \k ->
+    let sign = if (k mod 2) == 0 then 1.0 else 0.0 - 1.0 in
+    sign / (intToReal (2 * k + 1))
+
+-- π/4 の n 項和 (n を大きくすると π/4 に収束、ただし収束は遅い)
+def piLeibniz := \n -> partialSum n leibnizTermAt
+
+-- ----- 調和数: H_n = Σ_{k=1}^{n} 1/k -----
+def harmonicTermAt := \k ->
+    if k == 0 then 0.0
+    else 1.0 / (intToReal k)
+
+def harmonicNumber := \n -> partialSum (n + 1) harmonicTermAt

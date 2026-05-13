@@ -1,0 +1,381 @@
+-- ===========================================================
+-- sample/calc/tests_metadata.seki — メタデータ駆動の property test
+-- ===========================================================
+--
+-- このファイルは「**集合論的 / 構造的性質を Rust 側が宣言した内容と**
+-- **照らし合わせて、実装が本当にそれを満たしているか確認する**」テスト.
+--
+-- Phase 9 で全 builtin に付与した `BuiltinMeta` (signature / domain /
+-- codomain / effect / properties / doc) を、seki 側から
+-- `builtinDoc` / `builtinSig` / `builtinEffect` / `builtinProperties` /
+-- `builtinHasProperty` 経由で照会する.
+--
+-- これにより:
+--   1. 「Rust が `commutative` と宣言した関数が、本当に commutative か」
+--      を実行時にチェックできる.
+--   2. 「全ての builtin がメタデータを持つ」を property test できる.
+--   3. ドキュメント-実装の同期がテストで担保される.
+-- ===========================================================
+
+import "test/runner.seki"
+
+-- ===========================================================
+-- §1. メタデータが存在することの確認
+-- ===========================================================
+
+-- 全ての主要 builtin に signature がある
+def core_builtins := ["strLen", "strConcat", "intToStr", "readFile",
+                      "bitAnd", "bitOr", "bitXor", "bitNot",
+                      "mkRef", "readRef", "writeRef",
+                      "spawn", "join", "parMap"]
+
+def test_all_have_signature :=
+    forAllInList core_builtins (\name ->
+        assertSome (builtinSig name))
+
+def test_all_have_doc :=
+    forAllInList core_builtins (\name ->
+        assertSome (builtinDoc name))
+
+def test_all_have_effect :=
+    forAllInList core_builtins (\name ->
+        assertSome (builtinEffect name))
+
+-- ===========================================================
+-- §2. Rust が宣言した structural property を実装が満たすか検証
+-- ===========================================================
+
+-- ----- bitXor の self-inverse: a xor a == 0 -----
+-- Rust 側で properties: ["self-inverse", ...] と宣言している.
+-- これを実装でも確認する.
+def test_bitXor_self_inverse_declared :=
+    assertTrue (builtinHasProperty "bitXor" "self-inverse")
+        "bitXor must declare self-inverse"
+
+-- そして実装が本当に self-inverse である
+def xor_self := \x -> bitXor x x
+def test_bitXor_self_inverse_holds :=
+    forAllInList [0 - 100, 0 - 7, 0 - 1, 0, 1, 7, 42, 1000, 9999]
+        (\x -> assertEq 0 (xor_self x))
+
+-- ----- bitXor の commutative: a xor b == b xor a -----
+def test_bitXor_commutative_declared :=
+    assertTrue (builtinHasProperty "bitXor" "commutative")
+        "bitXor must declare commutative"
+
+def test_bitXor_commutative_holds :=
+    forAllInList [(1, 2), (5, 12), (0 - 3, 7), (255, 128), (0, 99)]
+        (\p -> assertEq (bitXor (fst p) (snd p)) (bitXor (snd p) (fst p)))
+
+-- ----- bitAnd の idempotent: a and a == a -----
+def test_bitAnd_idempotent_declared :=
+    assertTrue (builtinHasProperty "bitAnd" "idempotent")
+        "bitAnd must declare idempotent"
+
+def test_bitAnd_idempotent_holds :=
+    forAllInList [0, 1, 7, 42, 255, 1024]
+        (\x -> assertEq x (bitAnd x x))
+
+-- ----- bitNot の involutive: not (not x) == x -----
+def test_bitNot_involutive_declared :=
+    assertTrue (builtinHasProperty "bitNot" "involutive")
+        "bitNot must declare involutive"
+
+def test_bitNot_involutive_holds :=
+    forAllInList [0, 1, 0 - 1, 42, 0 - 42, 9999]
+        (\x -> assertEq x (bitNot (bitNot x)))
+
+-- ----- strConcat の associative: (a ++ b) ++ c == a ++ (b ++ c) -----
+def test_strConcat_associative_declared :=
+    assertTrue (builtinHasProperty "strConcat" "associative")
+        "strConcat must declare associative"
+
+-- nested pair `(a, (b, c))` to match seki's fst/snd semantics
+def assoc_test := \t ->
+    let a = fst t in
+    let b = fst (snd t) in
+    let c = snd (snd t) in
+    assertEq (strConcat (strConcat a b) c) (strConcat a (strConcat b c))
+
+def test_strConcat_associative_holds :=
+    forAllInList [("", ("", "")), ("a", ("b", "c")), ("hello, ", ("world", "!"))]
+        assoc_test
+
+-- ----- strConcat の left-identity: "" ++ s == s -----
+def test_strConcat_left_id_declared :=
+    assertTrue (builtinHasProperty "strConcat" "left-identity-empty")
+        "strConcat must declare left-identity-empty"
+
+def test_strConcat_left_id_holds :=
+    forAllInList ["", "hello", "world", "a"]
+        (\s -> assertEq s (strConcat "" s))
+
+-- ----- strLen-additive: strLen (a ++ b) == strLen a + strLen b -----
+def test_strLen_additive_declared :=
+    assertTrue (builtinHasProperty "strLen" "strLen-additive-under-strConcat")
+        "strLen must declare additive under strConcat"
+
+def test_strLen_additive_holds :=
+    forAllInList [("", ""), ("a", "b"), ("hello", "world"), ("seki", "")]
+        (\p ->
+            assertEq
+                (strLen (strConcat (fst p) (snd p)))
+                (strLen (fst p) + strLen (snd p)))
+
+-- ----- intToReal の monotonic: x < y => intToReal x < intToReal y -----
+def test_intToReal_monotonic_declared :=
+    assertTrue (builtinHasProperty "intToReal" "monotonic")
+        "intToReal must declare monotonic"
+
+def monotonic_pair_test := \p ->
+    assertTrue (intToReal (fst p) < intToReal (snd p)) "monotonicity must hold"
+def test_intToReal_monotonic_holds :=
+    forAllInList [(0 - 5, 0 - 3), (0 - 1, 0), (0, 1), (10, 100), (999, 1000)]
+        monotonic_pair_test
+
+-- ===========================================================
+-- §3. effect の分類が正しいことを検証
+-- ===========================================================
+
+-- 純粋な builtin が Pure として分類されている
+def pure_builtins := ["strLen", "strConcat", "intToStr", "bitAnd", "bitOr",
+                      "intToReal", "floor", "ceil", "round"]
+def test_pure_builtins :=
+    forAllInList pure_builtins (\name ->
+        assertSomeEq "Pure" (builtinEffect name))
+
+-- I/O は Read / Write に分類されている
+def test_readFile_is_Read := assertSomeEq "Read"  (builtinEffect "readFile")
+def test_writeFile_is_Write := assertSomeEq "Write" (builtinEffect "writeFile")
+def test_println_is_Write := assertSomeEq "Write" (builtinEffect "println")
+def test_getEnv_is_Read   := assertSomeEq "Read"  (builtinEffect "getEnv")
+def test_nowMillis_is_Read := assertSomeEq "Read" (builtinEffect "nowMillis")
+
+-- Concurrency primitives
+def test_spawn_is_Concurrent := assertSomeEq "Concurrent" (builtinEffect "spawn")
+def test_chanSend_is_Concurrent := assertSomeEq "Concurrent" (builtinEffect "chanSend")
+
+-- FFI is Unsafe
+def test_ffiLoad_is_Unsafe := assertSomeEq "Unsafe" (builtinEffect "ffiLoad")
+
+-- Meta primitives
+def test_parseSym_is_Meta := assertSomeEq "Meta" (builtinEffect "parseSym")
+def test_vmEval_is_Meta := assertSomeEq "Meta" (builtinEffect "vmEval")
+
+-- ===========================================================
+-- §4. ドメイン情報の集合論的検証
+-- ===========================================================
+
+-- Signature 文字列に "->" が含まれる (関数型のはず)
+def function_builtins := ["strLen", "strConcat", "readFile", "writeFile",
+                          "bitAnd", "mkRef", "dictGet"]
+def test_signatures_are_functions :=
+    forAllInList function_builtins (\name ->
+        match builtinSig name with
+        | Some s -> assertContains "->" s
+        | None   -> FailMsg "signature missing")
+
+-- ===========================================================
+-- §5. 全 builtin の宣言性質を網羅サンプリング
+-- ===========================================================
+-- builtinNames で全カタログを取得し、それぞれに signature があることを
+-- 集合論的に検証する.
+def all_names := builtinNames ()
+
+def test_every_documented_has_sig :=
+    forAllInList all_names (\name ->
+        assertSome (builtinSig name))
+
+def test_every_documented_has_effect :=
+    forAllInList all_names (\name ->
+        assertSome (builtinEffect name))
+
+-- 全 documented builtin に domain も付いている (Phase 10 で完了)
+def test_every_documented_has_domain :=
+    forAllInList all_names (\name ->
+        assertSome (builtinDomain name))
+
+def test_every_documented_has_codomain :=
+    forAllInList all_names (\name ->
+        assertSome (builtinCodomain name))
+
+-- ===========================================================
+-- §6. カテゴリ別 effect 分類の検証 (Phase 10 で詳細化)
+-- ===========================================================
+
+-- ネットワーク builtin はすべて Concurrent
+def network_builtins := ["tcpListen", "tcpAccept", "tcpConnect",
+                         "tcpRead", "tcpWrite", "tcpClose", "httpGet"]
+def test_network_all_concurrent :=
+    forAllInList network_builtins (\name ->
+        assertSomeEq "Concurrent" (builtinEffect name))
+
+-- 全ネットワーク builtin が "blocking" を properties に持つか、または
+-- handle 生成系である
+def network_has_blocking_or_handle := \name ->
+    if builtinHasProperty name "blocking" then Pass
+    else if builtinHasProperty name "creates-fresh-handle" then Pass
+    else if builtinHasProperty name "destructive" then Pass
+    else FailMsg (strJoin "" [name, " should declare blocking or creates-fresh-handle"])
+
+def test_network_blocking_or_handle :=
+    forAllInList network_builtins network_has_blocking_or_handle
+
+-- FFI builtin はすべて Unsafe
+def ffi_builtins := ["ffiLoad", "ffiCallIntInt", "ffiCallStrInt", "ffiClose"]
+def test_ffi_all_unsafe :=
+    forAllInList ffi_builtins (\name ->
+        assertSomeEq "Unsafe" (builtinEffect name))
+
+-- 並行性プリミティブ (spawn / join / chan*) はすべて Concurrent
+def conc_builtins := ["spawn", "join", "parMap", "chanNew", "chanSend",
+                      "chanRecv", "chanClose", "spawnAtomicAdd"]
+def test_conc_all_concurrent :=
+    forAllInList conc_builtins (\name ->
+        assertSomeEq "Concurrent" (builtinEffect name))
+
+-- Atomic 操作は Read か Mutate (lock-free)
+def atomic_read_or_mutate := \name ->
+    match builtinEffect name with
+    | Some "Read"   -> Pass
+    | Some "Mutate" -> Pass
+    | Some e -> FailMsg (strJoin "" [name, " has unexpected effect ", e])
+    | None   -> FailMsg (strConcat name " has no effect")
+
+def test_atomic_classification :=
+    forAllInList ["atomicNew", "atomicGet", "atomicSet", "atomicAdd", "atomicCas"]
+        atomic_read_or_mutate
+
+-- すべての atomic 操作が seq-cst
+def test_atomic_seq_cst :=
+    forAllInList ["atomicGet", "atomicSet", "atomicAdd", "atomicCas"]
+        (\name -> assertTrue (builtinHasProperty name "seq-cst")
+                              (strConcat name " must be seq-cst"))
+
+-- Dict 操作はすべて Pure かつ functional-update / total
+def dict_mutators := ["dictInsert", "dictRemove"]
+def test_dict_mutators_functional :=
+    forAllInList dict_mutators (\name ->
+        if builtinHasProperty name "functional-update" then Pass
+        else FailMsg (strConcat name " should declare functional-update"))
+
+def dict_readers := ["dictGet", "dictMember", "dictSize", "dictKeys", "dictValues"]
+def test_dict_readers_pure :=
+    forAllInList dict_readers (\name ->
+        assertSomeEq "Pure" (builtinEffect name))
+
+-- 時刻 builtin はすべて Read (wall-clock または monotonic)
+def time_builtins := ["nowSecs", "nowMillis", "nowMicros", "monotonicMillis"]
+def test_time_all_read :=
+    forAllInList time_builtins (\name ->
+        assertSomeEq "Read" (builtinEffect name))
+
+-- monotonicMillis は monotonic, wall-clock 系は non-deterministic
+def test_monotonicMillis_is_monotonic :=
+    assertTrue (builtinHasProperty "monotonicMillis" "monotonic")
+        "monotonicMillis must declare monotonic"
+
+def test_wall_clocks_nondeterministic :=
+    forAllInList ["nowSecs", "nowMillis", "nowMicros"] (\name ->
+        assertTrue (builtinHasProperty name "non-deterministic")
+                   (strConcat name " is wall-clock, should be non-deterministic"))
+
+-- JSON 操作はすべて Pure
+def test_json_pure :=
+    forAllInList ["jsonParse", "jsonEncode"] (\name ->
+        assertSomeEq "Pure" (builtinEffect name))
+
+-- メタ accessor は Meta + total + self-reference
+def meta_accessors := ["builtinDoc", "builtinSig", "builtinEffect",
+                       "builtinDomain", "builtinCodomain", "builtinProperties",
+                       "builtinHasProperty", "builtinNames"]
+def test_meta_accessors_are_Meta :=
+    forAllInList meta_accessors (\name ->
+        assertSomeEq "Meta" (builtinEffect name))
+
+def test_meta_accessors_are_total :=
+    forAllInList meta_accessors (\name ->
+        assertTrue (builtinHasProperty name "total")
+                   (strConcat name " accessor should be total"))
+
+def test_meta_accessors_have_self_ref :=
+    forAllInList meta_accessors (\name ->
+        assertTrue (builtinHasProperty name "self-reference")
+                   (strConcat name " should declare self-reference"))
+
+-- ===========================================================
+-- §7. 集合論的不変条件: effect の値域は固定 8 要素の enum
+-- ===========================================================
+
+def effect_values := {"Pure", "PartialPure", "Read", "Write",
+                      "Mutate", "Concurrent", "Unsafe", "Meta"}
+
+def test_every_effect_in_set :=
+    forAllInList all_names (\name ->
+        match builtinEffect name with
+        | Some e -> assertMember e effect_values
+        | None   -> FailMsg (strConcat name " missing effect"))
+
+-- ===========================================================
+def cases := [
+    -- §1: 存在
+    TestCase "all core builtins have signature"   test_all_have_signature,
+    TestCase "all core builtins have doc"         test_all_have_doc,
+    TestCase "all core builtins have effect"      test_all_have_effect,
+    -- §2: structural property を実装が満たす
+    TestCase "bitXor declares self-inverse"       test_bitXor_self_inverse_declared,
+    TestCase "bitXor IS self-inverse"             test_bitXor_self_inverse_holds,
+    TestCase "bitXor declares commutative"        test_bitXor_commutative_declared,
+    TestCase "bitXor IS commutative"              test_bitXor_commutative_holds,
+    TestCase "bitAnd declares idempotent"         test_bitAnd_idempotent_declared,
+    TestCase "bitAnd IS idempotent"               test_bitAnd_idempotent_holds,
+    TestCase "bitNot declares involutive"         test_bitNot_involutive_declared,
+    TestCase "bitNot IS involutive"               test_bitNot_involutive_holds,
+    TestCase "strConcat declares associative"     test_strConcat_associative_declared,
+    TestCase "strConcat IS associative"           test_strConcat_associative_holds,
+    TestCase "strConcat declares left-id-empty"   test_strConcat_left_id_declared,
+    TestCase "strConcat HAS left-id-empty"        test_strConcat_left_id_holds,
+    TestCase "strLen declares additive-under-concat" test_strLen_additive_declared,
+    TestCase "strLen IS additive under concat"    test_strLen_additive_holds,
+    TestCase "intToReal declares monotonic"       test_intToReal_monotonic_declared,
+    TestCase "intToReal IS monotonic"             test_intToReal_monotonic_holds,
+    -- §3: effect 分類
+    TestCase "pure builtins classified as Pure"   test_pure_builtins,
+    TestCase "readFile is Read"                   test_readFile_is_Read,
+    TestCase "writeFile is Write"                 test_writeFile_is_Write,
+    TestCase "println is Write"                   test_println_is_Write,
+    TestCase "getEnv is Read"                     test_getEnv_is_Read,
+    TestCase "nowMillis is Read"                  test_nowMillis_is_Read,
+    TestCase "spawn is Concurrent"                test_spawn_is_Concurrent,
+    TestCase "chanSend is Concurrent"             test_chanSend_is_Concurrent,
+    TestCase "ffiLoad is Unsafe"                  test_ffiLoad_is_Unsafe,
+    TestCase "parseSym is Meta"                   test_parseSym_is_Meta,
+    TestCase "vmEval is Meta"                     test_vmEval_is_Meta,
+    -- §4: ドメイン
+    TestCase "function signatures contain ->"     test_signatures_are_functions,
+    -- §5: 全カタログ
+    TestCase "every documented builtin has sig"      test_every_documented_has_sig,
+    TestCase "every documented builtin has effect"   test_every_documented_has_effect,
+    TestCase "every documented builtin has domain"   test_every_documented_has_domain,
+    TestCase "every documented builtin has codomain" test_every_documented_has_codomain,
+    -- §6: カテゴリ別効果分類
+    TestCase "network builtins are Concurrent"       test_network_all_concurrent,
+    TestCase "network builtins are blocking or handle" test_network_blocking_or_handle,
+    TestCase "FFI builtins are Unsafe"               test_ffi_all_unsafe,
+    TestCase "concurrency builtins are Concurrent"   test_conc_all_concurrent,
+    TestCase "atomic ops are Read or Mutate"         test_atomic_classification,
+    TestCase "atomic ops are seq-cst"                test_atomic_seq_cst,
+    TestCase "dict mutators are functional-update"   test_dict_mutators_functional,
+    TestCase "dict readers are Pure"                 test_dict_readers_pure,
+    TestCase "time builtins are Read"                test_time_all_read,
+    TestCase "monotonicMillis declares monotonic"    test_monotonicMillis_is_monotonic,
+    TestCase "wall-clocks are non-deterministic"     test_wall_clocks_nondeterministic,
+    TestCase "JSON builtins are Pure"                test_json_pure,
+    TestCase "metadata accessors are Meta"           test_meta_accessors_are_Meta,
+    TestCase "metadata accessors are total"          test_meta_accessors_are_total,
+    TestCase "metadata accessors are self-reference" test_meta_accessors_have_self_ref,
+    -- §7: 集合論的不変条件
+    TestCase "every effect ∈ {8-element enum}"       test_every_effect_in_set
+]
+
+runMain "sample/calc — metadata-driven property tests" cases

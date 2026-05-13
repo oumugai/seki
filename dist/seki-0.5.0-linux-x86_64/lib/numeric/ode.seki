@@ -1,0 +1,62 @@
+-- ===========================================================
+-- lib/numeric/ode.seki — 常微分方程式の数値解法
+--
+-- y' = f(t, y), 初期条件 y(t_0) = y_0
+--
+-- 公開する名前:
+--   def eulerStep / eulerN    — 1 階 ODE, スカラー版 (Euler 法)
+--   def rk4Step   / rk4N      — 1 階 ODE, スカラー版 (4 次 Runge-Kutta)
+--   def rk4StepPair           — 2 変数連立 (高次 ODE 還元用)
+--   def lastOfList             — 系列の末尾値
+-- ===========================================================
+
+-- ----- Euler 法 -----
+def eulerStep := \f h t y -> y + h * (f t y)
+
+def eulerN := \f h t0 y0 n ->
+    if n == 0 then cons y0 nil
+    else
+        let y1 = eulerStep f h t0 y0 in
+        cons y0 (eulerN f h (t0 + h) y1 (n - 1))
+
+-- ----- RK4 法 -----
+def rk4Step := \f h t y ->
+    let k1 = f t y in
+    let k2 = f (t + h / 2.0) (y + h * k1 / 2.0) in
+    let k3 = f (t + h / 2.0) (y + h * k2 / 2.0) in
+    let k4 = f (t + h) (y + h * k3) in
+    y + h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
+
+def rk4N := \f h t0 y0 n ->
+    if n == 0 then cons y0 nil
+    else
+        let y1 = rk4Step f h t0 y0 in
+        cons y0 (rk4N f h (t0 + h) y1 (n - 1))
+
+-- ----- 2 変数連立 ODE (高次 ODE → 1 階連立への還元) -----
+-- 状態: (y, y') を保持
+def rk4StepPair := \f h t st ->
+    let k1 = f t st in
+    let k1y = fst k1 in
+    let k1v = snd k1 in
+    let mid1 = (fst st + h * k1y / 2.0, snd st + h * k1v / 2.0) in
+    let k2 = f (t + h / 2.0) mid1 in
+    let k2y = fst k2 in
+    let k2v = snd k2 in
+    let mid2 = (fst st + h * k2y / 2.0, snd st + h * k2v / 2.0) in
+    let k3 = f (t + h / 2.0) mid2 in
+    let k3y = fst k3 in
+    let k3v = snd k3 in
+    let fin = (fst st + h * k3y, snd st + h * k3v) in
+    let k4 = f (t + h) fin in
+    let k4y = fst k4 in
+    let k4v = snd k4 in
+    let newY = fst st + h * (k1y + 2.0 * k2y + 2.0 * k3y + k4y) / 6.0 in
+    let newV = snd st + h * (k1v + 2.0 * k2v + 2.0 * k3v + k4v) / 6.0 in
+    (newY, newV)
+
+-- ----- ヘルパ: リスト末尾の値 -----
+def lastOfList := \xs ->
+    if null xs then 0.0
+    else if null (tail xs) then head xs
+    else lastOfList (tail xs)

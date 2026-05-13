@@ -1,0 +1,25 @@
+-- ===========================================================
+-- tests/seki/test_cas_bigint.seki — BigInt の検証
+-- ===========================================================
+
+import "../../lib/cas/bigint.seki"
+
+-- 往復: fromInt → toInt
+theorem bigint_zero    : toInt (fromInt 0) == 0 := by eval
+theorem bigint_small   : toInt (fromInt 12345) == 12345 := by eval
+theorem bigint_neg     : toInt (fromInt (0 - 999)) == 0 - 999 := by eval
+
+-- 加算: 100 + 250 = 350
+theorem bigint_add_basic :
+    toInt (bigAddPosPos (fromInt 100) (fromInt 250)) == 350
+  := by eval
+
+-- 桁繰り上がり: 999_999_999 + 1 = 1_000_000_000
+theorem bigint_carry :
+    toInt (bigAddPosPos (fromInt 999999999) (fromInt 1)) == 1000000000
+  := by eval
+
+-- i64 では小さい範囲だが BigInt で複数桁を扱える
+theorem bigint_large_safe :
+    toInt (bigAddPosPos (fromInt 1500000000) (fromInt 1500000000)) == 3000000000
+  := by eval

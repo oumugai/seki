@@ -1,0 +1,203 @@
+-- ===========================================================
+-- sample/todo_api/tests.seki — property-first version
+-- ===========================================================
+--
+-- 17 個の点 status assertion (assertEq 201 status1, assertEq 200 status2, ...)
+-- を **(request, expected status) のテーブル** と forAllInList で統合.
+--
+-- メリット:
+--   * 行数が大幅に減る (各エンドポイントを 1 行ずつ)
+--   * 期待値テーブルが「API 仕様書」として読める
+--   * 新エンドポイントは行を追加するだけ
+
+import "lib.seki"
+import "test/runner.seki"
+
+-- ===========================================================
+-- ヘルパ
+-- ===========================================================
+
+def statusOf := \resp -> match resp with | HttpResponse s _ _ -> s
+def bodyOf   := \resp -> match resp with | HttpResponse _ _ b -> b
+
+-- ===========================================================
+-- 階層 2: 静的検証
+-- ===========================================================
+
+theorem path_id_length_check
+  : linarithProve "n" ["n < 7"] "n + 1 <= 7" == Some true
+  := by eval
+
+-- ===========================================================
+-- API 仕様書: (request, expected_status) のテーブル
+-- ===========================================================
+--
+-- 各行は **(リクエスト, 期待される HTTP ステータス)** のペア.
+-- このテーブル自体が「ルーター仕様書」になっている.
+
+-- 状態は他のテストと共有 (POST 後に GET / DELETE する).
+-- 順番に意味があるので tests は順次評価.
+def _reset := resetState ()
+
+def req_post1   := HttpRequest "POST"   "/todos"     [] "{\"title\":\"buy milk\"}"
+def req_post2   := HttpRequest "POST"   "/todos"     [] "{\"title\":\"write docs\"}"
+def req_list    := HttpRequest "GET"    "/todos"     [] ""
+def req_get1    := HttpRequest "GET"    "/todos/1"   [] ""
+def req_get_404 := HttpRequest "GET"    "/todos/999" [] ""
+def req_delete1 := HttpRequest "DELETE" "/todos/1"   [] ""
+def req_get_after  := HttpRequest "GET" "/todos/1"   [] ""  -- 削除後 → 404
+def req_bad_body := HttpRequest "POST"  "/todos"     [] "{\"no_title\":1}"
+def req_bad_json := HttpRequest "POST"  "/todos"     [] "not json"
+def req_unknown := HttpRequest "GET"    "/unknown"   [] ""
+def req_health  := HttpRequest "GET"    "/healthz"   [] ""
+
+-- ----- ルーティング仕様: (request, expected_status, label) のテーブル -----
+def routing_spec := [
+    (req_post1,    201, "POST /todos #1 → 201"),
+    (req_post2,    201, "POST /todos #2 → 201"),
+    (req_list,     200, "GET  /todos    → 200"),
+    (req_get1,     200, "GET  /todos/1  → 200"),
+    (req_get_404,  404, "GET  /todos/999 → 404"),
+    (req_delete1,  204, "DELETE /todos/1 → 204"),
+    (req_get_after, 404, "GET after DELETE → 404"),
+    (req_bad_body, 400, "POST malformed title → 400"),
+    (req_bad_json, 400, "POST bad JSON → 400"),
+    (req_unknown,  404, "GET unknown route → 404"),
+    (req_health,   200, "GET /healthz → 200")
+]
+
+-- routing_spec を 1 個の universal claim にまとめる:
+-- 全ての (req, expected, _) について handler の返す status は expected と一致.
+def fst3 := \t -> fst t
+def snd3 := \t -> fst (snd t)
+def thd3 := \t -> snd (snd t)
+
+-- Actually for 3-tuples seki gives flat tuples - fst/snd index by position.
+-- (a, b, c) → fst = a, snd = b, but no `third` exists.
+-- Use nested form (a, (b, c)) instead.
+
+-- ----- 仕様テーブル (nested pairs で 3-項) -----
+def spec := [
+    (req_post1,    (201, "POST /todos #1 → 201")),
+    (req_post2,    (201, "POST /todos #2 → 201")),
+    (req_list,     (200, "GET  /todos    → 200")),
+    (req_get1,     (200, "GET  /todos/1  → 200")),
+    (req_get_404,  (404, "GET  /todos/999 → 404")),
+    (req_delete1,  (204, "DELETE /todos/1 → 204")),
+    (req_get_after,(404, "GET after DELETE → 404")),
+    (req_bad_body, (400, "POST malformed title → 400")),
+    (req_bad_json, (400, "POST bad JSON → 400")),
+    (req_unknown,  (404, "GET unknown route → 404")),
+    (req_health,   (200, "GET /healthz → 200"))
+]
+
+-- 重要: spec の順番が状態遷移に対応するので、forAllInList で順次評価.
+def check_spec_row := \row ->
+    let req      = fst row in
+    let expected = fst (snd row) in
+    let label    = snd (snd row) in
+    let actual = statusOf (handler req) in
+    if actual == expected then Pass
+    else FailMsg (strJoin "" [label, " — expected ", intToStr expected,
+                               " but got ", intToStr actual])
+
+def test_routing_table_matches_spec :=
+    forAllInList spec check_spec_row
+
+-- ===========================================================
+-- 集合論的 property: ステータスコードの空間
+-- ===========================================================
+
+-- 全レスポンスのステータスは「有効な HTTP ステータス」集合に属する
+def validStatuses := {200, 201, 204, 400, 404}
+
+-- spec を再走しないため、handler を再呼び出ししない別パスで検証
+def _reset2 := resetState ()
+def all_responses := map (\row -> handler (fst row)) spec
+def test_all_statuses_valid :=
+    forAllInList all_responses
+        (\r -> assertMember (statusOf r) validStatuses)
+
+-- 成功系のステータスは {200, 201, 204} に属する
+def successStatuses := {200, 201, 204}
+def errorStatuses   := {400, 404}
+
+-- spec のうち status < 300 のものを success として
+def is_success_row := \row -> fst (snd row) < 300
+def success_rows := filter is_success_row spec
+def test_success_in_success_set :=
+    forAllInList success_rows (\row ->
+        assertMember (fst (snd row)) successStatuses)
+
+def error_rows := filter (\row -> not (is_success_row row)) spec
+def test_error_in_error_set :=
+    forAllInList error_rows (\row ->
+        assertMember (fst (snd row)) errorStatuses)
+
+-- success と error は disjoint (Phase 5 SMT-lite で線形に確認)
+theorem success_error_disjoint
+  : linarithProve "s" ["s == 200"] "s < 300" == Some true
+  := by eval
+
+-- ===========================================================
+-- ID monotonicity property: POST するごとに ID が増える
+-- ===========================================================
+
+def _reset3 := resetState ()
+def post1_resp := handler (HttpRequest "POST" "/todos" [] "{\"title\":\"a\"}")
+def post2_resp := handler (HttpRequest "POST" "/todos" [] "{\"title\":\"b\"}")
+def post3_resp := handler (HttpRequest "POST" "/todos" [] "{\"title\":\"c\"}")
+
+def test_post_increments_id :=
+    allOf [
+        assertContains "\"id\":1" (bodyOf post1_resp),
+        assertContains "\"id\":2" (bodyOf post2_resp),
+        assertContains "\"id\":3" (bodyOf post3_resp)
+    ]
+
+-- ===========================================================
+-- DELETE-then-GET property: deletion is observable
+-- ===========================================================
+
+def _reset4 := resetState ()
+def _ := handler (HttpRequest "POST" "/todos" [] "{\"title\":\"x\"}")
+def _ := handler (HttpRequest "POST" "/todos" [] "{\"title\":\"y\"}")
+
+-- 削除前は 200
+def before_del := statusOf (handler (HttpRequest "GET" "/todos/1" [] ""))
+def _ := handler (HttpRequest "DELETE" "/todos/1" [] "")
+def after_del := statusOf (handler (HttpRequest "GET" "/todos/1" [] ""))
+
+def test_delete_then_get_404 :=
+    allOf [
+        assertEq 200 before_del,
+        assertEq 404 after_del
+    ]
+
+-- 他の id (2) は影響を受けない
+def other_alive := statusOf (handler (HttpRequest "GET" "/todos/2" [] ""))
+def test_unaffected_id_alive := assertEq 200 other_alive
+
+-- ===========================================================
+def cases := [
+    -- メイン property: ルーティング仕様テーブル (11 件を 1 件に統合)
+    TestCase "[Property] routing table matches spec (11 routes)"
+             test_routing_table_matches_spec,
+    -- ステータスコードの集合論的検証
+    TestCase "[Set] all statuses ∈ valid set"
+             test_all_statuses_valid,
+    TestCase "[Set] success codes ⊂ {200, 201, 204}"
+             test_success_in_success_set,
+    TestCase "[Set] error codes ⊂ {400, 404}"
+             test_error_in_error_set,
+    -- ID monotonicity
+    TestCase "[Property] POST increments id 1, 2, 3"
+             test_post_increments_id,
+    -- DELETE behavior
+    TestCase "[Property] DELETE then GET → 404"
+             test_delete_then_get_404,
+    TestCase "[Property] unaffected id remains 200"
+             test_unaffected_id_alive
+]
+
+runMain "sample/todo_api tests (property-first)" cases

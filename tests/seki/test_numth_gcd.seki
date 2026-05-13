@@ -1,0 +1,36 @@
+-- ===========================================================
+-- tests/seki/test_numth_gcd.seki — gcd / lcm / extGcd / invMod
+-- ===========================================================
+
+import "../../lib/numth/gcd.seki"
+import "../../lib/algebra/modular.seki"
+
+-- ----- 通常の GCD -----
+theorem gcd_basic    : gcd 12 8 == 4 := by eval
+theorem gcd_coprime  : gcd 7 11 == 1 := by eval
+theorem gcd_zero     : gcd 15 0 == 15 := by eval
+theorem gcd_negative : gcd (0 - 12) 8 == 4 := by eval
+
+-- ----- LCM -----
+theorem lcm_basic    : lcm 4 6 == 12 := by eval
+theorem lcm_coprime  : lcm 7 11 == 77 := by eval
+
+-- ----- 拡張 Euclid: g = a*x + b*y を検証 -----
+def egcd_check := \a b ->
+    let t = extGcd a b in
+    let g = egcd_g t in
+    let x = egcd_x t in
+    let y = egcd_y t in
+    a * x + b * y == g
+
+theorem extgcd_12_8   : egcd_check 12 8 := by eval
+theorem extgcd_25_15  : egcd_check 25 15 := by eval
+theorem extgcd_99_78  : egcd_check 99 78 := by eval
+
+-- ----- 法 m での逆元 (invMod は algebra/modular から) -----
+-- 3 * x ≡ 1 (mod 7) → x = 5 (3*5=15=14+1)
+theorem invmod_3_7  : invMod 7 3 == 5 := by eval
+-- 5 * x ≡ 1 (mod 12) → x = 5 (5*5=25=24+1)
+theorem invmod_5_12 : invMod 12 5 == 5 := by eval
+-- 2 * x ≡ 1 (mod 11) → x = 6 (2*6=12=11+1)
+theorem invmod_2_11 : invMod 11 2 == 6 := by eval

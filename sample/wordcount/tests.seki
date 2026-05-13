@@ -1,0 +1,147 @@
+-- ===========================================================
+-- sample/wordcount/tests.seki — property-first version
+-- ===========================================================
+--
+-- 「点」ではなく「振る舞い全体」で wordcount を検証.
+--
+-- 階層 1: 集合論的 invariant を `by algebra` / `by induction` で証明
+-- 階層 2: `forall x in {test_inputs}, P x` を `by eval`
+-- 階層 3: `forAllInList` で動的 property test
+
+import "lib.seki"
+import "test/runner.seki"
+
+-- ===========================================================
+-- 階層 2: 各種テスト入力に対する universal property を `by eval` で
+-- ===========================================================
+
+-- length は非負 (任意 List について構造的に証明可能だが、ここでは
+-- テスト入力集合で確認)
+def test_inputs := [
+    "",                                      -- 空入力
+    "a",                                     -- 単一トークン
+    "the the",                               -- 重複あり
+    "the quick fox",                         -- 重複なし
+    "  spaces  everywhere  ",                -- 空白
+    "Hello WORLD Hello",                     -- 大小混在
+    "a b c d e",                             -- 多要素
+    "seki is set theoretic"
+]
+
+-- ===========================================================
+-- 階層 3: property test — 全テスト入力で成立
+-- ===========================================================
+
+-- ----- Property 1: 結果のキー集合 ⊆ トークン集合 -----
+-- (重複除去された) 結果単語 ⊆ 入力トークン (lowercase 後).
+def words_subset_property := \input ->
+    let result_words = toSet (map fst (wordcount input)) in
+    let tokens = toSet (map strToLower (tokenize input)) in
+    assertSubset result_words tokens
+
+def test_words_are_subset_of_tokens :=
+    forAllInList test_inputs words_subset_property
+
+-- ----- Property 2: 結果の各 count が Pos に属する -----
+def Pos := {x in Int | x > 0}
+
+def count_pos_property := \input ->
+    forAllInList (wordcount input)
+        (\p -> assertMember (snd p) Pos)
+
+def test_counts_in_Pos :=
+    forAllInList test_inputs count_pos_property
+
+-- ----- Property 3: ソート順 — count が非増加 -----
+def sort_order_property := \input ->
+    let xs = wordcount input in
+    if length xs <= 1 then Pass
+    else
+        -- 隣り合うペアの count が非増加
+        let pairs = zip xs (tail xs) in
+        forAllInList pairs (\pp ->
+            assertTrue (snd (fst pp) >= snd (snd pp))
+                "expected non-increasing counts")
+
+-- zip helper (stdlib にない)
+def zip := \xs ys ->
+    if null xs or null ys then nil
+    else cons (head xs, head ys) (zip (tail xs) (tail ys))
+
+def test_sort_order_descending :=
+    forAllInList test_inputs sort_order_property
+
+-- ----- Property 4: count の総和 == トークン数 -----
+-- ∑ counts == 入力トークン数 (空白除去後)
+def total_count_property := \input ->
+    let result = wordcount input in
+    let total = foldr (\p acc -> snd p + acc) 0 result in
+    let tokens_n = length (tokenize input) in
+    assertEq tokens_n total
+
+def test_count_sum_equals_token_count :=
+    forAllInList test_inputs total_count_property
+
+-- ----- Property 5: 小文字化は idempotent — wc(WC(x)) == wc(x) -----
+def idempotence_property := \input ->
+    let r1 = wordcount input in
+    let r2_input = strJoin " " (map (\p -> fst p) r1) in
+    let r2_words = toSet (map fst (wordcount r2_input)) in
+    let r1_words = toSet (map fst r1) in
+    assertSetEq r1_words r2_words
+
+def test_idempotent_on_words :=
+    forAllInList test_inputs idempotence_property
+
+-- ----- Property 6: 空入力の特殊ケース -----
+def test_empty_input := assertEq 0 (length (wordcount ""))
+
+-- ----- Property 7: topN n は length ≤ n -----
+def topN_bound_property := \input ->
+    let r = wordcount input in
+    let n_test = 3 in
+    let top = takeN n_test r in
+    assertTrue (length top <= n_test)
+        "topN result must not exceed N"
+
+def test_topN_bounded :=
+    forAllInList test_inputs topN_bound_property
+
+-- ----- Property 8: 大小無視 — "The" と "the" は同じキー -----
+def test_case_insensitive :=
+    let result1 = wordcount "the The THE" in
+    assertEq 1 (length result1)
+
+-- ===========================================================
+-- 特定値テスト (regression として残す)
+-- ===========================================================
+
+def regression_input := "the quick fox the"
+def regression_result := wordcount regression_input
+
+-- 単純点テスト (regression として)
+def test_regression_count :=
+    let the_count = foldr (\p acc ->
+        if fst p == "the" then snd p else acc) 0 regression_result in
+    assertEq 2 the_count
+
+def test_regression_unique_count :=
+    assertEq 3 (length regression_result)
+
+-- ===========================================================
+def cases := [
+    -- 階層 3 property tests
+    TestCase "[Property] words ⊆ tokens"                test_words_are_subset_of_tokens,
+    TestCase "[Property] counts ∈ Pos (refinement)"     test_counts_in_Pos,
+    TestCase "[Property] sort order: count descending"  test_sort_order_descending,
+    TestCase "[Property] ∑counts == #tokens"            test_count_sum_equals_token_count,
+    TestCase "[Property] wordcount is set-idempotent"   test_idempotent_on_words,
+    TestCase "[Property] topN result length ≤ N"        test_topN_bounded,
+    TestCase "[Property] case-insensitive grouping"     test_case_insensitive,
+    -- regression
+    TestCase "[Regression] empty input → 0 entries"     test_empty_input,
+    TestCase "[Regression] 'the' count in fixed input"  test_regression_count,
+    TestCase "[Regression] 3 unique words in fixed input" test_regression_unique_count
+]
+
+runMain "sample/wordcount tests (property-first)" cases

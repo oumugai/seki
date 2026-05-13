@@ -1,0 +1,166 @@
+-- ===========================================================
+-- 18: 代数的データ型 (data) とパターンマッチ (match)
+--
+-- これまでは「タグ付きペア」を直接書くしかなかったが、
+-- `data` と `match` で簡潔に書けるようになった。
+-- 内部表現は依然としてタグ付き 2-tuple — 純粋な構文糖。
+-- ===========================================================
+
+-- ----- Maybe / Option ------------------------------------------
+data Maybe A = None | Some A
+
+def safeDiv := \a b ->
+    if b == 0 then None else Some (a / b)
+
+safeDiv 10 2                          -- Some 5
+safeDiv 10 0                          -- None
+
+-- パターンマッチで取り出す
+def fromMaybe := \def_val m ->
+    match m with
+    | None -> def_val
+    | Some x -> x
+
+fromMaybe 0 (safeDiv 10 2)            -- 5
+fromMaybe 0 (safeDiv 10 0)            -- 0
+fromMaybe (-1) (Some 42)              -- 42
+
+-- ----- Result (エラー型) ---------------------------------------
+data Result E A = Err E | Ok A
+
+def parseDigit := \c ->
+    match c with
+    | "0" -> Ok 0
+    | "1" -> Ok 1
+    | "2" -> Ok 2
+    | "3" -> Ok 3
+    | "4" -> Ok 4
+    | "5" -> Ok 5
+    | _   -> Err "not a digit"
+
+parseDigit "3"                        -- Ok 3
+parseDigit "x"                        -- Err "not a digit"
+
+-- Result の連鎖 (エラー伝播の手書き版)
+def addDigits := \c1 c2 ->
+    match parseDigit c1 with
+    | Err e -> Err e
+    | Ok x ->
+        match parseDigit c2 with
+        | Err e -> Err e
+        | Ok y -> Ok (x + y)
+
+addDigits "2" "3"                     -- Ok 5
+addDigits "x" "3"                     -- Err "not a digit"
+addDigits "2" "y"                     -- Err "not a digit"
+
+-- ----- 自前の List 型 -----------------------------------------
+data MyList A = MyNil | MyCons A (MyList A)
+
+-- 注: data 宣言は構築子のみを生成する。型名 (`MyList`) は現状は
+-- 集合として自動定義されないので、型注釈 `: MyList Int -> Int` は
+-- 書けない。必要なら手動で `def MyListInt := ...` のように定義する。
+def myLen := \xs ->
+    match xs with
+    | MyNil -> 0
+    | MyCons _ t -> 1 + myLen t
+
+def mySum := \xs ->
+    match xs with
+    | MyNil -> 0
+    | MyCons h t -> h + mySum t
+
+def myMap := \f xs ->
+    match xs with
+    | MyNil -> MyNil
+    | MyCons h t -> MyCons (f h) (myMap f t)
+
+def xs := MyCons 1 (MyCons 2 (MyCons 3 (MyCons 4 (MyCons 5 MyNil))))
+myLen xs                              -- 5
+mySum xs                              -- 15
+myMap (\n -> n * n) xs                -- MyCons 1 (MyCons 4 (...))
+
+-- ----- 二分木 (自前定義) ---------------------------------------
+data BTree A = BLeaf | BNode (BTree A) A (BTree A)
+
+def bSize := \t ->
+    match t with
+    | BLeaf -> 0
+    | BNode l _ r -> 1 + bSize l + bSize r
+
+def bSum := \t ->
+    match t with
+    | BLeaf -> 0
+    | BNode l v r -> v + bSum l + bSum r
+
+def bDepth := \t ->
+    match t with
+    | BLeaf -> 0
+    | BNode l _ r ->
+        let dl = bDepth l in
+        let dr = bDepth r in
+        1 + (if dl > dr then dl else dr)
+
+def t := BNode (BNode BLeaf 1 BLeaf) 2 (BNode BLeaf 3 (BNode BLeaf 4 BLeaf))
+bSize t                               -- 4
+bSum t                                -- 10
+bDepth t                              -- 3
+
+-- ----- 再帰型: 自然数の Peano 表現 ----------------------------
+data Peano = PZ | PS Peano
+
+def peanoToInt := \p ->
+    match p with
+    | PZ -> 0
+    | PS k -> 1 + peanoToInt k
+
+def peanoAdd := \a b ->
+    match a with
+    | PZ -> b
+    | PS k -> PS (peanoAdd k b)
+
+def three := PS (PS (PS PZ))
+def five  := PS (PS (PS (PS (PS PZ))))
+peanoToInt three                      -- 3
+peanoToInt (peanoAdd three five)      -- 8
+
+-- ----- enum 風 (引数なしコンストラクタ) ------------------------
+data Color = Red | Green | Blue | Mix Int
+
+def colorName := \c ->
+    match c with
+    | Red       -> "red"
+    | Green     -> "green"
+    | Blue      -> "blue"
+    | Mix code  -> "custom"
+
+colorName Red                         -- "red"
+colorName Green                       -- "green"
+colorName (Mix 16711680)              -- "custom" (= 0xff0000)
+
+-- ----- リテラルマッチ -----------------------------------------
+def fizzbuzz := \n ->
+    match n mod 15 with
+    | 0 -> "FizzBuzz"
+    | _ ->
+        match n mod 3 with
+        | 0 -> "Fizz"
+        | _ ->
+            match n mod 5 with
+            | 0 -> "Buzz"
+            | _ -> "n/a"
+
+fizzbuzz 15                           -- "FizzBuzz"
+fizzbuzz 9                            -- "Fizz"
+fizzbuzz 10                           -- "Buzz"
+fizzbuzz 7                            -- "n/a"
+
+-- ----- 既存仕様との共存 ---------------------------------------
+-- stdlib の List/Tree (タグ付きペア整数符号化) も引き続き使える
+def std_list := [1, 2, 3]
+length std_list                       -- 3 (stdlib の length)
+head std_list                         -- 1
+
+-- 自前定義した data ADT と stdlib のペア符号化は別物
+-- (stdlib は整数タグ 0/1/2/3、data ADT は文字列タグ)
+-- 互いに干渉しないので段階的な移行も可能

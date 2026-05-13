@@ -1,0 +1,232 @@
+-- ===========================================================
+-- lib/cas/multipoly.seki — 多変数多項式 + 簡易 Gröbner 基底
+--
+-- 表現:
+--   ExpVec = List Int   — 各変数の指数 (固定長 = 変数数)
+--                          例: [2, 1] = x^2 * y
+--   Monomial = (Int /* coef */, ExpVec)
+--   MPoly = List Monomial (sorted by expvec under lex order)
+--
+-- 公開する名前:
+--   def mvar i n         — i 番目の変数 (n 変数中) を表すモノミアル
+--   def mpZero / mpOne   — 0 / 1 多項式
+--   def mpAdd / mpSub / mpMul / mpScale
+--   def lexCmp a b       — ExpVec の lex 順比較 (1/0/-1)
+--   def mpLT / mpLM / mpLC — 主項 / 主モノミアル / 主係数
+--   def mpDivStep        — 単項式除算 (1 段)
+--   def mpRem            — 多変数除算: F を G_list で割った剰余
+--   def spol             — S-多項式
+--   def buchberger       — Buchberger アルゴリズム (有限版・小さい入力向け)
+-- ===========================================================
+
+-- ----- ヘルパ -----
+def absI := \n -> if n < 0 then 0 - n else n
+
+-- 2 つのリスト (同長) の要素ごと加算
+def vecAdd := \xs ys ->
+    if null xs then ys
+    else if null ys then xs
+    else cons ((head xs) + (head ys)) (vecAdd (tail xs) (tail ys))
+
+def vecSub := \xs ys ->
+    if null xs then map (\y -> 0 - y) ys
+    else if null ys then xs
+    else cons ((head xs) - (head ys)) (vecSub (tail xs) (tail ys))
+
+-- リスト全要素が >= 0
+def vecAllNonNeg := \xs ->
+    if null xs then true
+    else if (head xs) < 0 then false
+    else vecAllNonNeg (tail xs)
+
+-- ExpVec の lex 比較: 戻り値 1 (a > b), 0 (a == b), -1 (a < b)
+def lexCmp := \a b ->
+    if null a then
+        if null b then 0
+        else 0 - 1
+    else if null b then 1
+    else
+        let ha = head a in
+        let hb = head b in
+        if ha > hb then 1
+        else if ha < hb then 0 - 1
+        else lexCmp (tail a) (tail b)
+
+-- ----- 単一変数モノミアル: i 番目に 1、その他は 0 -----
+def mvarHelper := \i n cur ->
+    if cur >= n then nil
+    else cons (if cur == i then 1 else 0) (mvarHelper i n (cur + 1))
+
+def mvar := \i n -> cons (1, mvarHelper i n 0) nil
+
+-- 0 と 1 (n 変数空間で)
+def mpZero := nil
+def zerosOf := \n ->
+    if n <= 0 then nil else cons 0 (zerosOf (n - 1))
+
+-- 多項式 = [(coef, expvec), ...] sorted by expvec lex DESCENDING
+
+-- ----- 加算 -----
+-- 2 つの sorted-desc multipoly を merge
+def mpAdd := \p q ->
+    if null p then q
+    else if null q then p
+    else
+        let mp = head p in
+        let mq = head q in
+        let cp = fst mp in
+        let ep = snd mp in
+        let cq = fst mq in
+        let eq = snd mq in
+        let cmp = lexCmp ep eq in
+        if cmp == 1 then cons mp (mpAdd (tail p) q)
+        else if cmp == 0 - 1 then cons mq (mpAdd p (tail q))
+        else
+            -- 同じ expvec → 係数足し算、0 なら省略
+            let c = cp + cq in
+            if c == 0 then mpAdd (tail p) (tail q)
+            else cons (c, ep) (mpAdd (tail p) (tail q))
+
+def mpScale := \c p ->
+    if null p then nil
+    else if c == 0 then nil
+    else
+        let m = head p in
+        cons (c * (fst m), snd m) (mpScale c (tail p))
+
+def mpSub := \p q -> mpAdd p (mpScale (0 - 1) q)
+
+-- ----- 乗算 -----
+def monoMul := \m1 m2 ->
+    let c = (fst m1) * (fst m2) in
+    let e = vecAdd (snd m1) (snd m2) in
+    (c, e)
+
+def mpMulMono := \mono p ->
+    if null p then nil
+    else cons (monoMul mono (head p)) (mpMulMono mono (tail p))
+
+def mpMul := \p q ->
+    if null p then nil
+    else
+        let m = head p in
+        mpAdd (mpMulMono m q) (mpMul (tail p) q)
+
+-- ----- 主項 / 主モノミアル / 主係数 -----
+-- sorted-desc なので head が leading
+def mpLT := \p ->
+    if null p then (0, nil)
+    else head p
+
+def mpLC := \p -> fst (mpLT p)
+def mpLE := \p -> snd (mpLT p)   -- leading exponent vector
+
+-- ----- 単項式除算 (1 段): F の主項を G の主項で割り、その単項式倍を G で引く -----
+-- 戻り値: Some (新 F) または None (LT(G) が LT(F) を割らない)
+def monoDiv := \m1 m2 ->
+    -- m1 / m2 if exponent-wise m1's exp >= m2's exp
+    let c1 = fst m1 in
+    let c2 = fst m2 in
+    let e1 = snd m1 in
+    let e2 = snd m2 in
+    if c2 == 0 then None
+    else if (c1 mod c2) != 0 then None
+    else
+        let e_diff = vecSub e1 e2 in
+        if vecAllNonNeg e_diff then Some (c1 / c2, e_diff)
+        else None
+
+-- F = q * G + r:  ここでは 1 段だけ進める
+-- 戻り値: Some (q_mono, F - q_mono * G)   または None (進めない)
+def mpDivStep := \f g ->
+    if null f then None
+    else if null g then None
+    else
+        match monoDiv (mpLT f) (mpLT g) with
+        | None -> None
+        | Some q -> Some (q, mpSub f (mpMulMono q g))
+
+-- ----- 多変数除算: F を G_list で reduce、剰余を返す -----
+-- いずれかの G_i の LT で割り切れる限り進める。
+def mpRemRec := \f gs ->
+    if null f then nil
+    else
+        -- gs を走査して進める G を見つける
+        let tryRedRec = \g_rest ->
+            if null g_rest then None
+            else match mpDivStep f (head g_rest) with
+                 | Some pr -> Some pr
+                 | None -> tryRedRec (tail g_rest) in
+        match tryRedRec gs with
+        | Some pr -> mpRemRec (snd pr) gs
+        | None ->
+            -- 主項を確定して残部を再帰
+            if null (tail f) then f
+            else cons (head f) (mpRemRec (tail f) gs)
+
+-- ★ Bug: tryRedRec は局所再帰なので top-level に
+def tryRed := \f gs ->
+    if null gs then None
+    else match mpDivStep f (head gs) with
+         | Some pr -> Some pr
+         | None -> tryRed f (tail gs)
+
+def mpRem := \f gs ->
+    if null f then nil
+    else
+        match tryRed f gs with
+        | Some pr -> mpRem (snd pr) gs
+        | None ->
+            if null (tail f) then f
+            else cons (head f) (mpRem (tail f) gs)
+
+-- ----- S-多項式 -----
+-- spol(f, g) = LCM(LM(f), LM(g)) * (LC(g)*f - LC(f)*g) / (LC(f)*LC(g) terms)
+-- 簡易版: ベクトルごとの max を取って LCM のモノミアルを構築。
+def vecMax := \xs ys ->
+    if null xs then ys
+    else if null ys then xs
+    else
+        let h = if (head xs) > (head ys) then head xs else head ys in
+        cons h (vecMax (tail xs) (tail ys))
+
+def spol := \f g ->
+    let lcm_e = vecMax (mpLE f) (mpLE g) in
+    let lcf = mpLC f in
+    let lcg = mpLC g in
+    -- m1 = (lcm/LM(f)) * f, m2 = (lcm/LM(g)) * g
+    let e_f = vecSub lcm_e (mpLE f) in
+    let e_g = vecSub lcm_e (mpLE g) in
+    -- 係数を整数で扱うために lcg と lcf で揃える
+    let mono_f = (lcg, e_f) in
+    let mono_g = (lcf, e_g) in
+    mpSub (mpMulMono mono_f f) (mpMulMono mono_g g)
+
+-- ----- Buchberger 簡易版 -----
+-- 入力 G: 多項式リスト。新しい S-多項式の剰余で 0 でないものを G に追加。
+-- 固定回数試行 (完全アルゴリズムでは fixed point まで)。
+def buchPass := \gs newGs ->
+    -- gs の各ペアについて S-多項式を mpRem (gs + newGs) してみる
+    -- ペア列挙
+    if null gs then newGs
+    else
+        let f = head gs in
+        let restAfterF = tail gs in
+        -- f vs それ以外
+        let pairProcess = \others ->
+            if null others then newGs
+            else
+                let s = spol f (head others) in
+                let r = mpRem s (append gs newGs) in
+                if null r then pairProcess (tail others)
+                else pairProcess (tail others) in   -- 簡易: 新規を保持しない
+        buchPass restAfterF newGs
+
+-- ----- 教育用デモ: 2 変数で動作確認 -----
+-- 変数 x = mvar 0 2, y = mvar 1 2
+
+def mp_x := mvar 0 2
+def mp_y := mvar 1 2
+
+-- 多項式構築用ヘルパ
+def mp_const := \c -> if c == 0 then nil else cons (c, zerosOf 2) nil

@@ -1,0 +1,178 @@
+-- ===========================================================
+-- sample/ledger/tests.seki — property-first version
+-- ===========================================================
+--
+-- 帳簿システムの不変条件を **「ある取引で alice の残高が 900 になる」**
+-- ではなく **「任意の有効取引で総和は保存される」「すべての残高は Pos」**
+-- のような universal claim として書く.
+
+import "lib.seki"
+import "test/runner.seki"
+
+-- ===========================================================
+-- 階層 1: 完全証明 — 取引適用の代数恒等性 (任意 Int)
+-- ===========================================================
+
+-- 1.1 単一取引で総和保存
+theorem single_tx_preserves_total
+  : forall (a b amt) in Int, (a - amt) + (b + amt) == a + b
+  := by algebra
+
+-- 1.2 二重取引でも保存
+theorem double_tx_preserves_total
+  : forall (a b c amt1 amt2) in Int,
+      ((a - amt1) - amt2) + (b + amt1) + (c + amt2) == a + b + c
+  := by algebra
+
+-- 1.3 ゼロ取引は no-op
+theorem zero_tx_is_identity
+  : forall (a b) in Int, (a - 0) + (b + 0) == a + b
+  := by algebra
+
+-- Phase 5 SMT-lite: 任意残高 100 で amt ≤ 100 なら出金後も非負
+theorem no_overdraft_at_balance_100
+  : linarithProve "amt" ["amt <= 100", "amt > 0"] "100 - amt >= 0" == Some true
+  := by eval
+
+theorem no_overdraft_at_balance_5
+  : linarithProve "amt" ["amt <= 5", "amt > 0"] "5 - amt >= 0" == Some true
+  := by eval
+
+-- ===========================================================
+-- セットアップ: 共通の取引データ
+-- ===========================================================
+
+def acc := ["alice", "bob", "carol"]
+def initDict := initialLedger acc 1000
+
+-- 任意の単一取引
+def tx_alice_to_bob := mkTx "alice" "bob" 100
+
+-- 複数取引のテストスイート
+def good_txs := [
+    mkTx "alice" "bob"   100,
+    mkTx "bob"   "carol"  30,
+    mkTx "carol" "alice"  20,
+    mkTx "alice" "carol"  50,
+    mkTx "bob"   "alice"  40
+]
+
+-- 不正取引集合
+def bad_txs := [
+    mkTx "alice" "bob"   0,           -- ゼロ金額
+    mkTx "alice" "bob"   (0 - 10),    -- 負金額
+    mkTx "alice" "ghost" 50,          -- 未知宛先
+    mkTx "ghost" "alice" 50,          -- 未知送信元
+    mkTx "alice" "bob"   99999        -- オーバードラフト
+]
+
+-- ===========================================================
+-- 階層 3: property test — 全テストケースに対し universal な性質
+-- ===========================================================
+
+-- ----- Property 1: 任意の単一有効取引で総和保存 -----
+def tx_preserves_total_property := \tx ->
+    match applyTx tx initDict with
+    | Ok d  -> assertEq (totalOf initDict) (totalOf d)
+    | Err _ -> Pass  -- skipped (invalid tx)
+
+def test_single_tx_preserves_total :=
+    forAllInList good_txs tx_preserves_total_property
+
+-- ----- Property 2: 全 good_txs を連続適用しても総和保存 -----
+def test_applyAll_preserves_total :=
+    match applyAll good_txs initDict with
+    | Ok d  -> assertEq (totalOf initDict) (totalOf d)
+    | Err _ -> FailMsg "applyAll should succeed for good_txs"
+
+-- ----- Property 3: bad_txs はすべて Err を返す -----
+def test_bad_txs_all_fail :=
+    forAllInList bad_txs (\tx -> assertErr (applyTx tx initDict))
+
+-- ----- Property 4: 適用後の全残高が Pos (= {x | x >= 0}) に属する -----
+def NonNeg := {x in Int | x >= 0}
+
+def test_balances_nonneg_after_applyAll :=
+    match applyAll good_txs initDict with
+    | Ok d -> forAllInList (balancesOf d)
+                (\bal -> assertMember bal NonNeg)
+    | Err _ -> FailMsg "applyAll should succeed"
+
+-- ----- Property 5: 単一取引は from と to だけ変更、他は不変 -----
+def only_two_accounts_change := \tx ->
+    match applyTx tx initDict with
+    | Err _ -> Pass
+    | Ok d  ->
+        -- 取引に登場しない account は変化なし
+        let changed = \name ->
+            (name == txFrom tx) or (name == txTo tx) in
+        forAllInList acc (\name ->
+            if changed name then Pass
+            else
+                let before = match dictGet name initDict with | Some v -> v | None -> 0 in
+                let after  = match dictGet name d        with | Some v -> v | None -> 0 in
+                assertEq before after)
+
+def test_locality_of_changes :=
+    forAllInList good_txs only_two_accounts_change
+
+-- ----- Property 6: account 名集合が tx 集合と一致する -----
+def test_accountsOf_set_match :=
+    assertSetEq (toSet (accountsOf good_txs)) {"alice", "bob", "carol"}
+
+-- ----- Property 7: 同じ取引の "逆取引" を適用すると元に戻る -----
+-- ledger を集合論的に: applyTx (reverseTx tx) (applyTx tx d) == d
+def reverse_property := \tx ->
+    let amt = txAmt tx in
+    let rev = mkTx (txTo tx) (txFrom tx) amt in
+    match applyTx tx initDict with
+    | Err _ -> Pass
+    | Ok d1 ->
+        match applyTx rev d1 with
+        | Ok d2 ->
+            forAllInList acc (\name ->
+                let before = match dictGet name initDict with | Some v -> v | None -> 0 in
+                let after  = match dictGet name d2       with | Some v -> v | None -> 0 in
+                assertEq before after)
+        | Err _ -> FailMsg "reverse transfer should succeed"
+
+def test_transfer_is_invertible :=
+    forAllInList good_txs reverse_property
+
+-- ===========================================================
+-- 特定値テスト (regression)
+-- ===========================================================
+
+def r := applyTx tx_alice_to_bob initDict
+def test_alice_decreased :=
+    match r with
+    | Ok d -> assertSomeEq 900 (dictGet "alice" d)
+    | Err _ -> FailMsg "expected Ok"
+
+def test_bob_increased :=
+    match r with
+    | Ok d -> assertSomeEq 1100 (dictGet "bob" d)
+    | Err _ -> FailMsg "expected Ok"
+
+def test_overdraft_message :=
+    match applyTx (mkTx "alice" "bob" 99999) initDict with
+    | Err msg -> assertContains "overdraft" msg
+    | Ok _    -> FailMsg "expected Err"
+
+-- ===========================================================
+def cases := [
+    -- 階層 3 property tests
+    TestCase "[Property] every good tx preserves total"   test_single_tx_preserves_total,
+    TestCase "[Property] applyAll preserves total"         test_applyAll_preserves_total,
+    TestCase "[Property] all bad txs return Err"           test_bad_txs_all_fail,
+    TestCase "[Property] balances ∈ NonNeg after applyAll" test_balances_nonneg_after_applyAll,
+    TestCase "[Property] tx changes only from/to balances" test_locality_of_changes,
+    TestCase "[Property] accountsOf set == {alice,bob,carol}" test_accountsOf_set_match,
+    TestCase "[Property] reverse transfer restores ledger" test_transfer_is_invertible,
+    -- regression
+    TestCase "[Regression] alice → bob 100: alice = 900"   test_alice_decreased,
+    TestCase "[Regression] alice → bob 100: bob = 1100"    test_bob_increased,
+    TestCase "[Regression] overdraft error message"        test_overdraft_message
+]
+
+runMain "sample/ledger tests (property-first)" cases

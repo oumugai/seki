@@ -1,0 +1,107 @@
+-- ===========================================================
+-- 09: アルゴリズムと数学公式の検証
+--
+-- 関数を再帰で定義し、それが満たすべき数学的恒等式を有限範囲で
+-- 完全に検証する(本物の証明 by 全列挙)。
+-- ===========================================================
+
+-- ----- 累乗 (繰り返し二乗) -----
+def power : Nat -> Nat -> Nat := \(b : Nat) (n : Nat) ->
+    if n == 0 then 1
+    else if n mod 2 == 0 then
+        let h = power b (n / 2) in h * h
+    else
+        b * power b (n - 1)
+
+power 2 10            -- 1024
+power 3 4             -- 81
+power 5 0             -- 1
+
+-- 累乗則: b^m * b^n == b^(m+n)
+def Sm := {0, 1, 2, 3, 4}        -- 指数の小範囲
+theorem power_add
+    : forall b in {2, 3, 5},
+        forall m in Sm, forall n in Sm,
+            power b m * power b n == power b (m + n)
+    := by eval
+
+-- (b^m)^n == b^(m*n)
+theorem power_mul
+    : forall b in {2, 3},
+        forall m in {0, 1, 2, 3}, forall n in {0, 1, 2, 3},
+            power (power b m) n == power b (m * n)
+    := by eval
+
+-- ----- 総和 sum n = 0+1+...+n -----
+def sum : Nat -> Nat := \(n : Nat) ->
+    if n == 0 then 0 else n + sum (n - 1)
+
+sum 10                -- 55
+sum 100               -- 5050
+
+-- Gauss の公式: sum n == n*(n+1)/2
+def S20 := {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+            11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
+theorem gauss_sum
+    : forall n in S20, sum n == n * (n + 1) / 2
+    := by eval
+
+-- 平方和: 0² + 1² + ... + n² == n*(n+1)*(2n+1)/6
+def sumSq : Nat -> Nat := \(n : Nat) ->
+    if n == 0 then 0 else n * n + sumSq (n - 1)
+
+theorem sum_squares
+    : forall n in S20,
+        sumSq n == n * (n + 1) * (2 * n + 1) / 6
+    := by eval
+
+-- ----- 二項係数 C(n, k) -----
+def choose : Nat -> Nat -> Nat := \(n : Nat) (k : Nat) ->
+    if k == 0 then 1
+    else if k > n then 0
+    else if k == n then 1
+    else choose (n - 1) (k - 1) + choose (n - 1) k
+
+choose 5 2            -- 10
+choose 10 3           -- 120
+
+-- 対称性: C(n, k) == C(n, n - k)
+def Sn := {0, 1, 2, 3, 4, 5, 6, 7}
+theorem choose_sym
+    : forall n in Sn, forall k in {0, 1, 2, 3, 4, 5, 6, 7},
+        if k <= n then choose n k == choose n (n - k) else true
+    := by eval
+
+-- パスカルの恒等式: C(n, k) == C(n-1, k-1) + C(n-1, k)
+theorem pascal
+    : forall n in {1, 2, 3, 4, 5, 6},
+        forall k in {1, 2, 3, 4, 5},
+            if k <= n then
+                choose n k == choose (n - 1) (k - 1) + choose (n - 1) k
+            else true
+    := by eval
+
+-- 行 n の総和: ΣC(n, k) (k=0..n) == 2^n
+def rowSum : Nat -> Nat -> Nat := \(n : Nat) (k : Nat) ->
+    if k > n then 0
+    else choose n k + rowSum n (k + 1)
+
+theorem pascal_row_sum
+    : forall n in {0, 1, 2, 3, 4, 5, 6, 7},
+        rowSum n 0 == power 2 n
+    := by eval
+
+-- ----- 整数除算と剰余の関係: n == (n/d) * d + (n mod d) -----
+def Nx := {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+def Dx := {1, 2, 3, 4, 5}
+theorem div_mod
+    : forall n in Nx, forall d in Dx,
+        n == (n / d) * d + (n mod d)
+    := by eval
+
+-- ----- 分配律(整数) — Bool 版と類似だが算術 -----
+def Sx := {-3, -2, -1, 0, 1, 2, 3}
+theorem int_distrib
+    : forall a in Sx, forall b in Sx, forall c in Sx,
+        a * (b + c) == a * b + a * c
+    := by eval

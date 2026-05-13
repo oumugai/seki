@@ -1,0 +1,53 @@
+-- ===========================================================
+-- tests/seki/test_combinatorics.seki — 階乗・二項係数・Catalan 等
+-- ===========================================================
+
+import "../../lib/combinatorics/basic.seki"
+
+-- ----- 階乗 -----
+theorem fact_0 : factorial 0 == 1   := by eval
+theorem fact_1 : factorial 1 == 1   := by eval
+theorem fact_5 : factorial 5 == 120 := by eval
+theorem fact_7 : factorial 7 == 5040 := by eval
+
+-- ----- 二項係数 -----
+theorem binom_0_0 : binomial 0 0 == 1  := by eval
+theorem binom_5_0 : binomial 5 0 == 1  := by eval
+theorem binom_5_5 : binomial 5 5 == 1  := by eval
+theorem binom_5_2 : binomial 5 2 == 10 := by eval
+theorem binom_6_3 : binomial 6 3 == 20 := by eval
+theorem binom_7_3 : binomial 7 3 == 35 := by eval
+
+-- パスカル恒等式: C(n,k) = C(n-1,k-1) + C(n-1,k)
+theorem pascal_5_2 : binomial 5 2 == binomial 4 1 + binomial 4 2 := by eval
+theorem pascal_6_3 : binomial 6 3 == binomial 5 2 + binomial 5 3 := by eval
+
+-- 対称性: C(n, k) = C(n, n-k)
+theorem binom_symm_5_2 : binomial 5 2 == binomial 5 3 := by eval
+theorem binom_symm_7_3 : binomial 7 3 == binomial 7 4 := by eval
+
+-- ----- 順列 P(n, k) -----
+theorem perm_5_2 : permutation 5 2 == 20  := by eval     -- 5*4
+theorem perm_6_3 : permutation 6 3 == 120 := by eval     -- 6*5*4
+theorem perm_7_0 : permutation 7 0 == 1   := by eval
+
+-- ----- Catalan 数: 1, 1, 2, 5, 14, 42, 132 -----
+theorem catalan_0 : catalan 0 == 1  := by eval
+theorem catalan_1 : catalan 1 == 1  := by eval
+theorem catalan_2 : catalan 2 == 2  := by eval
+theorem catalan_3 : catalan 3 == 5  := by eval
+theorem catalan_4 : catalan 4 == 14 := by eval
+
+-- ----- Fibonacci -----
+theorem fib_0  : fib 0 == 0 := by eval
+theorem fib_5  : fib 5 == 5 := by eval
+theorem fib_10 : fib 10 == 55 := by eval
+
+-- ----- Stirling 第 2 種: S(n, k) -----
+-- S(0, 0) = 1, S(n, 0) = 0 (n > 0), S(n, 1) = 1, S(n, n) = 1
+-- S(3, 2) = 3, S(4, 2) = 7
+theorem stir2_0_0 : stirling2 0 0 == 1 := by eval
+theorem stir2_3_1 : stirling2 3 1 == 1 := by eval
+theorem stir2_3_2 : stirling2 3 2 == 3 := by eval
+theorem stir2_4_2 : stirling2 4 2 == 7 := by eval
+theorem stir2_5_3 : stirling2 5 3 == 25 := by eval

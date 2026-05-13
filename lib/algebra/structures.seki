@@ -1,0 +1,178 @@
+-- ===========================================================
+-- lib/algebra/structures.seki — 代数的構造を「データ + 演算」として
+--                              一つの値にバンドル (OO ハイブリッド方式)
+--
+-- 数学的構造 G = (S, op, e, inv) を `data Group A` の値として持ち、
+-- アクセサ (`groupCarrier`, `groupOp`, ...) と公理述語 (`isGroupOn`)
+-- を介して扱う。型クラスと違い、同じ underlying type で複数の構造
+-- (e.g., Z/12Z と Z/13Z はどちらも Int 上の群) を別の値として並べる
+-- ことができる。
+--
+-- 公開する名前:
+--   data Magma / Semigroup / Monoid / Group / Ring / Field
+--   mk* (構築子), *Carrier/*Op/*E/*Inv/*Add/*Mul/... (アクセサ),
+--   is*On (構造体引数を取る公理述語)
+-- ===========================================================
+
+import "axioms.seki"
+
+-- ===========================================================
+-- §1. Magma / Semigroup / Monoid / Group の階層
+-- ===========================================================
+
+-- ----- Magma: (S, op) -----
+data Magma A = MkMagma A (A -> A -> A)
+
+def magmaCarrier := \m -> match m with | MkMagma s _ -> s
+def magmaOp      := \m -> match m with | MkMagma _ o -> o
+
+def isMagmaOn := \m -> isClosed (magmaCarrier m) (magmaOp m)
+
+-- ----- Semigroup: (S, op) with associativity -----
+data Semigroup A = MkSemigroup A (A -> A -> A)
+
+def sgCarrier := \s -> match s with | MkSemigroup c _ -> c
+def sgOp      := \s -> match s with | MkSemigroup _ o -> o
+
+def isSemigroupOn := \s ->
+    (isClosed (sgCarrier s) (sgOp s)) and (isAssoc (sgCarrier s) (sgOp s))
+
+-- ----- Monoid: (S, op, e) -----
+data Monoid A = MkMonoid A (A -> A -> A) A
+
+def monoidCarrier := \m -> match m with | MkMonoid c _ _ -> c
+def monoidOp      := \m -> match m with | MkMonoid _ o _ -> o
+def monoidE       := \m -> match m with | MkMonoid _ _ e -> e
+
+def isMonoidOn := \m ->
+    isMonoid (monoidCarrier m) (monoidOp m) (monoidE m)
+
+-- ----- Group: (S, op, e, inv) -----
+data Group A = MkGroup A (A -> A -> A) A (A -> A)
+
+def groupCarrier := \g -> match g with | MkGroup c _ _ _ -> c
+def groupOp      := \g -> match g with | MkGroup _ o _ _ -> o
+def groupE       := \g -> match g with | MkGroup _ _ e _ -> e
+def groupInv     := \g -> match g with | MkGroup _ _ _ i -> i
+
+def isGroupOn := \g ->
+    isGroup (groupCarrier g) (groupOp g) (groupE g) (groupInv g)
+
+def isAbelianGroupOn := \g ->
+    isAbelianGroup (groupCarrier g) (groupOp g) (groupE g) (groupInv g)
+
+-- ----- 構造体から下位構造体への昇格/降格 -----
+-- Group → Monoid: 逆元情報を捨てる
+def groupToMonoid := \g ->
+    MkMonoid (groupCarrier g) (groupOp g) (groupE g)
+
+-- ===========================================================
+-- §2. Ring / CommRing / Field
+-- ===========================================================
+
+-- ----- Ring: (S, 0, 1, neg, add, mul) -----
+-- (加法可換群) ∧ (乗法モノイド) ∧ 分配律
+data Ring A = MkRing A A A (A -> A) (A -> A -> A) (A -> A -> A)
+
+def ringCarrier := \r -> match r with | MkRing c _ _ _ _ _ -> c
+def ringZero    := \r -> match r with | MkRing _ z _ _ _ _ -> z
+def ringOne     := \r -> match r with | MkRing _ _ o _ _ _ -> o
+def ringNeg     := \r -> match r with | MkRing _ _ _ n _ _ -> n
+def ringAdd     := \r -> match r with | MkRing _ _ _ _ a _ -> a
+def ringMul     := \r -> match r with | MkRing _ _ _ _ _ m -> m
+
+-- Ring の加法群構造 / 乗法モノイド構造を取り出す
+def ringAddGroup := \r ->
+    MkGroup (ringCarrier r) (ringAdd r) (ringZero r) (ringNeg r)
+
+def ringMulMonoid := \r ->
+    MkMonoid (ringCarrier r) (ringMul r) (ringOne r)
+
+def isRingOn := \r ->
+    isRing (ringCarrier r) (ringZero r) (ringOne r)
+           (ringNeg r) (ringAdd r) (ringMul r)
+
+def isCommutativeRingOn := \r ->
+    isCommutativeRing (ringCarrier r) (ringZero r) (ringOne r)
+                       (ringNeg r) (ringAdd r) (ringMul r)
+
+-- ----- Field: Ring + 乗法逆元 -----
+data Field A = MkField A A A (A -> A) (A -> A -> A) (A -> A -> A) (A -> A)
+--                    carrier 0 1 neg add mul invMul
+
+def fieldCarrier := \f -> match f with | MkField c _ _ _ _ _ _ -> c
+def fieldZero    := \f -> match f with | MkField _ z _ _ _ _ _ -> z
+def fieldOne     := \f -> match f with | MkField _ _ o _ _ _ _ -> o
+def fieldNeg     := \f -> match f with | MkField _ _ _ n _ _ _ -> n
+def fieldAdd     := \f -> match f with | MkField _ _ _ _ a _ _ -> a
+def fieldMul     := \f -> match f with | MkField _ _ _ _ _ m _ -> m
+def fieldInvMul  := \f -> match f with | MkField _ _ _ _ _ _ i -> i
+
+-- Field の Ring 構造を取り出す
+def fieldToRing := \f ->
+    MkRing (fieldCarrier f) (fieldZero f) (fieldOne f)
+           (fieldNeg f) (fieldAdd f) (fieldMul f)
+
+def isFieldOn := \f ->
+    isField (fieldCarrier f) (fieldZero f) (fieldOne f)
+            (fieldNeg f) (fieldAdd f) (fieldMul f) (fieldInvMul f)
+
+-- ===========================================================
+-- §3. 群準同型 (Group homomorphism)
+-- ===========================================================
+-- φ : G → H が群準同型 ⇔ ∀ a, b ∈ G, φ(a · b) = φ(a) * φ(b)
+-- (G の演算で a, b を結合して写したものが、H の演算で写した結果を結合したものと一致)
+
+def isHomomorphismGG := \g h phi ->
+    forall a in (groupCarrier g),
+    forall b in (groupCarrier g),
+        phi (groupOp g a b) == groupOp h (phi a) (phi b)
+
+-- 像が H に閉じている (准同型の前提条件として)
+def imageInOf := \g h phi ->
+    forall a in (groupCarrier g), (phi a) in (groupCarrier h)
+
+-- ===========================================================
+-- §4. 部分群 (Subgroup) と核 (Kernel) / 像 (Image)
+-- ===========================================================
+
+-- ----- 部分群: H ⊆ G の carrier 上で同じ演算が閉じている + 単位元あり + 逆元あり -----
+-- H は subset として与え、G の演算をそのまま使う。
+def isSubgroupOf := \g h_carrier ->
+    let op = groupOp g in
+    let e = groupE g in
+    let inv = groupInv g in
+    (h_carrier subset (groupCarrier g)) and       -- 部分集合
+    (e in h_carrier) and                          -- 単位元を含む
+    (forall a in h_carrier, forall b in h_carrier, (op a b) in h_carrier) and  -- 閉じている
+    (forall a in h_carrier, (inv a) in h_carrier)  -- 逆元を含む
+
+-- ----- 像 (Image): φ(G) のうち H に属する元の集合 -----
+-- ※ 集合論的には image φ G = {φ(a) | a ∈ carrier(G)}
+-- seki では comprehension で表現するが、入力 carrier が有限のときのみ動く。
+def imageOfHomo := \g h phi ->
+    {y in (groupCarrier h) | exists a in (groupCarrier g), phi a == y}
+
+-- ----- 核 (Kernel): φ⁻¹(e_H) — φ(a) = e_H となる G の元の集合 -----
+def kernelOfHomo := \g h phi ->
+    {a in (groupCarrier g) | phi a == groupE h}
+
+-- ----- 核が H の単位元から φ で逆引きされること -----
+def kernelContainsE := \g h phi ->
+    phi (groupE g) == groupE h    -- 自明: φ(e_G) = e_H が成立すれば常に e_G は kernel に含まれる
+
+-- ----- 単射性 (injective) チェック (有限のとき) -----
+def isInjectiveOn := \g phi ->
+    forall a in (groupCarrier g), forall b in (groupCarrier g),
+        (phi a == phi b) => (a == b)
+
+-- ----- 全射性 (surjective onto h_carrier) -----
+def isSurjectiveOnto := \g h_carrier phi ->
+    forall y in h_carrier, exists a in (groupCarrier g), phi a == y
+
+-- ----- 同型 (isomorphism) -----
+def isIsomorphismGG := \g h phi ->
+    (isHomomorphismGG g h phi) and
+    (imageInOf g h phi) and
+    (isInjectiveOn g phi) and
+    (isSurjectiveOnto g (groupCarrier h) phi)

@@ -1,0 +1,49 @@
+-- ===========================================================
+-- lib/analysis/diff.seki — 数値微分
+--
+-- 公開する名前:
+--   def diffForward h f x    — 前進差分: (f(x+h) - f(x)) / h
+--   def diffBackward h f x   — 後退差分: (f(x) - f(x-h)) / h
+--   def diffCentral h f x    — 中心差分: (f(x+h) - f(x-h)) / (2h)
+--                                (誤差 O(h²) — 高精度)
+--   def diff2Central h f x   — 2 階の中心差分
+--                                (f(x+h) - 2 f(x) + f(x-h)) / h²
+--   def gradient h f xs i    — 多変数 f の i 番目偏微分 (中心差分)
+-- ===========================================================
+
+def diffForward := \h f x ->
+    (f (x + h) - f x) / h
+
+def diffBackward := \h f x ->
+    (f x - f (x - h)) / h
+
+def diffCentral := \h f x ->
+    (f (x + h) - f (x - h)) / (2.0 * h)
+
+-- 2 階導関数 (中心差分): f''(x) ≈ (f(x+h) - 2f(x) + f(x-h)) / h²
+def diff2Central := \h f x ->
+    (f (x + h) - 2.0 * (f x) + f (x - h)) / (h * h)
+
+-- ----- 多変数の偏微分: f : List Real → Real, i 番目の変数で微分 -----
+-- xs[i] を h だけ動かして中心差分を取る
+def replaceAt := \i v xs ->
+    if null xs then nil
+    else if i == 0 then cons v (tail xs)
+    else cons (head xs) (replaceAt (i - 1) v (tail xs))
+
+def listAt := \i xs ->
+    if i == 0 then head xs
+    else listAt (i - 1) (tail xs)
+
+def partialDeriv := \h f xs i ->
+    let xi = listAt i xs in
+    let xs_plus  = replaceAt i (xi + h) xs in
+    let xs_minus = replaceAt i (xi - h) xs in
+    (f xs_plus - f xs_minus) / (2.0 * h)
+
+-- ----- 勾配: ∇f(xs) を List Real として返す -----
+def gradientRec := \h f xs i n ->
+    if i >= n then nil
+    else cons (partialDeriv h f xs i) (gradientRec h f xs (i + 1) n)
+
+def gradient := \h f xs -> gradientRec h f xs 0 (length xs)

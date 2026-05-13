@@ -1,0 +1,147 @@
+-- ===========================================================
+-- 26: 計算機代数 (CAS) — 記号式・代数簡約・微分・積分
+--
+-- ライブラリ: `cas/calc.seki` (微分・積分) + `cas/sym_dsl.seki` (短縮構築子)
+-- 式の構築は **3 通り** から選べる:
+--   1. 旧 ADT 直接: SAdd (SMul (SNum 2) (SVar "x")) (SNum 3)
+--   2. smart constructor DSL: add (mul (num 2) sx) (num 3)
+--   3. parseSym で math notation: parseSym "2 * x + 3"   ← 本ファイルでは主にこれを使う
+-- ===========================================================
+
+import "cas/calc.seki"
+import "cas/sym_dsl.seki"
+
+-- ===========================================================
+-- 微分の例題 (parseSym 記法)
+-- ===========================================================
+
+-- d/dx (x²) = 2x
+def d_x2 := differ "x" (parseSym "pow x 2")
+d_x2
+
+-- d/dx (sin x) = cos x
+def d_sin := differ "x" (parseSym "sin x")
+d_sin
+
+-- d/dx (cos x) = -sin x
+def d_cos := differ "x" (parseSym "cos x")
+d_cos
+
+-- d/dx (x * sin x) = sin x + x * cos x (積の微分)
+def d_xsinx := differ "x" (parseSym "x * sin x")
+d_xsinx
+
+-- ===========================================================
+-- 積分の例題
+-- ===========================================================
+
+-- ∫x dx = x²/2
+def i_x := integS "x" (parseSym "x")
+i_x
+
+-- ∫x² dx = x³/3
+def i_x2 := integS "x" (parseSym "pow x 2")
+i_x2
+
+-- ∫sin(x) dx = -cos(x)
+def i_sin := integS "x" (parseSym "sin x")
+i_sin
+
+-- ===========================================================
+-- 数値評価 (subst + evalNum)
+-- ===========================================================
+
+def f_quad := parseSym "pow x 2 - 4 * x + 4"
+-- x² - 4x + 4 at x=2 = 0
+theorem f_quad_at_2 : evalAt "x" 2 f_quad == Some 0 := by eval
+
+-- 導関数を x=3 で評価: (x²)' = 2x → 6
+theorem d_x2_at_3 : evalAt "x" 3 (differ "x" (parseSym "pow x 2")) == Some 6 := by eval
+
+-- (x³ + 2x)' = 3x² + 2 at x=2 → 14
+theorem d_x3_2x_at_2
+  : evalAt "x" 2 (differ "x" (parseSym "pow x 3 + 2 * x")) == Some 14
+  := by eval
+
+-- ===========================================================
+-- 微分の数値検証
+-- ===========================================================
+
+-- f(x) = x² + 3x + 5, f'(x) = 2x + 3
+def poly1  := parseSym "pow x 2 + 3 * x + 5"
+def dpoly1 := differ "x" poly1
+
+theorem dpoly_at_0 : evalAt "x" 0 dpoly1 == Some 3  := by eval
+theorem dpoly_at_1 : evalAt "x" 1 dpoly1 == Some 5  := by eval
+theorem dpoly_at_5 : evalAt "x" 5 dpoly1 == Some 13 := by eval
+
+-- ===========================================================
+-- 微積分学の基本定理: d/dx (∫f dx) = f
+-- ===========================================================
+
+def f    := parseSym "pow x 2"
+def back := differ "x" (integ "x" f)
+
+theorem ftc_at_0 : evalAt "x" 0 back == Some 0 := by eval
+theorem ftc_at_3 : evalAt "x" 3 back == Some 9 := by eval
+
+-- ===========================================================
+-- ライプニッツ規則: (fg)' = f'g + fg'
+-- 検証: (x² · x³)' == (x⁵)' を 3 点で
+-- ===========================================================
+
+def fg   := parseSym "pow x 2 * pow x 3"
+def d_fg := differ "x" fg
+def d_x5 := differ "x" (parseSym "pow x 5")
+
+theorem leibniz_at_1 : evalAt "x" 1 d_fg == evalAt "x" 1 d_x5 := by eval
+theorem leibniz_at_2 : evalAt "x" 2 d_fg == evalAt "x" 2 d_x5 := by eval
+theorem leibniz_at_3 : evalAt "x" 3 d_fg == evalAt "x" 3 d_x5 := by eval
+
+-- ===========================================================
+-- 高階微分: d²/dx² (x⁴) = 12x²
+-- ===========================================================
+
+def x4    := parseSym "pow x 4"
+def d1_x4 := differ "x" x4
+def d2_x4 := differ "x" d1_x4
+
+theorem d2_x4_at_1 : evalAt "x" 1 d2_x4 == Some 12 := by eval
+theorem d2_x4_at_2 : evalAt "x" 2 d2_x4 == Some 48 := by eval
+
+-- ===========================================================
+-- §A. 3 通りの記法の同値性
+-- ===========================================================
+
+-- 同じ式 2*x² + 3 を 3 通りで構築
+def expr_adt   := SAdd (SMul (SNum 2) (SPow (SVar "x") 2)) (SNum 3)
+def expr_dsl   := add (mul (num 2) (sq sx)) (num 3)
+def expr_parse := parseSym "2 * pow x 2 + 3"
+
+theorem dsl_eq_adt   : expr_dsl   == expr_adt := by eval
+theorem parse_eq_adt : expr_parse == expr_adt := by eval
+
+-- ===========================================================
+-- §B. parseSym の応用 — 連鎖律・ネスト
+-- ===========================================================
+
+-- f(x) = x² + 3x + 5 の f'(4) = 2*4 + 3 = 11
+def f_str := parseSym "pow x 2 + 3 * x + 5"
+def d_str := differ "x" f_str
+theorem parse_diff_at_4 : evalAt "x" 4 d_str == Some 11 := by eval
+
+-- ネスト (連鎖律): sin (cos x) の微分
+def nested := parseSym "sin (cos x)"
+differ "x" nested                        -- cos(cos x) * (-sin x)
+
+-- exp / ln も使える
+def expx := parseSym "exp x"
+differ "x" expx                          -- exp x (自分自身)
+
+def lnx := parseSym "ln x"
+differ "x" lnx                           -- 1 / x
+
+-- ===========================================================
+-- まとめ: parseSym で math notation 直書きが基本。
+-- ADT 直接記法は内部実装用、smart DSL は seki 内 helper として残存。
+-- ===========================================================

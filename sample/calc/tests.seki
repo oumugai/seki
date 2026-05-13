@@ -1,0 +1,128 @@
+-- ===========================================================
+-- sample/calc/tests.seki — property-first テスト (consolidated)
+-- ===========================================================
+--
+-- 旧 `tests.seki` の点単一 theorem 14 個と `tests_property.seki` を
+-- 統合し、`docs/spec/09-testing.md` の **property-first 哲学** に
+-- 沿って書き直した.
+--
+-- 階層 1 (`by algebra`)            — 任意 Int に対する代数恒等式
+-- 階層 2 (`forall x in {set}, P`)  — `by eval` で有限集合上の決定
+-- 階層 3 (`forAllInList`)          — 集合論的アサーション (列挙的)
+--
+-- メタデータ駆動テストは別ファイル `tests_metadata.seki` にある.
+
+import "lib.seki"
+import "test/runner.seki"
+
+-- ===========================================================
+-- 階層 1: 完全証明 (`by algebra`) — 任意 Int で成立
+-- ===========================================================
+
+-- 多項式恒等式の例: 分配律 (微分計算の基礎)
+theorem diff_linearity_lemma
+  : forall (a b c) in Int, a * (b + c) == a * b + a * c
+  := by algebra
+
+-- (g·h)' = g'·h + g·h' のスカラー部 (g=x, h=x²) で 3x² == 1·x² + x·2x
+theorem leibniz_specific_algebra
+  : forall x in Int, 3 * x * x == x * x + x * (2 * x)
+  := by algebra
+
+-- ===========================================================
+-- 階層 2: 有限完全 (`forall x in {set}, by eval`) — 範囲全体での値検証
+-- ===========================================================
+--
+-- 旧版の 5 個の点 theorem (x ∈ {-2,-1,0,1,2}) を 1 個の forall に統合し、
+-- かつ範囲を 11 点に拡大.  **「fp は 3x² - 2 と等しい」が theorem 自体に書ける** のが重要.
+
+def fp_test_set := {0 - 5, 0 - 4, 0 - 3, 0 - 2, 0 - 1, 0, 1, 2, 3, 4, 5}
+
+-- f'(x) = 3x² - 2  を 11 点で確認
+theorem fp_equals_3xsq_minus_2_on_range
+  : forall x in fp_test_set,
+      evalAt "x" x fp == evalAt "x" x (parseSym "3 * pow x 2 - 2")
+  := by eval
+
+-- f''(x) = 6x  を 7 点で確認
+theorem fpp_equals_6x
+  : forall x in {0 - 3, 0 - 2, 0 - 1, 0, 1, 2, 3},
+      evalAt "x" x fpp == evalAt "x" x (parseSym "6 * x")
+  := by eval
+
+-- 微積分の基本定理: d/dx (∫ f) == f を 5 点で
+def back := differ "x" (integ "x" f)
+theorem ftc_on_range
+  : forall x in {0 - 2, 0 - 1, 0, 1, 2},
+      evalAt "x" x back == evalAt "x" x f
+  := by eval
+
+-- ライプニッツ規則: (g·h)' = g'·h + g·h'
+def g  := parseSym "pow x 2 + 1"
+def h  := parseSym "pow x 3 - 1"
+def gh_diff   := differ "x" (SMul g h)
+def gh_expand := SAdd (SMul (differ "x" g) h) (SMul g (differ "x" h))
+
+theorem leibniz_on_range
+  : forall x in {0 - 2, 0 - 1, 0, 1, 2, 3, 5},
+      evalAt "x" x gh_diff == evalAt "x" x gh_expand
+  := by eval
+
+-- ===========================================================
+-- 階層 3: 動的 property-test — 集合論的アサーション
+-- ===========================================================
+
+-- ----- f' の image (値域) が予想集合に属する -----
+-- f'(x) for x in {-5..5} → 値域は {73, 46, 25, 10, 1, -2, ...}
+def expected_fp_image := {0 - 2, 1, 10, 25, 46, 73}
+def test_fp_image_in_set :=
+    forAllInList [0 - 5, 0 - 4, 0 - 3, 0 - 2, 0 - 1, 0, 1, 2, 3, 4, 5]
+        (\x -> assertMember (eval_fp x) expected_fp_image)
+
+-- ----- f''(x) = 6x なので、すべての出力は 6 の倍数集合に属する -----
+def multiples_of_6 := {0 - 30, 0 - 24, 0 - 18, 0 - 12, 0 - 6, 0, 6, 12, 18, 24, 30}
+def test_fpp_in_multiples_of_6 :=
+    forAllInList [0 - 5, 0 - 4, 0 - 3, 0 - 2, 0 - 1, 0, 1, 2, 3, 4, 5]
+        (\x -> assertMember (eval_fpp x) multiples_of_6)
+
+-- ----- 符号性質: f''(x) = 6x.  Pos / Neg refinement への所属 -----
+def Pos := {x in Int | x > 0}
+def Neg := {x in Int | x < 0}
+
+def test_fpp_pos_for_pos_x :=
+    forAllInList [1, 2, 3, 4, 5] (\x -> assertMember (eval_fpp x) Pos)
+
+def test_fpp_neg_for_neg_x :=
+    forAllInList [0 - 5, 0 - 4, 0 - 3, 0 - 2, 0 - 1]
+        (\x -> assertMember (eval_fpp x) Neg)
+
+def test_fpp_zero_at_origin :=
+    assertEq 0 (eval_fpp 0)
+
+-- ----- 構造的: 記号微分結果が "3*x² - 2" のシンボルを含む -----
+def test_fp_has_3xsq := assertContains "SMul (SNum 3)" (toStr fp)
+def test_fp_has_const_2 := assertContains "SNum 2"     (toStr fp)
+
+-- ===========================================================
+-- スイート
+-- ===========================================================
+
+def cases := [
+    -- 階層 3 (動的アサーション; 階層 1-2 は theorem として自動検証済)
+    TestCase "[L3] f'(x) values lie in expected image set"
+             test_fp_image_in_set,
+    TestCase "[L3] f''(x) values ⊂ multiples of 6"
+             test_fpp_in_multiples_of_6,
+    TestCase "[L3] f''(x) ∈ Pos for x ∈ {1..5}"
+             test_fpp_pos_for_pos_x,
+    TestCase "[L3] f''(x) ∈ Neg for x ∈ {-5..-1}"
+             test_fpp_neg_for_neg_x,
+    TestCase "[L3] f''(0) = 0"
+             test_fpp_zero_at_origin,
+    TestCase "[L3] symbolic f' contains '3 * x²'"
+             test_fp_has_3xsq,
+    TestCase "[L3] symbolic f' contains constant '2'"
+             test_fp_has_const_2
+]
+
+runMain "sample/calc tests (property-first)" cases

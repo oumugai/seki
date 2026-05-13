@@ -1,0 +1,705 @@
+-- ===========================================================
+-- seki 標準ライブラリ (auto-loaded by make_prelude)
+--
+-- 集合論的構築の層: リスト・木は順序対 (Tuple) を用いて再帰的に
+-- 構築される。タグ付きペアによる代数的データ型のエンコーディング:
+--
+--   nil     = (false, ())                 -- 空リスト
+--   cons x xs = (true, (x, xs))           -- 先頭追加
+--   leaf    = (false, ())                 -- 空木
+--   node l v r = (true, (l, (v, r)))      -- 内部ノード
+--
+-- 第1要素 (Bool) で「nil/leaf か否か」を判別し、第2要素にデータを
+-- 詰める。これにより head/tail/isLeaf/treeVal などのデストラクタが
+-- すべて fst / snd の組み合わせだけで実装できる。
+--
+-- Rust/seki 分割原則 (docs/spec/08-rust-seki-split.md 参照):
+--
+--   Rust 層は次のいずれかに該当するものだけを提供する.
+--     A. **集合論カーネル**  — 算術演算子・集合演算・Bool 演算・
+--        タプル原始 (pair/fst/snd) ・Real 機械演算 (sqrt/floor/…) ・card.
+--     B. **システム I/O**   — file/network/process/time/random/FFI/stdio.
+--     C. **並行性プリミティブ**  — Arc/Mutex 経由の Ref・Dict・Atomic・
+--        Channel・spawn/join/parMap.
+--     D. **メタレベル**     — parseSym・Bytecode VM (vmEval 等) ・
+--        SMT-lite (linarithProve 等).
+--     E. **性能クリティカルな大規模実装** — JSON parser/encoder・正規
+--        表現マッチング (将来)・暗号 (将来).
+--     F. **文字列の原子操作**  — strLen・strConcat・strChars・substring・
+--        strSplit・strReplace・strIndexOf・strToUpper/Lower/Trim・
+--        intToStr/strToInt 等.  Unicode 正しさのため Rust に持つ.
+--
+--   それ以外は **すべて以下の seki 定義** で構築する.  例:
+--     - List / Tree / Option / Result / Json / HttpRequest / HttpResponse
+--     - strContains / strStartsWith / strEndsWith / strJoin (合成的)
+--     - 数論 / 代数 / 解析 (lib/numth/, lib/algebra/, lib/analysis/)
+-- ===========================================================
+
+-- ----- 算術ヘルパ (Rust 層から移行) -----------------------------
+def id   := \x -> x
+def succ := \n -> n + 1
+def pred := \n -> n - 1
+def absI := \n -> if n < 0 then -n else n
+def absR := \r -> if r < 0.0 then -r else r
+def abs  := absI                 -- Int を主軸とする
+def maxOf := \a b -> if a > b then a else b
+def minOf := \a b -> if a < b then a else b
+
+-- ----- 整数の構造化部分集合 (Int からの派生) -----
+def NatP    := {x in Int | x >= 0}        -- ℕ as predicate over ℤ
+def Pos     := {x in Int | x > 0}          -- ℤ⁺
+def Neg     := {x in Int | x < 0}          -- ℤ⁻
+def NonZero := {x in Int | x != 0}         -- ℤ \ {0}
+
+-- ----- 偶数・奇数 -----
+def EvenInt := {x in Int | x mod 2 == 0}
+def OddInt  := {x in Int | x mod 2 != 0}
+def EvenNat := {x in Nat | x mod 2 == 0}
+def OddNat  := {x in Nat | x mod 2 == 1}
+
+-- ----- 桁・範囲 -----
+def Bit    := {0, 1}
+def Trit   := {-1, 0, 1}
+def Byte   := {x in Int | (0 <= x) and (x <= 255)}
+def UInt8  := Byte
+def Int8   := {x in Int | (-128 <= x) and (x <= 127)}
+def UInt16 := {x in Int | (0 <= x) and (x <= 65535)}
+def Int16  := {x in Int | (-32768 <= x) and (x <= 32767)}
+
+-- ===========================================================
+-- リスト ─ 順序対による集合論的構築
+-- ===========================================================
+--   nil       = (0, ())                   -- タグ 0: 空リスト
+--   cons x xs = (1, (x, xs))              -- タグ 1: 先頭 + 末尾
+--
+-- 数学的には: List(A) はタグ ∈ {0, 1} と (空 ∪ A × List(A)) の組として
+-- 帰納的に構築される。集合 List(A) の所属判定は member(x, ListOf A)
+-- で再帰的に行われる。
+--
+-- 整数タグを使うことで、Tree の (2, leaf) や (3, node ...) と明確に
+-- 区別される (nil ≠ leaf)。
+
+def nil  := (0, ())
+def cons := \x xs -> (1, (x, xs))
+
+-- デストラクタ (純粋に fst / snd の組み合わせ)
+def null := \xs -> fst xs == 0
+def head := \xs -> fst (snd xs)
+def tail := \xs -> snd (snd xs)
+
+-- ----- リスト操作 (再帰で構築) ----------------------------
+def length := \xs ->
+    if null xs then 0 else 1 + length (tail xs)
+
+def append := \xs ys ->
+    if null xs then ys
+    else cons (head xs) (append (tail xs) ys)
+
+def reverse := \xs ->
+    if null xs then nil
+    else append (reverse (tail xs)) (cons (head xs) nil)
+
+def toSet := \xs ->
+    if null xs then {}
+    else {head xs} union (toSet (tail xs))
+
+-- range a b = [a, a+1, ..., b-1]
+def range := \a b ->
+    if a >= b then nil else cons a (range (a + 1) b)
+
+-- rangeTo n = [0, 1, ..., n-1].  Python の range(n) と同じ.
+-- Phase 12 で導入 — `for i in rangeTo(10) do ...` の慣用形に使う.
+def rangeTo := \n -> range 0 n
+
+-- 高階リスト関数
+def map := \f xs ->
+    if null xs then nil
+    else cons (f (head xs)) (map f (tail xs))
+
+def filter := \p xs ->
+    if null xs then nil
+    else if p (head xs) then cons (head xs) (filter p (tail xs))
+    else filter p (tail xs)
+
+def foldr := \f init xs ->
+    if null xs then init
+    else f (head xs) (foldr f init (tail xs))
+
+def foldl := \f acc xs ->
+    if null xs then acc
+    else foldl f (f acc (head xs)) (tail xs)
+
+def sumList := \xs -> foldr (\x acc -> x + acc) 0 xs
+
+def maxList := \xs ->
+    if null xs then 0
+    else foldr maxOf (head xs) (tail xs)
+
+def all := \p xs ->
+    if null xs then true
+    else if p (head xs) then all p (tail xs) else false
+
+def any := \p xs ->
+    if null xs then false
+    else if p (head xs) then true else any p (tail xs)
+
+def contains := \x xs ->
+    if null xs then false
+    else if (head xs) == x then true else contains x (tail xs)
+
+-- ===========================================================
+-- 文字列の合成的演算 (Rust の原子 strLen / strConcat / strIndexOf /
+-- substring に基づき seki で構築)
+-- ===========================================================
+-- これらは Phase 5 まで Rust 実装だったが、Rust/seki 分割原則 に従って
+-- seki に降ろした.  性能は Rust 版と同等 (各操作は O(n))、ただし
+-- 集合論セマンティクスの上で透明に読める.
+
+-- needle が hay に含まれるか
+def strContains := \needle hay ->
+    strIndexOf needle hay >= 0
+
+-- pre が s で始まるか.  substring 0 (strLen pre) s == pre.
+def strStartsWith := \pre s ->
+    if strLen pre > strLen s then false
+    else substring 0 (strLen pre) s == pre
+
+-- suf が s で終わるか.  substring (strLen s - strLen suf) (strLen suf) s == suf.
+def strEndsWith := \suf s ->
+    if strLen suf > strLen s then false
+    else substring (strLen s - strLen suf) (strLen suf) s == suf
+
+-- 文字列リストをセパレータで結合.  foldr で右からたたみ込む.
+-- 空リスト → 空文字列, 単要素 → そのまま, 複数 → sep で挟む.
+def strJoin := \sep xs ->
+    if null xs then ""
+    else if null (tail xs) then head xs
+    else strConcat (head xs) (strConcat sep (strJoin sep (tail xs)))
+
+-- ===========================================================
+-- 二分木 ─ 順序対による集合論的構築
+-- ===========================================================
+--   leaf       = (2, ())                              -- タグ 2: 空木
+--   node l v r = (3, (l, (v, r)))                     -- タグ 3: 内部ノード
+--
+-- Tree(A) は List(A) と同様にタグ付きの帰納的データ構造。タグを
+-- リストと別の値 (2, 3) にすることで明示的に区別する。
+
+def leaf := (2, ())
+def node := \l v r -> (3, (l, (v, r)))
+
+-- デストラクタ
+def isLeaf   := \t -> fst t == 2
+def treeLeft := \t -> fst (snd t)
+def treeVal  := \t -> fst (snd (snd t))
+def treeRight := \t -> snd (snd (snd t))
+
+-- ----- 木の操作 -----
+def singleton := \v -> node leaf v leaf
+
+def treeSize := \t ->
+    if isLeaf t then 0
+    else 1 + treeSize (treeLeft t) + treeSize (treeRight t)
+
+def treeHeight := \t ->
+    if isLeaf t then 0
+    else 1 + maxOf (treeHeight (treeLeft t)) (treeHeight (treeRight t))
+
+def treeSum := \t ->
+    if isLeaf t then 0
+    else (treeVal t) + treeSum (treeLeft t) + treeSum (treeRight t)
+
+def treeToList := \t ->
+    if isLeaf t then nil
+    else
+        let lhs = treeToList (treeLeft t) in
+        let rhs = treeToList (treeRight t) in
+        append (append lhs (cons (treeVal t) nil)) rhs
+
+-- ===========================================================
+-- 有理数 ℚ ≅ ℤ × ℕ⁺
+-- ===========================================================
+
+def Rat := Int times Pos
+
+def mkRat := \n d -> (n, d)
+def numer := \q -> fst q
+def denom := \q -> snd q
+def intToRat := \n -> (n, 1)
+
+def addRat := \p q ->
+    ((numer p) * (denom q) + (numer q) * (denom p),
+     (denom p) * (denom q))
+
+def subRat := \p q ->
+    ((numer p) * (denom q) - (numer q) * (denom p),
+     (denom p) * (denom q))
+
+def mulRat := \p q ->
+    ((numer p) * (numer q), (denom p) * (denom q))
+
+def negRat := \q -> (-(numer q), denom q)
+
+def eqRat := \p q ->
+    (numer p) * (denom q) == (denom p) * (numer q)
+
+-- ===========================================================
+-- Option / Maybe ─ 失敗しうる値の表現
+-- ===========================================================
+
+data Option A = None | Some A
+
+def mapOption := \f opt ->
+    match opt with
+    | None -> None
+    | Some x -> Some (f x)
+
+def bindOption := \opt f ->
+    match opt with
+    | None -> None
+    | Some x -> f x
+
+def unwrapOr := \default opt ->
+    match opt with
+    | None -> default
+    | Some x -> x
+
+def isSome := \opt ->
+    match opt with
+    | None -> false
+    | Some _ -> true
+
+def isNone := \opt -> not (isSome opt)
+
+-- ===========================================================
+-- Result ─ 成功 (Ok) / 失敗 (Err) の和型
+-- ===========================================================
+
+data Result E A = Err E | Ok A
+
+def mapResult := \f r ->
+    match r with
+    | Err e -> Err e
+    | Ok x -> Ok (f x)
+
+def bindResult := \r f ->
+    match r with
+    | Err e -> Err e
+    | Ok x -> f x
+
+def isOk := \r ->
+    match r with
+    | Err _ -> false
+    | Ok _ -> true
+
+def isErr := \r -> not (isOk r)
+
+-- Option → Result 変換
+def okOr := \default_err opt ->
+    match opt with
+    | None -> Err default_err
+    | Some x -> Ok x
+
+-- Result → Option 変換
+def resultToOption := \r ->
+    match r with
+    | Err _ -> None
+    | Ok x -> Some x
+
+-- Result の値 (Ok のみ) を取り出すか default
+def unwrapResultOr := \default r ->
+    match r with
+    | Err _ -> default
+    | Ok x -> x
+
+-- ===========================================================
+-- 数論的補助
+-- ===========================================================
+def isEven := \n -> n mod 2 == 0
+def isOdd  := \n -> n mod 2 != 0
+def square := \n -> n * n
+def cube   := \n -> n * n * n
+
+-- 整数べき乗 (非負指数のみ): pow_int b n = b^n
+def powInt := \b n ->
+    if n == 0 then 1
+    else b * powInt b (n - 1)
+
+-- ===========================================================
+-- 数学定数 (Rust 層から移行)
+-- ===========================================================
+-- 値は std::f64::consts::PI / E と同等の f64 表現。
+-- 計算ではなく単なる値なので Rust に置く必要がない。
+def pi := 3.141592653589793
+def e  := 2.718281828459045
+
+-- ===========================================================
+-- システム開発のためのヘルパ (組込 builtin の合成)
+-- ===========================================================
+--
+-- Rust 層は I/O・文字列操作・Ref・Dict の **原子** を提供する。
+-- 本セクションはそれらを合成して便利な高階関数・ヘルパを定義する。
+-- これらはすべて seki 自身で書かれているため、実装が透明である。
+
+-- ----- 制御フロー -----
+def when   := \cond act -> if cond then act else ()
+def unless := \cond act -> if cond then () else act
+
+-- ----- IO 反復 (純粋関数版とは異なり Unit を返す) -----
+-- 各要素に副作用関数 f : A -> Unit を適用 (`mapM_` 相当)
+def forEach := \xs f ->
+    if null xs then ()
+    else
+        let _ = f (head xs) in
+        forEach (tail xs) f
+
+-- ----- リスト ⇄ ファイル -----
+-- ファイル全体を行リストとして読み込む。
+-- 戻り値: Result (List String) String — Err は読込失敗
+def readLines := \path ->
+    match readFile path with
+    | Err e -> Err e
+    | Ok contents -> Ok (strSplit "\n" contents)
+
+-- 行リストをファイルに書き出す ("\n" 区切り、末尾改行なし)
+def writeLines := \path lines ->
+    writeFile path (strJoin "\n" lines)
+
+-- ----- 標準出力ヘルパ -----
+def newline := \_ -> println ""
+
+-- ----- Ref を用いた可変カウンタ -----
+-- 例: let c = newCounter () in let _ = incr c in readRef c
+def newCounter := \_ -> mkRef 0
+def incr := \r ->
+    writeRef r ((readRef r) + 1)
+def decr := \r ->
+    writeRef r ((readRef r) - 1)
+def modifyRef := \r f ->
+    writeRef r (f (readRef r))
+
+-- ----- Dict 高階ヘルパ -----
+-- Dict に list of (key, value) ペアを順に挿入
+def dictFromList := \xs ->
+    if null xs then emptyDict ()
+    else
+        let p = head xs in
+        let rest = dictFromList (tail xs) in
+        dictInsert (fst p) (snd p) rest
+
+-- Dict の値を関数で写像 (キーは不変)
+def dictMap := \f d ->
+    let ks = dictKeys d in
+    foldr
+        (\k acc ->
+            match dictGet k d with
+            | Some v -> dictInsert k (f v) acc
+            | None   -> acc)
+        (emptyDict ())
+        ks
+
+-- ----- 結果ヘルパ -----
+-- Result 値を取り出すか、エラー時に exit する。CLI で多用する形式。
+def unwrapOrExit := \r code ->
+    match r with
+    | Ok x  -> x
+    | Err e ->
+        let _ = eprintln e in
+        exit code
+
+-- ----- 整数範囲を Int として反復 (forEach の Int 版) -----
+-- iterRange a b f: a, a+1, ..., b-1 に対し f を呼ぶ
+def iterRange := \a b f ->
+    if a >= b then ()
+    else
+        let _ = f a in
+        iterRange (a + 1) b f
+
+-- ===========================================================
+-- JSON — 集合論的 disjoint union
+-- ===========================================================
+--
+-- 数学的には Json は次の互いに素な和集合:
+--   Json = {null} ⊔ Bool ⊔ Real ⊔ String ⊔ List(Json) ⊔ (String × Json)*
+--
+-- Rust 側の jsonParse / jsonEncode は本 ADT の tagged-pair 表現と互換。
+
+data Json
+  = JNull
+  | JBool Bool
+  | JNum Real
+  | JStr String
+  | JArr (List Json)
+  | JObj (List (String times Json))
+
+-- ----- Json 構築の便利関数 -----
+def jNull := JNull
+def jBool := \b -> JBool b
+def jInt  := \n -> JNum (intToReal n)
+def jStr  := \s -> JStr s
+def jArr  := \xs -> JArr xs
+def jObj  := \kvs -> JObj kvs
+
+-- ----- Json アクセサ (Option 型を返す) -----
+def jsonAsString := \j ->
+    match j with
+    | JStr s -> Some s
+    | _      -> None
+
+def jsonAsNumber := \j ->
+    match j with
+    | JNum n -> Some n
+    | _      -> None
+
+def jsonAsBool := \j ->
+    match j with
+    | JBool b -> Some b
+    | _       -> None
+
+def jsonAsArr := \j ->
+    match j with
+    | JArr xs -> Some xs
+    | _       -> None
+
+-- Object からキー検索: Json → String → Option Json
+def jsonField := \j k ->
+    match j with
+    | JObj entries -> jsonLookup k entries
+    | _ -> None
+
+def jsonLookup := \k entries ->
+    if null entries then None
+    else
+        let p = head entries in
+        if fst p == k then Some (snd p)
+        else jsonLookup k (tail entries)
+
+-- ===========================================================
+-- HTTP — TCP の上に構築する軽量プロトコル
+-- ===========================================================
+--
+-- HttpRequest と HttpResponse は集合論的に
+--   HttpRequest  = String × String × (List (String × String)) × String
+--   HttpResponse = Int    × (List (String × String)) × String
+-- に同型な ADT.
+--
+-- Phase 8 で `urlParse` / `httpParseRequest` / `httpFormatResponse` を
+-- Rust から seki に降ろした (`docs/spec/08-rust-seki-split.md` 参照).
+-- 性能影響は I/O 支配のため無視できる範囲、ロジックが透明化された.
+
+data HttpRequest =
+    HttpRequest String String (List (String times String)) String
+    -- method     path   headers                              body
+
+data HttpResponse =
+    HttpResponse Int (List (String times String)) String
+    --           status                          headers     body
+
+-- ----- 構築ヘルパ -----
+def httpReq := \method path headers body ->
+    HttpRequest method path headers body
+
+def httpResp := \status headers body ->
+    HttpResponse status headers body
+
+-- 一般的なレスポンス
+def httpOk := \body ->
+    HttpResponse 200 [("Content-Type", "text/plain")] body
+def httpJson := \body ->
+    HttpResponse 200 [("Content-Type", "application/json")] body
+def httpHtml := \body ->
+    HttpResponse 200 [("Content-Type", "text/html")] body
+def httpNotFound := \_ ->
+    HttpResponse 404 [("Content-Type", "text/plain")] "Not Found"
+
+-- ----- HttpRequest アクセサ -----
+def reqMethod := \r ->
+    match r with
+    | HttpRequest m _ _ _ -> m
+
+def reqPath := \r ->
+    match r with
+    | HttpRequest _ p _ _ -> p
+
+def reqHeaders := \r ->
+    match r with
+    | HttpRequest _ _ h _ -> h
+
+def reqBody := \r ->
+    match r with
+    | HttpRequest _ _ _ b -> b
+
+-- ----- URL parse -----
+-- "http://host[:port][/path]" → Result (String × Int × String) String
+-- 戻り値の構造はネストペア: (host, (port, path)).
+-- スキーム既定 port: http→80, https→443.
+def urlParse := \url ->
+    let parseRest = \scheme rest ->
+        let default_port = if scheme == "https" then 443 else 80 in
+        let slash = strIndexOf "/" rest in
+        let host_port =
+            if slash >= 0 then substring 0 slash rest else rest in
+        let path =
+            if slash >= 0 then substring slash (strLen rest - slash) rest else "/" in
+        let parts = strSplit ":" host_port in
+        if length parts == 1 then
+            if strLen (head parts) == 0 then
+                Err (strConcat "urlParse: empty host in '" (strConcat url "'"))
+            else
+                Ok (head parts, (default_port, path))
+        else if length parts == 2 then
+            let host = head parts in
+            let port_str = head (tail parts) in
+            match strToInt port_str with
+            | None -> Err (strConcat "urlParse: bad port in '" (strConcat url "'"))
+            | Some p ->
+                if strLen host == 0 then
+                    Err (strConcat "urlParse: empty host in '" (strConcat url "'"))
+                else Ok (host, (p, path))
+        else
+            -- IPv6 や複数 ':' 含む host は未対応
+            Err (strConcat "urlParse: cannot disambiguate host:port in '" (strConcat url "'"))
+    in
+    if strStartsWith "http://" url then
+        parseRest "http" (substring 7 (strLen url - 7) url)
+    else if strStartsWith "https://" url then
+        parseRest "https" (substring 8 (strLen url - 8) url)
+    else
+        Err (strConcat "urlParse: missing scheme in '" (strConcat url "'"))
+
+-- ----- HTTP request parser -----
+-- 生の HTTP リクエスト文字列 → Result HttpRequest String.
+-- request line + headers を `\r\n` 区切りで処理. body は 空行の後.
+def httpParseRequest := \raw ->
+    -- ヘッダと body は CRLFCRLF または LFLF で分かれる.
+    let crlfIdx = strIndexOf "\r\n\r\n" raw in
+    let head_body =
+        if crlfIdx >= 0 then
+            (substring 0 crlfIdx raw,
+             substring (crlfIdx + 4) (strLen raw - crlfIdx - 4) raw)
+        else
+            let lfIdx = strIndexOf "\n\n" raw in
+            if lfIdx >= 0 then
+                (substring 0 lfIdx raw,
+                 substring (lfIdx + 2) (strLen raw - lfIdx - 2) raw)
+            else
+                (raw, "")
+    in
+    let head_part = fst head_body in
+    let body = snd head_body in
+    let rawLines = strSplit "\n" head_part in
+    -- 各行の trailing \r を除く
+    let stripCr = \s ->
+        if strEndsWith "\r" s then substring 0 (strLen s - 1) s
+        else s
+    in
+    let lines = map stripCr rawLines in
+    if null lines then Err "httpParseRequest: empty input"
+    else
+        let reqLine = head lines in
+        let headerLines = tail lines in
+        let parts = strSplit " " reqLine in
+        if length parts < 2 then
+            Err (strConcat "httpParseRequest: bad request line: " reqLine)
+        else
+            let method = head parts in
+            let path = head (tail parts) in
+            if (strLen method == 0) or (strLen path == 0) then
+                Err (strConcat "httpParseRequest: bad request line: " reqLine)
+            else
+                -- 各ヘッダ行 "Name: Value" を pair に. 空行は飛ばす.
+                let parseHeader = \line ->
+                    if strLen line == 0 then None
+                    else
+                        let colonIdx = strIndexOf ":" line in
+                        if colonIdx < 0 then None
+                        else
+                            let n = strTrim (substring 0 colonIdx line) in
+                            let v = strTrim (substring (colonIdx + 1) (strLen line - colonIdx - 1) line) in
+                            Some (n, v)
+                in
+                let addHeader = \line acc ->
+                    match parseHeader line with
+                    | Some kv -> cons kv acc
+                    | None -> acc
+                in
+                let headers = foldr addHeader nil headerLines in
+                Ok (HttpRequest method path headers body)
+
+-- ----- HTTP response formatter -----
+-- HttpResponse → wire-format String.  Content-Length を自動挿入.
+-- status から reason phrase を解決 (一般的なコードのみ; 他は "OK").
+def httpStatusReason := \status ->
+    if status == 200 then "OK"
+    else if status == 201 then "Created"
+    else if status == 204 then "No Content"
+    else if status == 301 then "Moved Permanently"
+    else if status == 302 then "Found"
+    else if status == 400 then "Bad Request"
+    else if status == 401 then "Unauthorized"
+    else if status == 403 then "Forbidden"
+    else if status == 404 then "Not Found"
+    else if status == 405 then "Method Not Allowed"
+    else if status == 500 then "Internal Server Error"
+    else "OK"
+
+def httpFormatResponse := \resp ->
+    match resp with
+    | HttpResponse status headers body ->
+        let reason = httpStatusReason status in
+        let statusLine =
+            strConcat "HTTP/1.0 "
+                (strConcat (intToStr status)
+                    (strConcat " " (strConcat reason "\r\n")))
+        in
+        -- 既存ヘッダに Content-Length があるかチェック (大文字小文字無視).
+        let isCLenHeader = \h -> strToLower (fst h) == "content-length" in
+        let hasCLen = any isCLenHeader headers in
+        let withCLen =
+            if hasCLen then headers
+            else append headers (cons ("Content-Length", intToStr (strLen body)) nil)
+        in
+        let formatHeader = \h ->
+            strConcat (fst h)
+                (strConcat ": " (strConcat (snd h) "\r\n"))
+        in
+        let prependHeader = \h acc -> strConcat (formatHeader h) acc in
+        let headerStr = foldr prependHeader "" withCLen in
+        strConcat statusLine (strConcat headerStr (strConcat "\r\n" body))
+
+-- ----- 簡易 HTTP サーバ ループ -----
+-- TCP の上に build した「ハンドラ関数」型サーバ.
+-- handler : HttpRequest → HttpResponse として 1 リクエスト 1 レスポンス.
+-- ブロッキング、シングルスレッド、最大 8 KB リクエスト.
+def httpServeOnce := \listener handler ->
+    match tcpAccept listener with
+    | Err e -> Err e
+    | Ok sock ->
+        match tcpRead sock 8192 with
+        | Err e ->
+            let _ = tcpClose sock in
+            Err e
+        | Ok raw ->
+            match httpParseRequest raw with
+            | Err e ->
+                let bad = HttpResponse 400 [] (strConcat "Bad Request: " e) in
+                let _ = tcpWrite sock (httpFormatResponse bad) in
+                let _ = tcpClose sock in
+                Err e
+            | Ok req ->
+                let resp = handler req in
+                let _ = tcpWrite sock (httpFormatResponse resp) in
+                let _ = tcpClose sock in
+                Ok ()
+
+-- 無限ループ版: handler が return することはない
+-- (例外発生時のみ Err を返してループを抜ける)
+def httpServeForever := \listener handler ->
+    let _ = httpServeOnce listener handler in
+    httpServeForever listener handler
+
+-- 完全な server起動: port を bind して forever ループに入る
+def httpServe := \port handler ->
+    match tcpListen "127.0.0.1" port with
+    | Err e -> Err e
+    | Ok listener -> httpServeForever listener handler

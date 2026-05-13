@@ -1,0 +1,61 @@
+-- ===========================================================
+-- tests/seki/test_3x3_eigenvalues.seki — 3x3 行列の特性多項式と固有値
+-- ===========================================================
+
+import "../../lib/numeric/eigen.seki"
+
+def absR := \r -> if r < 0.0 then 0.0 - r else r
+
+-- ----- 対角行列 diag(2, 3, 5) → 固有値 {2, 3, 5}, det = 30, trace = 10 -----
+def D := [[2, 0, 0], [0, 3, 0], [0, 0, 5]]
+
+theorem trace_D : trace3 D == 10 := by eval
+theorem det_D : det D == 30 := by eval
+
+-- 特性多項式の係数: (10, (31, 30))
+def cp_D := charPoly3 D
+theorem cp_D_a : fst cp_D == 10 := by eval
+theorem cp_D_b : fst (snd cp_D) == 31 := by eval
+theorem cp_D_c : snd (snd cp_D) == 30 := by eval
+
+-- 固有値 (Newton で数値計算): 期待値 {5, 3, 2}
+def eig_D := eigenvalues3 D
+def r1_D := fst eig_D
+def r2_D := fst (snd eig_D)
+def r3_D := snd (snd eig_D)
+
+-- 任意の順序で 3 つの根が 5, 3, 2 に近いはず
+theorem eig_D_sum_close
+  : absR (r1_D + r2_D + r3_D - 10.0) < 0.0001 := by eval
+
+theorem eig_D_product_close
+  : absR (r1_D * r2_D * r3_D - 30.0) < 0.0001 := by eval
+
+-- ----- 上三角行列: 固有値は対角成分 -----
+def U := [[2, 1, 4], [0, 3, 5], [0, 0, 5]]
+def eig_U := eigenvalues3 U
+def s1 := fst eig_U
+def s2 := fst (snd eig_U)
+def s3 := snd (snd eig_U)
+
+theorem eig_U_trace
+  : absR (s1 + s2 + s3 - 10.0) < 0.0001 := by eval
+
+-- ----- 単位行列: 固有値 (1, 1, 1) -----
+def I3 := [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+def eig_I := eigenvalues3 I3
+
+theorem eig_I_trace
+  : let r1 = fst eig_I in
+    let r2 = fst (snd eig_I) in
+    let r3 = snd (snd eig_I) in
+    absR (r1 + r2 + r3 - 3.0) < 0.001 := by eval
+
+-- ----- 反対称行列の固有値 -----
+def A := [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+def eig_A := eigenvalues3 A
+
+-- このランク不足行列は固有値 0 を含む。
+-- trace = 15, det = 0 (rank deficient).
+theorem rank_deficient
+  : absR (det A - 0.0) < 0.0001 := by eval

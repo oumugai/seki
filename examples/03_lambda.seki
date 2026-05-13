@@ -1,0 +1,35 @@
+-- ===========================================================
+-- 03: ラムダ計算 と 集合論ベースの型チェック
+-- ===========================================================
+
+-- 型(=集合)の定義: A -> B は集合 A から集合 B への関数の集合
+-- 型注釈付き関数定義
+def double : Nat -> Nat := \(n : Nat) -> n * 2
+def isPos  : Int -> Bool := \(n : Int) -> n > 0
+
+double 21
+isPos (-5)
+isPos 7
+
+-- カリー化と部分適用
+def add  : Int -> Int -> Int := \(x : Int) (y : Int) -> x + y
+def addOne := add 1
+addOne 41
+
+-- 高階関数: (Nat -> Nat) -> Nat -> Nat
+def twice := \f x -> f (f x)
+twice double 5
+twice (\n -> n + 3) 10
+
+-- 列挙集合を「型」(=値の取りうる集合) として使う
+def Color := {"red", "green", "blue"}
+
+-- 「集合 Color の元を返す関数」
+-- 注釈 ‘: Bool -> Color’ により、関数値が Bool→Color に属するか
+-- サンプル検査される
+def fav : Bool -> Color := \(b : Bool) -> if b then "red" else "blue"
+fav true
+fav false
+
+-- 不正な値を返す関数は注釈で弾かれる: 試したい場合は次のコメントを外す
+-- def bad : Bool -> Color := \(b : Bool) -> if b then "red" else "purple"

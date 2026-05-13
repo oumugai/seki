@@ -1,0 +1,65 @@
+-- ===========================================================
+-- tests/seki/test_cas_rational.seki — 有理関数の正規化と演算
+-- ===========================================================
+
+import "../../lib/cas/rational.seki"
+
+-- ----- (x² - 1) / (x - 1) = x + 1 が約分される -----
+def p_sq_minus_1 := cons (0 - 1) (cons 0 (cons 1 nil))   -- [-1, 0, 1] = x² - 1
+def p_x_minus_1  := cons (0 - 1) (cons 1 nil)            -- [-1, 1] = x - 1
+def p_x_plus_1   := cons 1 (cons 1 nil)                  -- [1, 1] = x + 1
+
+def r1 := mkRatFn p_sq_minus_1 p_x_minus_1
+-- 約分後: 分子 = x + 1, 分母 = 1
+
+theorem rat_simplify_num : listEq (numerator r1) p_x_plus_1 := by eval
+theorem rat_simplify_den_one : (length (denominator r1)) == 1 := by eval
+
+-- ----- 1/(x-1) + 1/(x+1) = 2x / (x²-1) -----
+def r_a := MkRatFn (cons 1 nil) p_x_minus_1   -- 1/(x-1)
+def r_b := MkRatFn (cons 1 nil) p_x_plus_1    -- 1/(x+1)
+def r_sum := rfAdd r_a r_b
+
+-- 期待: 2x / (x² - 1) (約分後)
+-- 数値検証: x=2 で 2/(4-1) = 2/3、分子 = 4、分母 = 3
+def at_2 := rfEvalNum r_sum 2
+theorem rat_add_at_2_num : fst at_2 == 4 := by eval
+theorem rat_add_at_2_den : snd at_2 == 3 := by eval
+
+-- x=3 で 6 / 8 = 3/4 (約分後)
+def at_3 := rfEvalNum r_sum 3
+def num3 := fst at_3
+def den3 := snd at_3
+theorem rat_add_at_3 : num3 * 4 == den3 * 3 := by eval
+
+-- ----- 乗算: (1/(x-1)) * ((x-1)/x) = 1/x (約分付き) -----
+def p_x := cons 0 (cons 1 nil)
+def r_c := MkRatFn (cons 1 nil) p_x_minus_1
+def r_d := MkRatFn p_x_minus_1 p_x
+def r_prod := rfMul r_c r_d
+
+-- 約分後 1/x: 数値検証 x=5 で 1/5
+def prod_at_5 := rfEvalNum r_prod 5
+theorem rat_mul_simplify_num : fst prod_at_5 == 1 := by eval
+theorem rat_mul_simplify_den : snd prod_at_5 == 5 := by eval
+
+-- ----- 逆数: (a/b)^(-1) = b/a -----
+def inv_r_a := rfInv r_a
+-- 1/(1/(x-1)) = (x-1)/1
+theorem rat_inv_num : listEq (numerator inv_r_a) p_x_minus_1 := by eval
+
+-- ----- 加法零元 / 乗法単位元 -----
+def add_zero := rfAdd r_a rfZero
+theorem rat_add_zero : rfEq add_zero r_a := by eval
+
+def mul_one := rfMul r_a rfOne
+theorem rat_mul_one : rfEq mul_one r_a := by eval
+
+-- ----- 自分自身を引いて 0 -----
+def self_sub := rfSub r_a r_a
+theorem rat_self_sub : rfEq self_sub rfZero := by eval
+
+-- ----- 数値整合: (x² - 1)/(x - 1) at x=5 = 6  (x+1 と同等) -----
+def r_simp := mkRatFn p_sq_minus_1 p_x_minus_1
+def eval_5 := rfEvalNum r_simp 5
+theorem rat_eval_consistent : (fst eval_5) == 6 * (snd eval_5) := by eval

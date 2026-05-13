@@ -1,0 +1,73 @@
+-- ===========================================================
+-- 07: モジュラ算術 — 時計の代数 (Z/12Z)
+--
+-- Z/12Z = {0, 1, ..., 11} は加法に関して有限可換群を成す。
+-- 単位元・逆元・結合律・可換律を全列挙で確認する。
+-- ===========================================================
+
+def Z12 := {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
+
+-- 「時計の足し算」: a +12 b
+def addM : Nat -> Nat -> Nat := \(a : Nat) (b : Nat) -> (a + b) mod 12
+
+-- 「時計の逆元」: -a (mod 12)
+def negM : Nat -> Nat := \(a : Nat) -> (12 - a) mod 12
+
+addM 9 5         -- 2  (9時+5時間=2時)
+addM 11 1        -- 0
+negM 5           -- 7  (5の加法逆元は7: 5+7=12≡0)
+addM 5 (negM 5)  -- 0
+
+-- ----- 群の公理を全列挙で検証 -----
+
+-- 1. 単位元: 0 は加法の単位元
+theorem addM_id_left
+    : forall a in Z12, addM 0 a == a
+    := by eval
+
+theorem addM_id_right
+    : forall a in Z12, addM a 0 == a
+    := by eval
+
+-- 2. 可換律
+theorem addM_comm
+    : forall a in Z12, forall b in Z12, addM a b == addM b a
+    := by eval
+
+-- 3. 結合律
+theorem addM_assoc
+    : forall a in Z12, forall b in Z12, forall c in Z12,
+        addM (addM a b) c == addM a (addM b c)
+    := by eval
+
+-- 4. 逆元の存在: 任意の a に対し addM a (negM a) == 0
+theorem addM_inv
+    : forall a in Z12, addM a (negM a) == 0
+    := by eval
+
+-- 5. 演算の閉じた性 (closure): a +12 b ∈ Z12
+theorem addM_closed
+    : forall a in Z12, forall b in Z12, (addM a b) in Z12
+    := by eval
+
+-- ----- 派生事実 -----
+-- 6. 巡回性: 12 回足したら元に戻る (a + 12 ≡ a)
+def add12 := \a -> addM a 0  -- 0 を 12 回足すのと同じ
+theorem zero_cycle
+    : forall a in Z12, add12 a == a
+    := by eval
+
+-- 7. mod 6 群 Z6 を Z12 のサブセットとして見つける
+def Z6 := {0, 2, 4, 6, 8, 10}      -- 偶数 mod 12 (Z2 イデアルの像)
+theorem Z6_subset_Z12 : Z6 subset Z12 := by eval
+
+-- 偶数同士の和は偶数 (Z6 が部分群)
+theorem Z6_closed
+    : forall a in Z6, forall b in Z6, (addM a b) in Z6
+    := by eval
+
+-- 8. 「時計のスタート位置を変えても加法演算は等しい」(平行移動不変)
+theorem shift_invariant
+    : forall a in Z12, forall b in Z12, forall k in Z12,
+        addM (addM a k) (addM b k) == addM (addM a b) (addM k k)
+    := by eval

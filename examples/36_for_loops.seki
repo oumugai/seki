@@ -1,0 +1,213 @@
+-- ===========================================================
+-- 36: Python の for 文 を seki で書く 11 通り
+-- ===========================================================
+--
+-- seki には専用の `for` キーワードはないが、用途別に最適な構文がある.
+-- 「副作用ループ」「リスト変換」「集約」「集合論的量化」それぞれの
+-- 慣用形を紹介する.
+
+-- ===========================================================
+-- §1. 単純な反復 (Python: `for x in xs: 副作用`)
+-- ===========================================================
+--
+-- Python:
+--   for x in [1, 2, 3]:
+--       print(x)
+
+forEach [1, 2, 3] (\x -> println x)
+
+-- Phase 11 の C 流呼出でも書ける
+forEach([10, 20, 30], (\x -> println(x)))
+
+-- ===========================================================
+-- §2. 整数範囲 (Python: `for i in range(n):`)
+-- ===========================================================
+--
+-- Python:
+--   for i in range(5):
+--       print(i * i)
+
+iterRange 0 5 (\i -> println (intToStr (i * i)))
+
+-- 0 から N-1 まで、step は常に 1 (より複雑な step は filter で)
+
+-- ===========================================================
+-- §3. リスト内包 (Python: `[f(x) for x in xs]`)
+-- ===========================================================
+--
+-- Python:
+--   doubled = [x * 2 for x in [1, 2, 3, 4]]
+--   sum_sq  = sum(x * x for x in [1, 2, 3, 4])
+
+def doubled := map (\x -> x * 2) [1, 2, 3, 4]
+theorem doubled_eq : doubled == [2, 4, 6, 8] := by eval
+
+def sum_sq := foldr (\x acc -> x + acc) 0 (map (\x -> x * x) [1, 2, 3, 4])
+theorem sum_sq_eq : sum_sq == 30 := by eval     -- 1+4+9+16
+
+-- ===========================================================
+-- §4. フィルタ付き内包 (Python: `[x for x in xs if p(x)]`)
+-- ===========================================================
+--
+-- Python:
+--   evens = [x for x in xs if x % 2 == 0]
+
+def evens := filter (\x -> x mod 2 == 0) [1, 2, 3, 4, 5, 6]
+theorem evens_eq : evens == [2, 4, 6] := by eval
+
+-- 二段 (map ∘ filter)
+def squared_evens := map (\x -> x * x) (filter (\x -> x mod 2 == 0) [1, 2, 3, 4, 5])
+theorem squared_evens_eq : squared_evens == [4, 16] := by eval
+
+-- ===========================================================
+-- §5. 集約 (Python: `sum`, `max`, `count`, ...)
+-- ===========================================================
+--
+-- Python:
+--   total = sum(xs)
+--   count = len([x for x in xs if p(x)])
+
+def total_of_evens := foldr (\x acc -> x + acc) 0 evens
+theorem total_of_evens_eq : total_of_evens == 12 := by eval
+
+def count_evens := length evens
+theorem count_evens_eq : count_evens == 3 := by eval
+
+-- 短縮: sumList が stdlib にある
+theorem sumList_eq : sumList evens == 12 := by eval
+
+-- ===========================================================
+-- §6. Dict 反復 (Python: `for k, v in dict.items():`)
+-- ===========================================================
+--
+-- Python:
+--   for k, v in scores.items():
+--       print(f"{k}: {v}")
+
+def scores := dictInsert "alice" 95 (dictInsert "bob" 87 (emptyDict ()))
+
+forEach (dictKeys scores) (\k ->
+    match dictGet k scores with
+    | Some v -> println (strJoin "" [k, ": ", intToStr v])
+    | None   -> ())
+
+-- ===========================================================
+-- §7. 入れ子の for (Python: nested loops)
+-- ===========================================================
+--
+-- Python:
+--   for i in range(3):
+--       for j in range(3):
+--           print(i, j)
+
+iterRange 0 3 (\i ->
+    iterRange 0 3 (\j ->
+        println (strJoin "" [intToStr i, ",", intToStr j])))
+
+-- ===========================================================
+-- §8. enumerate (Python: `for i, x in enumerate(xs):`)
+-- ===========================================================
+--
+-- nth は stdlib にないので簡易定義 (0-indexed)
+def nth := \i xs ->
+    if i <= 0 then head xs else nth (i - 1) (tail xs)
+
+def names := ["alice", "bob", "carol"]
+iterRange 0 (length names) (\i ->
+    println (strJoin "" [intToStr i, ": ", nth i names]))
+
+-- ===========================================================
+-- §9. while ループ (Python: `while cond:`)
+-- ===========================================================
+--
+-- Python:
+--   x = 1
+--   while x < 100:
+--       x *= 2
+--   print(x)
+
+def doubleUntil := \n -> if n < 100 then doubleUntil (n * 2) else n
+theorem doubleUntil_eq : doubleUntil 1 == 128 := by eval
+
+-- ===========================================================
+-- §10. 早期 break / continue (Python: `break` / `continue`)
+-- ===========================================================
+--
+-- seki に break はないが、再帰の引数で同等のフロー制御ができる.
+--
+-- Python:
+--   for x in xs:
+--       if x == target: break
+--       process(x)
+
+def findOrProcess := \xs target ->
+    if null xs then println "(not found)"
+    else if head xs == target then
+        println (strConcat "found: " (intToStr target))
+    else
+        let _ = println (strConcat "process: " (intToStr (head xs))) in
+        findOrProcess (tail xs) target
+
+findOrProcess [1, 2, 3, 4, 5] 3
+
+-- continue は filter で表現:
+-- Python:
+--   for x in xs:
+--       if x mod 2 != 0: continue
+--       process(x)
+-- ↓
+-- seki:
+forEach (filter (\x -> x mod 2 == 0) [1, 2, 3, 4, 5, 6])
+    (\x -> println (strConcat "even: " (intToStr x)))
+
+-- ===========================================================
+-- §11. 集合論的量化 (seki ネイティブ、Python にない強い形)
+-- ===========================================================
+--
+-- これが seki の真骨頂.  Python は「全要素について実行する」が、
+-- seki は「全要素について真である」を **証明** できる.
+
+-- 集合の内包
+def Evens := {x in Nat | x mod 2 == 0}
+
+theorem six_is_even : 6 in Evens := by eval
+theorem five_not_even : 5 notin Evens := by eval
+
+-- forall — 「すべての x ∈ S について P x」 の証明
+theorem squares_nonneg
+  : forall x in {0 - 5, 0 - 4, 0 - 3, 0 - 2, 0 - 1, 0, 1, 2, 3, 4, 5},
+      x * x >= 0
+  := by algebra
+
+-- 無限集合上でも by algebra で証明可
+theorem all_int_squares_nonneg
+  : forall x in Int, x * x >= 0
+  := by algebra
+
+-- exists — 「ある x ∈ S が P x を満たす」
+theorem some_pos_in_small
+  : exists x in {0 - 1, 0, 1, 2}, x > 0
+  := by eval
+
+-- ===========================================================
+-- まとめ表
+-- ===========================================================
+--
+-- | Python                          | seki                                       |
+-- |---------------------------------|--------------------------------------------|
+-- | for x in xs: ...                | forEach xs (\x -> ...)                     |
+-- | for i in range(n): ...          | iterRange 0 n (\i -> ...)                  |
+-- | [f(x) for x in xs]              | map f xs   /  map(f, xs)                   |
+-- | [x for x in xs if p(x)]         | filter p xs                                |
+-- | sum(xs) / max(xs) / count(p)    | foldr / maxList / length (filter p xs)     |
+-- | for k, v in d.items()           | forEach (dictKeys d) (\k -> dictGet k d)   |
+-- | nested for                      | nested forEach / iterRange                 |
+-- | enumerate                       | iterRange 0 (length xs) + nth              |
+-- | while cond                      | recursive function                         |
+-- | break / continue                | recursion termination / filter             |
+-- | [comprehension over set]        | {x in S | P x}  (集合論的、Python より強い)  |
+-- | 全要素について実行              | forall x in S, P x  (証明可能)            |
+-- | ある要素が満たす                | exists x in S, P x                         |
+
+println ""
+println "✓ 11 通りの for 文すべて動作確認"

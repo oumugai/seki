@@ -1,0 +1,56 @@
+-- ===========================================================
+-- lib/cas/solve.seki — 線形・2 次方程式の求解
+--
+-- 公開する名前:
+--   def solveLinear a b   — ax + b == 0 を Option (Int×Pos) で返す (有理数)
+--   data QuadSol = NoRealSol | OneSol Real | TwoSol Real Real
+--   def discriminant a b c
+--   def solveQuad a b c   — ax² + bx + c == 0
+--   def checkRat opt n d  — 有理数 opt == n/d かをテスト用にチェック
+-- ===========================================================
+
+-- 線形: ax + b == 0 → x = -b/a
+def solveLinear := \a b ->
+    if a == 0 then None
+    else
+        let num = 0 - b in
+        let den = a in
+        if den > 0
+        then Some (num, den)
+        else Some (0 - num, 0 - den)
+
+-- 有理数の同値判定 (数値テスト用)
+def checkRat := \opt expected_num expected_den ->
+    match opt with
+    | None -> false
+    | Some pair ->
+        let n = fst pair in
+        let d = snd pair in
+        n * expected_den == expected_num * d
+
+-- 2 次方程式の解の種類
+data QuadSol
+  = NoRealSol
+  | OneSol Real
+  | TwoSol Real Real
+
+def discriminant := \a b c -> b * b - 4 * a * c
+
+def solveQuad := \a b c ->
+    if a == 0 then
+        match solveLinear b c with
+        | None -> NoRealSol
+        | Some pr ->
+            let n = fst pr in
+            let d = snd pr in
+            OneSol ((intToReal n) / (intToReal d))
+    else
+        let d = discriminant a b c in
+        if d < 0 then NoRealSol
+        else if d == 0 then
+            OneSol ((intToReal (0 - b)) / (intToReal (2 * a)))
+        else
+            let sd = sqrt (intToReal d) in
+            let twoa = intToReal (2 * a) in
+            let nb = intToReal (0 - b) in
+            TwoSol ((nb - sd) / twoa) ((nb + sd) / twoa)

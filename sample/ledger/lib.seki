@@ -1,0 +1,65 @@
+-- ===========================================================
+-- sample/ledger/lib.seki — 帳簿システムの純粋ロジック
+-- ===========================================================
+
+-- 取引: nested pair `(from, (to, amount))`
+def mkTx := \from to amount -> (from, (to, amount))
+def txFrom := \tx -> fst tx
+def txTo   := \tx -> fst (snd tx)
+def txAmt  := \tx -> snd (snd tx)
+
+-- ----- 初期残高セットアップ -----
+-- アカウント名のリストとシード残高から Dict を作る
+def seedAccount := \seed n d -> dictInsert n seed d
+def initialLedger := \accounts seed ->
+    foldr (seedAccount seed) (emptyDict ()) accounts
+
+-- ----- 取引適用 -----
+-- 各取引: from -= amt, to += amt.  失敗時は Err.
+def applyTx := \tx d ->
+    let from = txFrom tx in
+    let to   = txTo tx in
+    let amt  = txAmt tx in
+    if amt <= 0 then Err (strConcat "non-positive amount: " (intToStr amt))
+    else
+        match dictGet from d with
+        | None -> Err (strConcat "unknown account: " from)
+        | Some fbal ->
+            if fbal < amt then
+                Err (strJoin "" ["overdraft: " , from, " has ",
+                                 intToStr fbal, ", needs ", intToStr amt])
+            else
+                match dictGet to d with
+                | None -> Err (strConcat "unknown account: " to)
+                | Some tbal ->
+                    let d1 = dictInsert from (fbal - amt) d in
+                    let d2 = dictInsert to   (tbal + amt) d1 in
+                    Ok d2
+
+-- 取引リストを順に適用 (失敗時に停止)
+def applyAll := \xs d ->
+    if null xs then Ok d
+    else match applyTx (head xs) d with
+        | Err e -> Err e
+        | Ok d' -> applyAll (tail xs) d'
+
+-- ----- 不変条件 -----
+-- 全残高の和.  Dict のキーをイテレートして加算.
+def totalOf := \d ->
+    let ks = dictKeys d in
+    let addBal = \k acc ->
+        match dictGet k d with | Some v -> v + acc | None -> acc
+    in
+    foldr addBal 0 ks
+
+-- 残高をすべて取り出す (リスト)
+def balancesOf := \d ->
+    map (\k -> match dictGet k d with | Some v -> v | None -> 0) (dictKeys d)
+
+-- ----- 取引履歴の登場アカウントを収集 -----
+def addUniqueName := \name acc ->
+    if contains name acc then acc else cons name acc
+
+def accountsOf := \txList ->
+    let go = \tx acc -> addUniqueName (txFrom tx) (addUniqueName (txTo tx) acc) in
+    foldr go nil txList

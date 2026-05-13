@@ -1,0 +1,44 @@
+-- ===========================================================
+-- 02: 集合 — 列挙的定義 と 内包的定義(述語)
+-- ===========================================================
+
+-- 列挙による集合
+def Days := {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
+def SmallEvens := {0, 2, 4, 6, 8}
+def Empty := {}
+
+-- 所属判定
+"Mon" in Days
+"Sun" in Days
+"Foo" in Days
+4 in SmallEvens
+5 in SmallEvens
+
+-- 述語による集合 (内包的定義)
+-- {x in Nat | x mod 2 == 0}  — Nat 上の偶数
+def EvenNat := {x in Nat | x mod 2 == 0}
+def Pos    := {x in Int | x > 0}
+def OneToTen := {x in Nat | x >= 1 and x <= 10}
+
+42 in EvenNat
+43 in EvenNat
+0 notin Pos
+3 in Pos
+10 in OneToTen
+11 in OneToTen
+
+-- 集合演算: union, intersect, diff
+def A := {1, 2, 3, 4}
+def B := {3, 4, 5, 6}
+A union B
+A intersect B
+A diff B
+B diff A
+
+-- 部分集合 (subset)
+{1, 2} subset A
+{1, 5} subset A
+
+-- 濃度 (有限集合のみ)
+card A
+card SmallEvens

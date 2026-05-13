@@ -1,0 +1,6 @@
+the quick brown fox jumps over the lazy dog
+the dog barks the fox runs the cat watches
+seki is a set-theoretic language seki is also a theorem prover
+seki integrates programming theorem proving and computer algebra
+the fox is quick the dog is lazy the cat is curious
+math is fun proof is rigor seki is both

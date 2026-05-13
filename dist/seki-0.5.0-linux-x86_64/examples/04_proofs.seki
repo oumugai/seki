@@ -1,0 +1,41 @@
+-- ===========================================================
+-- 04: 命題と証明 — forall / exists / theorem
+-- ===========================================================
+
+-- 集合の準備
+def Small := {1, 2, 3, 4, 5}
+def EvenSmall := {x in Small | x mod 2 == 0}
+def OddSmall  := {x in Small | x mod 2 == 1}
+
+-- 命題は Bool に評価される (Curry-Howard ライクな扱い)
+forall x in Small, x > 0
+exists x in Small, x > 4
+exists x in Small, x > 100
+
+-- ----- theorem -----
+-- 1. by eval — 命題を簡約してtrueを示す
+theorem two_plus_two : 2 + 2 == 4 := by eval
+
+-- 2. refl — 等式の両辺を簡約して構造的等価性を確認
+theorem dbl_3 : (3 + 3) == 6 := refl
+
+-- 3. forall 上の theorem (有限定義域なら全列挙で検証)
+theorem all_small_pos : forall x in Small, x > 0 := by eval
+
+-- 4. forall + 証明項 (Curry-Howard 風):
+--    証明は関数。各要素に適用しつつ命題を確認
+theorem dbl_even : forall x in EvenSmall, (x * 2) mod 2 == 0
+  := \x -> x
+
+-- 5. exists の証明: 「証拠 (witness) を渡す」
+theorem some_big : exists x in Small, x >= 5
+  := 5
+
+-- 6. 集合の所属を theorem として書く
+theorem mem_3 : 3 in Small := by eval
+
+-- 7. axiom — 検証なしに公理として受け入れる
+axiom Choice : forall S in Set, true
+
+-- ----- 反例があるとproof errorになる例 (コメント解除して試せる) -----
+-- theorem bad : forall x in Small, x > 3 := by eval

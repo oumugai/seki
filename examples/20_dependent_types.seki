@@ -1,0 +1,107 @@
+-- ===========================================================
+-- 20: 依存型 — 引数の値で返り値の型が決まる関数
+--
+-- seki の依存型は **集合論的に直接実装** されている:
+-- 「型」は集合、「依存型」は関数 (集合を返す関数)。よって
+-- (x : A) -> B(x) は集合論的には「Aの各元xに対して、要素が
+-- B(x)に属する関数の集合」として定義される。
+--
+-- 注意: seki の所属判定はサンプリングベース。任意のxで成立
+-- することを完全保証するものではないが、有限定義域では完全。
+-- ===========================================================
+
+-- ----- 例 1: 値で添字付けされた型の家族 (Vec n) ----------------
+
+-- Vec n: 長さちょうど n の整数リスト全体の集合
+-- これは「Nat → Set」型の関数 (型の家族)
+def Vec := \(n : Nat) -> {xs in (List Int) | length xs == n}
+
+-- 所属判定
+[1, 2, 3] in (Vec 3)            -- true
+[1, 2]    in (Vec 3)            -- false
+[]        in (Vec 0)            -- true
+
+-- ----- 例 2: 依存関数型による replicate -----------------------
+-- replicate_zero : (n : Nat) -> Vec n
+-- 引数 n に応じた長さのリストを返す
+def replicate_zero : (n : Nat) -> Vec n := \(n : Nat) ->
+    if n == 0 then nil else cons 0 (replicate_zero (n - 1))
+
+replicate_zero 0                -- []
+replicate_zero 3                -- [0, 0, 0]
+replicate_zero 5                -- [0, 0, 0, 0, 0]
+
+-- 上の def の型注釈で「n に依存した検査」が走った:
+-- replicate_zero 0 ∈ Vec 0   ← []   が長さ 0
+-- replicate_zero 1 ∈ Vec 1   ← [0]  が長さ 1
+-- ... サンプル N=5 まで自動検証 (Nat ⊂ サンプル)
+
+-- ----- 例 3: 任意値の replicate ------------------------------
+-- (n : Nat) -> Int -> Vec n
+-- 注: 多変数の依存関数も書ける
+def replicate : (n : Nat) -> Int -> Vec n := \(n : Nat) (v : Int) ->
+    if n == 0 then nil else cons v (replicate (n - 1) v)
+
+replicate 4 7                   -- [7, 7, 7, 7]
+replicate 0 99                  -- []
+replicate 3 (-1)                -- [-1, -1, -1]
+
+-- ----- 例 4: refinement 型 (依存型の特殊形) ------------------
+-- {x : T | P(x)} 形の型は集合の comprehension として既に存在
+def Pos := {x in Int | x > 0}
+def NonZero := {x in Int | x != 0}
+
+-- 依存型ではないが、述語による絞り込み
+def safe_sqrt_int : (n : Pos) -> Int := \(n : Pos) ->
+    if n == 1 then 1
+    else if n == 4 then 2
+    else if n == 9 then 3
+    else 0
+
+safe_sqrt_int 1                 -- 1
+safe_sqrt_int 4                 -- 2
+safe_sqrt_int 9                 -- 3
+
+-- 0 を渡せない (型エラー: 0 ∉ Pos)
+-- safe_sqrt_int 0              -- ← コメント外すと型エラー
+
+-- ----- 例 5: 依存型と Option / Result の併用 ----------------
+-- 注: Option / Result はデータ型で、`Option (Vec n)` という
+-- 「依存パラメトリック型」は今のところ自動生成されない。
+-- 戻り値の型注釈は省略して、値レベルで Option/Result を返す:
+
+def safe_take := \(n : Nat) (xs : List Int) ->
+    if length xs == n then Some xs else None
+
+safe_take 3 [1, 2, 3, 4]        -- None  (長さ違い)
+safe_take 3 [1, 2, 3]           -- Some [1, 2, 3]
+safe_take 0 nil                 -- Some []
+
+-- ----- 例 6: 依存型と検証の連携 ------------------------------
+-- forall n in {0, 1, 2, 3}, replicate_zero n in (Vec n)
+-- これは「型注釈そのものを定理化」したもの
+theorem replicate_correct
+  : forall n in {0, 1, 2, 3, 4, 5},
+        length (replicate_zero n) == n
+  := by eval
+
+-- replicate v が常に v だけを含むこと
+def all_eq := \v xs ->
+    if null xs then true
+    else if (head xs) == v then all_eq v (tail xs) else false
+
+theorem replicate_uniform
+  : forall n in {0, 1, 2, 3}, all_eq 7 (replicate n 7)
+  := by eval
+
+-- ----- 注意点 -----------------------------------------------
+-- 1. 所属判定はサンプルベースなので、無限の Nat 全体で完全な
+--    保証はない (有限部分はチェックされる)。
+-- 2. 多引数の依存関数は (x : A) -> (y : B(x)) -> ... と連鎖。
+-- 3. data Foo (n : Nat) のような GADT 風の定義は未サポート
+--    (今後の拡張)。
+
+-- ----- まとめ -----------------------------------------------
+-- 依存型は seki の「集合 = 型」哲学と自然に整合する。
+-- 依存関数型は「集合を返す関数」として直接表現でき、
+-- 既存の comprehension 集合 / data / match / Result と併用可能。

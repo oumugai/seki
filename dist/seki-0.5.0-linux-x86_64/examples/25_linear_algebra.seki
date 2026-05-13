@@ -1,0 +1,89 @@
+-- ===========================================================
+-- 25: 線形代数
+--
+-- 汎用 n-次元ベクトル空間 + n×m 行列を `lib/algebra/vector.seki` と
+-- `lib/algebra/matrix.seki` から取り、複数の次元で同じ性質を検証。
+-- ===========================================================
+
+import "algebra/vector.seki"
+import "algebra/matrix.seki"
+
+-- ===========================================================
+-- ベクトル空間 ℤⁿ の基本性質
+-- ===========================================================
+
+-- ----- 2-D 具体例 -----
+def u := [3, 4]
+def v := [1, 2]
+
+theorem v_add_concrete : vEq (vadd u v) [4, 6] == true := by eval
+theorem v_sub_concrete : vEq (vsub u v) [2, 2] == true := by eval
+theorem v_smul_concrete : vEq (smul 3 u) [9, 12] == true := by eval
+theorem v_dot_concrete : vdot u v == 11 := by eval     -- 3+8
+theorem v_norm2_concrete : vnorm2 u == 25 := by eval   -- 9+16
+
+-- ----- 3-D 具体例 -----
+def u3 := [1, 2, 3]
+def v3 := [4, 5, 6]
+theorem v_add_3 : vEq (vadd u3 v3) [5, 7, 9] == true := by eval
+theorem v_dot_3 : vdot u3 v3 == 32 := by eval
+
+-- ----- 高次元でも動く: 5-D -----
+def u5 := [1, 1, 1, 1, 1]
+def v5 := [1, 2, 3, 4, 5]
+theorem v_dot_5 : vdot u5 v5 == 15 := by eval
+
+-- ----- 標準基底の直交性: 任意次元 -----
+theorem e_orth_3_01 : vdot (evec 3 0) (evec 3 1) == 0 := by eval
+theorem e_orth_3_12 : vdot (evec 3 1) (evec 3 2) == 0 := by eval
+theorem e_unit_3_0  : vdot (evec 3 0) (evec 3 0) == 1 := by eval
+
+theorem e_orth_5_03 : vdot (evec 5 0) (evec 5 3) == 0 := by eval
+theorem e_orth_5_24 : vdot (evec 5 2) (evec 5 4) == 0 := by eval
+
+-- ----- ゼロベクトルとの加算 -----
+theorem v_add_zero_2 : vEq (vadd (vzero 2) u) u == true := by eval
+theorem v_add_zero_3 : vEq (vadd (vzero 3) u3) u3 == true := by eval
+theorem v_add_zero_5 : vEq (vadd (vzero 5) u5) u5 == true := by eval
+
+-- ===========================================================
+-- 行列演算
+-- ===========================================================
+
+-- ----- 2x2 -----
+def a2 := [[1, 2], [3, 4]]
+def b2 := [[5, 6], [7, 8]]
+
+theorem m_add_2x2
+  : matEq (matAdd a2 b2) [[6, 8], [10, 12]] == true := by eval
+theorem m_mul_2x2
+  : matEq (matMul a2 b2) [[19, 22], [43, 50]] == true := by eval
+
+-- 単位行列との積
+theorem m_id_left_2  : matEq (matMul (matIdentity 2) a2) a2 == true := by eval
+theorem m_id_right_2 : matEq (matMul a2 (matIdentity 2)) a2 == true := by eval
+
+-- ----- 3x3 -----
+def m3 := [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+
+theorem m_id_left_3  : matEq (matMul (matIdentity 3) m3) m3 == true := by eval
+theorem m_transp_inv : matEq (matTranspose (matTranspose m3)) m3 == true := by eval
+
+-- ----- 矩形行列 (2×3) × (3×2) = (2×2) -----
+def c23 := [[1, 2, 3], [4, 5, 6]]
+def d32 := [[7, 8], [9, 10], [11, 12]]
+
+theorem m_rect_mul
+  : matEq (matMul c23 d32) [[58, 64], [139, 154]] == true := by eval
+
+theorem m_rect_sizes_in  : matRows c23 == 2 := by eval
+theorem m_rect_sizes_out : matCols (matMul c23 d32) == 2 := by eval
+
+-- ===========================================================
+-- まとめ
+-- ===========================================================
+-- 汎用 n-D vector + n×m matrix で:
+--   * 2-D, 3-D, 5-D のベクトル演算を同じ関数で検証
+--   * 標準基底の直交性を任意次元で確認
+--   * 2x2, 3x3, 矩形 2×3 行列を一様に扱う
+-- 次元ごとに別の関数を書く必要がない (汎用化の利点)。

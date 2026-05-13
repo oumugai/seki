@@ -1,0 +1,38 @@
+-- ===========================================================
+-- tests/seki/test_algebra_modular.seki — Z/nZ 操作の検証
+-- ===========================================================
+
+import "../../lib/algebra/modular.seki"
+
+-- ----- 正規化: 負の値も 0..n-1 に -----
+theorem norm_pos : normMod 7 10 == 3 := by eval
+theorem norm_zero : normMod 7 0 == 0 := by eval
+theorem norm_neg : normMod 7 (0 - 3) == 4 := by eval
+theorem norm_neg_big : normMod 7 (0 - 15) == 6 := by eval
+
+-- ----- 加法 -----
+theorem add_mod_5_3   : addMod 7 5 3 == 1 := by eval
+theorem add_mod_wrap  : addMod 12 11 5 == 4 := by eval
+
+-- ----- 乗法 -----
+theorem mul_mod_3_4_5 : mulMod 5 3 4 == 2 := by eval
+theorem mul_mod_7_3_5 : mulMod 7 3 5 == 1 := by eval
+
+-- ----- 単項マイナス (加法逆元) -----
+theorem neg_mod_5_3 : negMod 7 5 == 2 := by eval
+theorem neg_mod_0   : negMod 7 0 == 0 := by eval
+
+-- ----- べき乗 -----
+theorem pow_mod_2_10_7 : powMod 7 2 10 == 2 := by eval         -- 1024 mod 7 = 2
+theorem pow_mod_3_5_7  : powMod 7 3 5 == 5 := by eval          -- 243 mod 7 = 5
+theorem pow_mod_zero   : powMod 7 5 0 == 1 := by eval
+
+-- ----- 乗法逆元 (Z/5Z) -----
+theorem inv_5_1 : invMod 5 1 == 1 := by eval
+theorem inv_5_2 : invMod 5 2 == 3 := by eval                   -- 2*3=6=5+1
+theorem inv_5_3 : invMod 5 3 == 2 := by eval
+theorem inv_5_4 : invMod 5 4 == 4 := by eval                   -- 4*4=16=15+1
+
+-- gcd(a, n) ≠ 1 の場合: 逆元なし (= 0)
+theorem inv_6_3 : invMod 6 3 == 0 := by eval                   -- gcd(3,6)=3 ≠ 1
+theorem inv_6_4 : invMod 6 4 == 0 := by eval                   -- gcd(4,6)=2 ≠ 1

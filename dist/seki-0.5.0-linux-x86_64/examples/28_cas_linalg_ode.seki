@@ -1,0 +1,140 @@
+-- ===========================================================
+-- 28: 行列・固有値・ODE・Newton 法・Gauss 消去
+--
+-- `lib/numeric/eigen.seki` (det, 固有値), `lib/numeric/ode.seki`
+-- (Euler / RK4), `lib/numeric/newton.seki`, `lib/numeric/gauss.seki`
+-- を import。
+-- ===========================================================
+
+import "numeric/eigen.seki"
+import "numeric/ode.seki"
+import "numeric/newton.seki"
+import "numeric/gauss.seki"
+
+-- ===========================================================
+-- §1. n×n 行列式 (Laplace 展開)
+-- ===========================================================
+
+def id3 := [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+def upper3 := [[2, 1, 5], [0, 3, 7], [0, 0, 4]]
+def antisym3 := [[0, 2, 3], [0 - 2, 0, 5], [0 - 3, 0 - 5, 0]]
+
+theorem det_identity3 : det id3 == 1 := by eval
+theorem det_upper3    : det upper3 == 24 := by eval    -- 2*3*4
+theorem det_antisym3  : det antisym3 == 0 := by eval
+
+-- 4x4 単位行列の行列式も 1
+def id4 := [[1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]]
+theorem det_identity4 : det id4 == 1 := by eval
+
+-- ===========================================================
+-- §2. 2x2 固有値
+-- ===========================================================
+
+-- 対角行列の固有値は対角成分
+def A_diag := ((2, 0), (0, 3))
+theorem ev_diag :
+    match eigenvalues2 A_diag with
+    | Pair _ _ -> true
+    | _ -> false
+  := by eval
+
+-- Jordan ブロック ((1,1),(0,1)) → 重根 1
+def A_jordan := ((1, 1), (0, 1))
+theorem ev_jordan :
+    match eigenvalues2 A_jordan with
+    | Single _ -> true
+    | _ -> false
+  := by eval
+
+-- 回転行列 ((0,-1),(1,0)) → 実数解なし (固有値は ±i)
+def A_rot := ((0, 0 - 1), (1, 0))
+theorem ev_rotation :
+    match eigenvalues2 A_rot with
+    | NoReal -> true
+    | _ -> false
+  := by eval
+
+-- ===========================================================
+-- §3. ODE 数値解法: y' = y, y(0) = 1 → y(t) = e^t
+-- ===========================================================
+
+def odeRhs := \_ y -> y
+
+-- RK4 h=0.1 で 10 ステップ → y(1) ≈ e
+def rk4Sol := rk4N odeRhs 0.1 0.0 1.0 10
+def rk4_y1 := lastOfList rk4Sol
+def errRK4 := absR (rk4_y1 - e)
+theorem rk4_accuracy : errRK4 < 0.00001 := by eval
+
+-- Euler は同じ条件で精度低い
+def eulerSol := eulerN odeRhs 0.1 0.0 1.0 10
+def euler_y1 := lastOfList eulerSol
+def errEuler := absR (euler_y1 - e)
+theorem euler_less_accurate : errEuler > errRK4 := by eval
+
+-- ----- 単振動: y'' + y = 0, y(0)=1, y'(0)=0 → y(t) = cos(t) -----
+def harmonic := \_ st ->
+    let y = fst st in
+    let v = snd st in
+    (v, 0.0 - y)
+
+def harmonicAtT := \t0 st0 n h ->
+    if n == 0 then st0
+    else harmonicAtT (t0 + h) (rk4StepPair harmonic h t0 st0) (n - 1) h
+
+-- t = π で y は -1 になるはず
+def st_pi := harmonicAtT 0.0 (1.0, 0.0) 314 0.01
+def y_pi := fst st_pi
+theorem harmonic_at_pi : absR (y_pi - (0.0 - 1.0)) < 0.001 := by eval
+
+-- ===========================================================
+-- §4. Newton 法 (根の数値解)
+-- ===========================================================
+
+-- √2 = 解 of x² - 2 = 0
+def fsq := \x -> x * x - 2.0
+def fsq_prime := \x -> 2.0 * x
+def sqrt2_approx := newton fsq fsq_prime 1.0 20
+theorem newton_sqrt2
+  : absR (sqrt2_approx * sqrt2_approx - 2.0) < 0.0000000001
+  := by eval
+
+-- 黄金比 φ: x² - x - 1 = 0
+def fphi := \x -> x * x - x - 1.0
+def fphi_prime := \x -> 2.0 * x - 1.0
+def phi_approx := newton fphi fphi_prime 1.0 20
+theorem newton_golden : absR (phi_approx - 1.6180339887) < 0.00001 := by eval
+
+-- ===========================================================
+-- §5. Gauss 消去 (連立線形方程式)
+-- ===========================================================
+
+-- 2 元: x + y = 3, 2x - y = 0 → x = 1, y = 2
+def sys2 := [[1.0, 1.0, 3.0], [2.0, 0.0 - 1.0, 0.0]]
+def sol2 := gauss sys2
+theorem gauss_2x : absR ((nth 0 sol2) - 1.0) < 0.00001 := by eval
+theorem gauss_2y : absR ((nth 1 sol2) - 2.0) < 0.00001 := by eval
+
+-- 3 元: x+y+z=6, 2x+y-z=1, x-y+2z=5 → x=1, y=2, z=3
+def sys3 := [[1.0, 1.0, 1.0, 6.0],
+             [2.0, 1.0, 0.0 - 1.0, 1.0],
+             [1.0, 0.0 - 1.0, 2.0, 5.0]]
+def sol3 := gauss sys3
+theorem gauss_3x : absR ((nth 0 sol3) - 1.0) < 0.00001 := by eval
+theorem gauss_3y : absR ((nth 1 sol3) - 2.0) < 0.00001 := by eval
+theorem gauss_3z : absR ((nth 2 sol3) - 3.0) < 0.00001 := by eval
+
+-- ===========================================================
+-- まとめ
+-- ===========================================================
+-- このサンプルでは:
+--   * n×n 行列式 (3x3, 4x4): lib/numeric/eigen.seki
+--   * 2x2 固有値の分類 (対角/Jordan/回転): lib/numeric/eigen.seki
+--   * ODE 数値解法 (RK4 で y'=y, 単振動): lib/numeric/ode.seki
+--   * Newton 法 (√2, φ): lib/numeric/newton.seki
+--   * Gauss 消去 (2, 3 元連立): lib/numeric/gauss.seki
+-- をそれぞれライブラリ import で利用。

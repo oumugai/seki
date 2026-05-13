@@ -1,0 +1,63 @@
+-- ===========================================================
+-- lib/analysis/limit.seki — 極限と収束判定 (数値ベース)
+--
+-- 公開する名前:
+--   def limitAt f x0 hList   — lim h→0 f(x0+h) の数値推定
+--                                hList は h の収束列 (例: [0.1, 0.01, 0.001])
+--   def diffLimit f x0 hList — 微分の極限定義 lim h→0 (f(x+h)-f(x))/h
+--   def isCauchy eps xs      — Cauchy 列か (差が eps 以下になるか)
+--   def converges eps n a    — 数列 a が n 項以内で誤差 eps 内に収まるか
+--   def fixedPoint f x0 iter — 反復 x ← f(x) で固定点に収束させる
+-- ===========================================================
+
+def absR := \r -> if r < 0.0 then 0.0 - r else r
+
+-- ----- 数値極限: 関数 f を x0 の近傍 (x0 + h) で次々に評価し、最後の値を返す -----
+-- hList = [h_0, h_1, ..., h_k] が h → 0 に収束する列のとき、
+-- limitAt f x0 hList = f(x0 + h_k)
+def limitAt := \f x0 hList ->
+    if null hList then f x0
+    else if null (tail hList) then f (x0 + (head hList))
+    else limitAt f x0 (tail hList)
+
+-- ----- 微分の極限定義 -----
+-- df/dx |_{x=x0} = lim h→0 (f(x0+h) - f(x0)) / h
+def diffQuotient := \f x0 h ->
+    (f (x0 + h) - f x0) / h
+
+def diffLimit := \f x0 hList ->
+    if null hList then 0.0
+    else if null (tail hList) then diffQuotient f x0 (head hList)
+    else diffLimit f x0 (tail hList)
+
+-- ----- Cauchy 列: 隣り合う 2 項の差が eps 未満になれば収束と判定 -----
+def isCauchyRec := \eps xs ->
+    if null xs then true
+    else if null (tail xs) then true
+    else
+        let a = head xs in
+        let b = head (tail xs) in
+        if (absR (a - b)) >= eps then false
+        else isCauchyRec eps (tail xs)
+
+def isCauchy := \eps xs -> isCauchyRec eps xs
+
+-- ----- 数列の n 項目近似 (x_0, x_1, ..., x_{n-1} のリスト) -----
+-- a : Int → Real から n 項目のリストを生成
+def sequenceUpTo := \a n ->
+    if n == 0 then nil
+    else cons (a 0) (sequenceUpTo (\k -> a (k + 1)) (n - 1))
+
+-- ----- 数列の n 項目の値が、極限値 L に対して eps 内か -----
+def withinOf := \eps a n target ->
+    (absR (a n - target)) < eps
+
+-- ----- 固定点反復: x ← f(x) を iter 回繰り返した結果 -----
+def fixedPoint := \f x0 iter ->
+    if iter == 0 then x0
+    else fixedPoint f (f x0) (iter - 1)
+
+-- ----- 数値定数 (lim 値の参照用) -----
+-- (pi, e は stdlib に既にある)
+-- 黄金比 φ = (1 + √5) / 2
+def goldenRatio := (1.0 + sqrt 5.0) / 2.0

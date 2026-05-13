@@ -1,0 +1,79 @@
+-- ===========================================================
+-- 22: 群論
+--
+-- `lib/algebra/axioms.seki` の汎用述語 + `lib/algebra/modular.seki` の
+-- Z/nZ を組み合わせて、群・モノイド・可換群を **複数の n で同時に検証**。
+-- ===========================================================
+
+import "algebra/axioms.seki"
+import "algebra/modular.seki"
+
+-- ----- (ℤ, +) は可換群 (代数で無限域 ∞ 検証) -----
+theorem int_add_assoc
+  : forall (a b c) in Int, (a + b) + c == a + (b + c) := by algebra
+theorem int_add_zero  : forall a in Int, a + 0 == a := by algebra
+theorem int_add_neg   : forall a in Int, a + (-a) == 0 := by algebra
+theorem int_add_comm  : forall (a b) in Int, a + b == b + a := by algebra
+
+-- ----- (ℤ, ·) はモノイド -----
+theorem int_mul_assoc
+  : forall (a b c) in Int, (a * b) * c == a * (b * c) := by algebra
+theorem int_mul_one : forall a in Int, a * 1 == a := by algebra
+theorem int_mul_comm : forall (a b) in Int, a * b == b * a := by algebra
+
+-- ===========================================================
+-- 有限群: 任意の Z/nZ が可換群 (汎用述語で検証)
+-- ===========================================================
+
+-- Z/12Z は可換群 (時計算術)
+theorem z12_is_abelian
+  : isAbelianGroup (Zn 12) (addMod 12) 0 (negMod 12)
+  := by eval
+
+-- 同じ述語で異なる n を即座に検証 (汎用ライブラリの利点)
+theorem z2_is_abelian
+  : isAbelianGroup (Zn 2) (addMod 2) 0 (negMod 2) := by eval
+theorem z3_is_abelian
+  : isAbelianGroup (Zn 3) (addMod 3) 0 (negMod 3) := by eval
+theorem z4_is_abelian
+  : isAbelianGroup (Zn 4) (addMod 4) 0 (negMod 4) := by eval
+theorem z6_is_abelian
+  : isAbelianGroup (Zn 6) (addMod 6) 0 (negMod 6) := by eval
+
+-- ===========================================================
+-- (Z/nZ, ·) はモノイドだが群ではない (0 に逆元なし)
+-- - モノイド性は確認できる
+-- - 群性は失敗する (verify は theorem を refuse する)
+-- ===========================================================
+
+theorem z5_mul_monoid : isMonoid (Zn 5) (mulMod 5) 1 := by eval
+theorem z7_mul_monoid : isMonoid (Zn 7) (mulMod 7) 1 := by eval
+
+-- ===========================================================
+-- (Bool, xor) は Z/2Z と同型な可換群
+-- ===========================================================
+
+def xorB := \a b -> if a then (not b) else b
+
+theorem bool_xor_abelian
+  : isAbelianGroup Bool xorB false (\b -> b)
+  := by eval
+
+-- ===========================================================
+-- (ℤ, +, ·) は可換環 — 分配律を確認
+-- ===========================================================
+
+theorem int_left_distrib
+  : forall (a b c) in Int, a * (b + c) == a * b + a * c := by algebra
+
+theorem int_right_distrib
+  : forall (a b c) in Int, (a + b) * c == a * c + b * c := by algebra
+
+-- ===========================================================
+-- まとめ: 汎用述語 + 汎用 Z/nZ で
+--   * (ℤ, +) を可換群、(ℤ, +, ·) を可換環として検証 (by algebra ∞)
+--   * Z/2Z, Z/3Z, Z/4Z, Z/6Z, Z/12Z を可換群として検証 (by eval)
+--   * Z/5Z, Z/7Z の乗法をモノイドとして検証
+--   * Bool xor を可換群として検証
+-- いずれも同じ汎用述語 `isAbelianGroup` / `isMonoid` でテスト可能。
+-- ===========================================================

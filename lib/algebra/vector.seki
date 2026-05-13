@@ -1,0 +1,64 @@
+-- ===========================================================
+-- lib/algebra/vector.seki — n-次元ベクトル空間 (汎用)
+--
+-- ベクトル = List of (Int/Real)。長さが次元 n を決める。
+--
+-- 公開する名前:
+--   def vadd / vsub / smul / vneg / vdot / vnorm2  — 演算
+--   def vzero n                                    — n-次元ゼロ
+--   def evec n i                                   — n-次元の第 i 成分基底
+--   def vlen v                                     — 次元 (= length v)
+--   def vEq v w                                    — 要素ごとの一致
+-- ===========================================================
+
+-- ----- 加減算 (リスト長が違う場合は短い方に合わせる) -----
+def vadd := \u v ->
+    if null u then v
+    else if null v then u
+    else cons ((head u) + (head v)) (vadd (tail u) (tail v))
+
+def vsub := \u v ->
+    if null u then
+        -- u 空、v をすべて符号反転
+        if null v then nil
+        else cons (0 - (head v)) (vsub nil (tail v))
+    else if null v then u
+    else cons ((head u) - (head v)) (vsub (tail u) (tail v))
+
+-- ----- スカラー乗算 -----
+def smul := \c v ->
+    if null v then nil
+    else cons (c * (head v)) (smul c (tail v))
+
+def vneg := \v -> smul (0 - 1) v
+
+-- ----- 内積・ノルム² -----
+def vdot := \u v ->
+    if (null u) or (null v) then 0
+    else (head u) * (head v) + vdot (tail u) (tail v)
+
+def vnorm2 := \v -> vdot v v
+
+-- ----- 次元 / 0 / 基底 -----
+def vlen := \v -> length v
+
+def vzeroRec := \n ->
+    if n <= 0 then nil
+    else cons 0 (vzeroRec (n - 1))
+
+def vzero := \n -> vzeroRec n
+
+-- 第 i 成分が 1、それ以外 0 (n-次元、0-indexed)
+def evecRec := \n i ->
+    if n <= 0 then nil
+    else cons (if i == 0 then 1 else 0) (evecRec (n - 1) (i - 1))
+
+def evec := \n i -> evecRec n i
+
+-- ----- 等価判定 (リストの要素ごと比較) -----
+def vEq := \u v ->
+    if (null u) and (null v) then true
+    else if null u then false
+    else if null v then false
+    else if (head u) != (head v) then false
+    else vEq (tail u) (tail v)

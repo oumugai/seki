@@ -1,0 +1,199 @@
+-- ===========================================================
+-- 31: 高度なシステム開発 — 時刻・乱数・ビット演算・プロセス・JSON・TCP
+--
+-- Phase 2 で追加された builtin の demo:
+--   §1. 時刻 (nowSecs/Millis/Micros/monotonicMillis, sleep)
+--   §2. ビット演算 (bitAnd/Or/Xor/Not/Shl/Shr, popcount)
+--   §3. 乱数 (xorshift64* PRNG)
+--   §4. プロセス実行 (execShell, runCommand)
+--   §5. JSON (Json ADT + jsonParse + jsonEncode)
+--   §6. TCP networking (tcpListen/Accept/Connect/Read/Write/Close)
+-- ===========================================================
+
+-- ===========================================================
+-- §1. 時刻
+-- ===========================================================
+
+-- UNIX エポックからの秒数 (現在時刻に依存するので >0 のみ検証)
+theorem now_secs_positive : nowSecs () > 0 := by eval
+
+-- nowMillis は nowSecs * 1000 ± 1000 程度 (1 秒程度の誤差を許容)
+def ms := nowMillis ()
+def s  := nowSecs ()
+theorem now_units_consistent : absI (ms - s * 1000) < 1000 := by eval
+
+-- monotonicMillis はプログラム開始からの経過時間 (常に非負)
+theorem monotonic_nn : monotonicMillis () >= 0 := by eval
+
+-- ===========================================================
+-- §2. ビット演算
+-- ===========================================================
+
+theorem bit_and_basic   : bitAnd 12 10 == 8     := by eval     -- 1100 & 1010 = 1000
+theorem bit_or_basic    : bitOr  12 10 == 14    := by eval     -- 1100 | 1010 = 1110
+theorem bit_xor_basic   : bitXor 12 10 == 6     := by eval     -- 1100 ^ 1010 = 0110
+theorem bit_xor_inverse : bitXor (bitXor 42 7) 7 == 42 := by eval
+
+theorem bit_shl_basic  : bitShl 1 8 == 256 := by eval      -- 2^8
+theorem bit_shl_zero   : bitShl 5 0 == 5   := by eval
+theorem bit_shr_basic  : bitShr 256 4 == 16 := by eval     -- 256 / 16
+
+-- popcount: 立っているビットの数
+theorem popcount_7   : popcount 7 == 3   := by eval     -- 0b111
+theorem popcount_255 : popcount 255 == 8 := by eval     -- 0b11111111
+
+-- ビット操作で偶奇判定 (mod 2 と等価)
+theorem bit_even : bitAnd 42 1 == 0 := by eval
+theorem bit_odd  : bitAnd 43 1 == 1 := by eval
+
+-- ===========================================================
+-- §3. 乱数 (xorshift64* PRNG)
+-- ===========================================================
+
+-- 同じシードで初期化すれば結果は再現可能
+def _seed_a := randomSeed 12345
+def a1 := randomInt ()
+def a2 := randomInt ()
+
+def _seed_b := randomSeed 12345
+def b1 := randomInt ()
+def b2 := randomInt ()
+
+theorem prng_deterministic_1 : a1 == b1 := by eval
+theorem prng_deterministic_2 : a2 == b2 := by eval
+
+-- randomRange は [lo, hi) を返す
+def _ := randomSeed 999
+def r := randomRange 0 100
+theorem range_in_bounds : (r >= 0) and (r < 100) := by eval
+
+-- ===========================================================
+-- §4. プロセス実行
+-- ===========================================================
+
+-- execShell は shell 経由で実行 (sh -c または cmd /C)
+def echo_out := execShell "echo seki rocks"
+theorem echo_works :
+    match echo_out with
+    | Ok s  -> strContains "seki rocks" s
+    | Err _ -> false
+  := by eval
+
+-- runCommand は明示的に cmd + argv (シェル展開なし)
+-- 戻り値は (exit_code, stdout, stderr) のタプル
+def ls_result := runCommand "true" []
+theorem true_exits_0 : fst ls_result == 0 := by eval
+
+def false_result := runCommand "false" []
+theorem false_exits_1 : fst false_result == 1 := by eval
+
+-- ===========================================================
+-- §5. JSON
+-- ===========================================================
+
+-- ----- 構築・エンコード -----
+def doc := JObj [
+    ("name",   JStr "alice"),
+    ("age",    JNum 30.0),
+    ("active", JBool true),
+    ("tags",   JArr [JStr "admin", JStr "user"]),
+    ("misc",   JNull)
+]
+
+def encoded := jsonEncode doc
+theorem encoded_has_name : strContains "\"name\"" encoded == true := by eval
+theorem encoded_has_age  : strContains "\"age\":30" encoded == true := by eval
+
+-- ----- パース (Result Json String) -----
+def parsed := jsonParse "{\"x\": 42, \"y\": [1, 2, 3]}"
+theorem parsed_ok :
+    match parsed with
+    | Ok _  -> true
+    | Err _ -> false
+  := by eval
+
+-- フィールドアクセス
+def parsed_doc := match parsed with
+    | Ok j  -> j
+    | Err _ -> JNull
+
+theorem json_field_x :
+    match jsonField parsed_doc "x" with
+    | Some (JNum n) -> n == 42.0
+    | _ -> false
+  := by eval
+
+-- ----- ラウンドトリップ: encode → parse → 値が一致 -----
+def rt_src := JObj [("k", JNum 7.0)]
+def rt_str := jsonEncode rt_src
+def rt_parsed := match jsonParse rt_str with
+    | Ok j -> j
+    | Err _ -> JNull
+
+theorem json_roundtrip :
+    match jsonField rt_parsed "k" with
+    | Some (JNum n) -> n == 7.0
+    | _ -> false
+  := by eval
+
+-- ----- 不正な JSON はエラー -----
+def bad := jsonParse "{not valid}"
+theorem json_bad_err :
+    match bad with
+    | Err _ -> true
+    | Ok _  -> false
+  := by eval
+
+-- ===========================================================
+-- §6. TCP networking (コメントアウト — 環境依存なので opt-in)
+-- ===========================================================
+--
+-- TCP API:
+--   tcpListen  : String -> Int -> Result Handle String
+--   tcpAccept  : Handle -> Result Handle String       (block until conn)
+--   tcpConnect : String -> Int -> Result Handle String
+--   tcpRead    : Handle -> Int -> Result String String (up to N bytes)
+--   tcpWrite   : Handle -> String -> Result Unit String
+--   tcpClose   : Handle -> Unit
+--
+-- 簡易 echo サーバの例 (実行するにはコメントを外す):
+--
+-- match tcpListen "127.0.0.1" 7878 with
+-- | Err e -> println e
+-- | Ok listener ->
+--     let _ = println "listening on 127.0.0.1:7878" in
+--     match tcpAccept listener with
+--     | Err e -> println e
+--     | Ok sock ->
+--         match tcpRead sock 1024 with
+--         | Err e -> println e
+--         | Ok msg ->
+--             let _ = tcpWrite sock (strConcat "echo: " msg) in
+--             let _ = tcpClose sock in
+--             tcpClose listener
+--
+-- HTTP クライアントの素朴な例:
+--
+-- match tcpConnect "example.com" 80 with
+-- | Err e -> println e
+-- | Ok s ->
+--     let _ = tcpWrite s "GET / HTTP/1.0\r\nHost: example.com\r\n\r\n" in
+--     match tcpRead s 4096 with
+--     | Ok response -> let _ = println response in tcpClose s
+--     | Err e -> let _ = println e in tcpClose s
+
+-- ===========================================================
+-- まとめ
+-- ===========================================================
+-- Phase 2 で seki は次の汎用システム開発機能を獲得した:
+--   * 時刻測定 (wall + monotonic) と sleep
+--   * 完全な整数ビット演算 (and/or/xor/not/shl/shr/popcount)
+--   * 決定論的 PRNG (xorshift64*、再現可能)
+--   * シェル + 直接プロセス起動 (execShell / runCommand)
+--   * 完全な JSON I/O (ADT + parser + encoder、外部依存ゼロ)
+--   * ブロッキング TCP socket (server / client 両対応)
+--
+-- 集合論セマンティクスは引き続き保持:
+--   * Json は disjoint union ADT — match の網羅性が成立
+--   * Handle は集合論的意味を持たない opaque token (I/O の escape hatch)
+--   * すべての I/O 結果は Result E A — 失敗が型に表れる

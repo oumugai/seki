@@ -1,0 +1,19 @@
+-- ===========================================================
+-- lib/numeric/newton.seki — Newton 法 (根の数値解)
+--
+-- 公開する名前:
+--   def absR f                      — Real の絶対値
+--   def newton f fprime x0 iters    — Newton 反復
+-- ===========================================================
+
+def absR := \r -> if r < 0.0 then 0.0 - r else r
+
+-- f(x) = 0 の根を Newton-Raphson 法で近似:
+--   x_{n+1} = x_n - f(x_n) / f'(x_n)
+def newton := \f fprime x0 iters ->
+    if iters == 0 then x0
+    else
+        let fx = f x0 in
+        let fpx = fprime x0 in
+        if (absR fpx) < 0.000001 then x0
+        else newton f fprime (x0 - fx / fpx) (iters - 1)

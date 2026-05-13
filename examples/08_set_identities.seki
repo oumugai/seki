@@ -1,0 +1,81 @@
+-- ===========================================================
+-- 08: 集合論の恒等式 — De Morgan / 分配律 / 吸収律
+--
+-- 普遍集合 U の有限部分集合に対して恒等式を確認する。
+-- forall A in PU, forall B in PU, ... という冪集合の量化は
+-- ここでは省き、代表的な部分集合に対して theorem を立てる。
+-- (有限/具体ケースの全列挙であっても、構造的等価が成立する)
+-- ===========================================================
+
+def U := {1, 2, 3, 4, 5, 6, 7, 8}      -- 普遍集合
+
+def A := {1, 2, 3, 4}
+def B := {3, 4, 5, 6}
+def C := {5, 6, 7, 8}
+
+-- 補集合 (U に対する差): comp X = U diff X
+def comp := \X -> U diff X
+
+comp A                                 -- {5, 6, 7, 8}
+comp (A union B)                       -- {7, 8}
+
+-- ----- 交換律 -----
+theorem union_comm  : (A union B)     == (B union A)     := refl
+theorem inter_comm  : (A intersect B) == (B intersect A) := refl
+
+-- ----- 結合律 -----
+theorem union_assoc
+    : ((A union B) union C) == (A union (B union C))
+    := refl
+
+theorem inter_assoc
+    : ((A intersect B) intersect C) == (A intersect (B intersect C))
+    := refl
+
+-- ----- 分配律 -----
+theorem dist_inter_over_union
+    : (A intersect (B union C))
+        == ((A intersect B) union (A intersect C))
+    := refl
+
+theorem dist_union_over_inter
+    : (A union (B intersect C))
+        == ((A union B) intersect (A union C))
+    := refl
+
+-- ----- 吸収律 -----
+theorem absorb_union : (A union (A intersect B)) == A := refl
+theorem absorb_inter : (A intersect (A union B)) == A := refl
+
+-- ----- 冪等律 -----
+theorem union_idem : (A union A)     == A := refl
+theorem inter_idem : (A intersect A) == A := refl
+
+-- ----- De Morgan の法則 (集合版) -----
+theorem demorgan_inter
+    : comp (A intersect B) == ((comp A) union (comp B))
+    := refl
+
+theorem demorgan_union
+    : comp (A union B) == ((comp A) intersect (comp B))
+    := refl
+
+-- ----- 二重補集合 -----
+theorem double_comp : comp (comp A) == A := refl
+
+-- ----- 補集合と単位 -----
+theorem comp_self_empty : (A intersect (comp A)) == {} := refl
+-- A ∪ ¬A は U に等しい:
+theorem comp_self_full  : (A union (comp A)) == U := refl
+
+-- ----- subset の推移律 -----
+def D := {1, 2}
+def E := {1, 2, 3}
+def F := {1, 2, 3, 4, 5}
+theorem subset_trans
+    : (D subset E) and (E subset F) and (D subset F)
+    := by eval
+
+-- ----- subset と union/intersect の関係 -----
+theorem subset_union : A subset (A union C) := by eval
+theorem inter_subset : (A intersect C) subset A := by eval

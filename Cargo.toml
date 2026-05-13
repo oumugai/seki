@@ -1,0 +1,23 @@
+[package]
+name = "seki"
+version = "0.5.0"
+edition = "2021"
+rust-version = "1.70"
+description = "A set-theory based theorem prover and programming language"
+build = "build.rs"
+
+[[bin]]
+name = "seki"
+path = "src/main.rs"
+
+[[bin]]
+name = "seki-lsp"
+path = "src/lsp_main.rs"
+
+[lib]
+name = "seki"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3
+lto = true

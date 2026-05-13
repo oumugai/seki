@@ -1,0 +1,154 @@
+-- ===========================================================
+-- 16: stdlib による集合論的構築の活用
+--
+-- src/stdlib.seki で定義されている型・関数を使用する。
+-- これらは seki 言語自体で書かれており、起動時に自動的に
+-- prelude にロードされる。低レベルな Rust 組込 (算術・比較・
+-- fst/snd/cons/head/tail/leaf/node 等) の上に集合論的な層が
+-- 構築されている。
+-- ===========================================================
+
+-- ----- 整数の構造化部分集合 -----
+def AllPos := {1, 2, 3, 4, 5}
+forall x in AllPos, x in Pos                  -- true
+forall x in {-3, -2, -1}, x in Neg            -- true
+forall x in {0, 2, 4, 6}, x in EvenInt        -- true
+
+theorem all_in_pos
+  : forall x in {1, 2, 3, 4, 5, 100, 9999}, x in Pos
+  := by eval
+
+-- 桁範囲
+255 in Byte                                    -- true
+256 in Byte                                    -- false
+-129 in Int8                                   -- false (Int8 は [-128..127])
+127 in Int8                                    -- true
+
+theorem zero_in_byte : 0 in Byte := by eval
+theorem ff_in_byte   : 255 in Byte := by eval
+
+-- ----- 自然数 ≡ 非負整数 (predicate-based) ----------------
+-- NatP := {x in Int | x >= 0}
+3 in NatP
+-3 in NatP
+forall x in {0, 1, 2, 3, 4, 5}, x in NatP
+
+theorem natp_subset_of_int : forall x in NatP, x in Int := by eval
+
+-- ----- 有理数 Rat = ℤ × ℕ⁺ ------------------------------
+def half  := mkRat 1 2
+def third := mkRat 1 3
+def neg2  := mkRat (-2) 1
+
+half                                           -- (1, 2)
+third
+neg2
+
+numer half                                     -- 1
+denom half                                     -- 2
+
+-- 1/2 in Rat の確認
+half in Rat
+neg2 in Rat
+
+-- 算術
+addRat half third                              -- (5, 6)  (= 1/2 + 1/3)
+mulRat half third                              -- (1, 6)  (= 1/2 * 1/3)
+subRat half third                              -- (1, 6)  (= 1/2 - 1/3)
+negRat half                                    -- (-1, 2)
+
+-- 同値判定
+eqRat (mkRat 1 2) (mkRat 2 4)                  -- true (1/2 == 2/4)
+eqRat (mkRat 1 2) (mkRat 1 3)                  -- false
+eqRat (mkRat 6 4) (mkRat 3 2)                  -- true (6/4 == 3/2)
+
+-- ----- 有理数の代数性 -----
+-- 加法の交換律 (cross-multiplication で同値判定)
+def TestRat := {(1, 1), (1, 2), (2, 3), (-1, 4), (5, 1)}
+theorem rat_add_comm
+  : forall p in TestRat, forall q in TestRat,
+        eqRat (addRat p q) (addRat q p)
+  := by eval
+
+-- 乗法の交換律
+theorem rat_mul_comm
+  : forall p in TestRat, forall q in TestRat,
+        eqRat (mulRat p q) (mulRat q p)
+  := by eval
+
+-- 加法零元: q + 0 = q
+theorem rat_zero_id
+  : forall q in TestRat, eqRat (addRat q (intToRat 0)) q
+  := by eval
+
+-- 乗法単位元: q * 1 = q
+theorem rat_one_id
+  : forall q in TestRat, eqRat (mulRat q (intToRat 1)) q
+  := by eval
+
+-- 加法逆元: q + (-q) = 0
+theorem rat_neg_id
+  : forall q in TestRat, eqRat (addRat q (negRat q)) (intToRat 0)
+  := by eval
+
+-- ----- リストユーティリティ -----
+range 1 6                                      -- [1, 2, 3, 4, 5]
+map (\n -> n * n) (range 1 6)                  -- [1, 4, 9, 16, 25]
+filter isEven (range 0 10)                     -- [0, 2, 4, 6, 8]
+sumList (range 1 11)                           -- 55 (= 1+2+...+10)
+maxList [3, 1, 4, 1, 5, 9, 2, 6]               -- 9
+
+all isEven [0, 2, 4, 6]                        -- true
+all isEven [0, 2, 3, 6]                        -- false
+any isOdd  [0, 2, 4, 6]                        -- false
+any isOdd  [0, 2, 5, 6]                        -- true
+contains 3 [1, 2, 3, 4]                        -- true
+
+-- foldr / foldl の例
+foldr (\x acc -> x + acc) 0 [1, 2, 3, 4, 5]    -- 15
+foldl (\acc x -> acc + x) 0 [1, 2, 3, 4, 5]    -- 15
+foldr (\x acc -> x * acc) 1 [1, 2, 3, 4, 5]    -- 120 (= 5!)
+
+-- ----- 二分木ユーティリティ -----
+def t1 := singleton 7
+def t2 := node (singleton 1) 2 (node leaf 3 (singleton 4))
+
+treeSize t1                                    -- 1
+treeSize t2                                    -- 4
+treeHeight t1                                  -- 1
+treeHeight t2                                  -- 3
+treeSum t2                                     -- 10  (1+2+3+4)
+treeToList t2                                  -- [1, 2, 3, 4]  (in-order)
+
+-- 木のサイズと高さの関係: size >= height (任意の二分木)
+def TestTree := {leaf, singleton 0, node leaf 1 leaf,
+                 node (singleton 0) 1 leaf,
+                 node leaf 1 (singleton 0)}
+theorem size_geq_height
+  : forall t in TestTree, treeSize t >= treeHeight t - 1
+  := by eval
+
+-- 木の構造帰納法: size >= 0
+theorem tree_size_nn
+  : forall t in (Tree Int), treeSize t >= 0
+  := by induction
+
+-- ----- 数論的補助 -----
+square 7                                       -- 49
+cube 3                                         -- 27
+isEven 10                                      -- true
+isOdd  11                                      -- true
+
+theorem sq_def
+  : forall n in Int, square n == n * n
+  := by eval
+
+theorem cube_def
+  : forall n in Int, cube n == n * n * n
+  := by eval
+
+-- ----- まとめ: stdlib は seki 自身で書かれている ---------------
+-- src/stdlib.seki を読むと、上記のすべての名前 (Pos, Neg, Rat,
+-- map, filter, treeSize, ...) が seki の構文で定義されているのが
+-- わかる。組込型 (Int / Real / Bool / List / Tree) と低レベルな
+-- 算術プリミティブの上に、より高レベルな構築を seki で記述している。

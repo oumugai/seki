@@ -1,0 +1,41 @@
+-- ===========================================================
+-- tests/seki/test_algebra_vector.seki — 汎用 n-D ベクトル
+-- ===========================================================
+
+import "../../lib/algebra/vector.seki"
+
+-- ----- 2-D ベクトル -----
+def u2 := [3, 4]
+def v2 := [1, 2]
+
+theorem add2  : vEq (vadd u2 v2) [4, 6] == true := by eval
+theorem sub2  : vEq (vsub u2 v2) [2, 2] == true := by eval
+theorem smul2 : vEq (smul 3 u2) [9, 12] == true := by eval
+theorem dot2  : vdot u2 v2 == 11 := by eval                    -- 3+8
+theorem norm2 : vnorm2 u2 == 25 := by eval                     -- 9+16
+
+-- ----- 3-D ベクトル -----
+def u3 := [1, 2, 3]
+def v3 := [4, 5, 6]
+
+theorem add3 : vEq (vadd u3 v3) [5, 7, 9] == true := by eval
+theorem dot3 : vdot u3 v3 == 32 := by eval                     -- 4+10+18
+
+-- ----- 標準基底の直交性 -----
+def e1_3 := evec 3 0
+def e2_3 := evec 3 1
+def e3_3 := evec 3 2
+
+theorem e_orth_12_3 : vdot e1_3 e2_3 == 0 := by eval
+theorem e_orth_23_3 : vdot e2_3 e3_3 == 0 := by eval
+theorem e_unit_1_3  : vdot e1_3 e1_3 == 1 := by eval
+
+-- ----- 4-D / 高次でも動作 -----
+def u4 := [1, 1, 1, 1]
+def v4 := [1, 2, 3, 4]
+theorem dot4 : vdot u4 v4 == 10 := by eval
+theorem evec_4_2 : vEq (evec 4 2) [0, 0, 1, 0] == true := by eval
+
+-- ----- ゼロベクトル -----
+theorem zero3 : vEq (vzero 3) [0, 0, 0] == true := by eval
+theorem vzero_plus_v : vEq (vadd (vzero 3) u3) u3 == true := by eval

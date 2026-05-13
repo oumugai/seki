@@ -1,0 +1,51 @@
+-- ===========================================================
+-- tests/seki/test_cas_poly.seki — 多項式正規化・GCD・factor
+-- ===========================================================
+
+import "../../lib/cas/poly.seki"
+
+def x_ := SVar "x"
+
+-- ----- 二項展開 (x+1)^5 = [1, 5, 10, 10, 5, 1] -----
+def quint := toPoly (SPow (SAdd x_ (SNum 1)) 5)
+
+theorem binom5_at_0 : evalPoly quint 0 == 1     := by eval
+theorem binom5_at_1 : evalPoly quint 1 == 32    := by eval     -- 2^5
+theorem binom5_at_2 : evalPoly quint 2 == 243   := by eval     -- 3^5
+
+-- ----- (x+1)² と x²+2x+1 の同値性 -----
+def lhsSq := toPoly (SPow (SAdd x_ (SNum 1)) 2)
+def rhsSq := toPoly (SAdd (SAdd (SPow x_ 2) (SMul (SNum 2) x_)) (SNum 1))
+
+theorem expand_eq_0 : evalPoly lhsSq 0 == evalPoly rhsSq 0 := by eval
+theorem expand_eq_3 : evalPoly lhsSq 3 == evalPoly rhsSq 3 := by eval
+theorem expand_eq_7 : evalPoly lhsSq 7 == evalPoly rhsSq 7 := by eval
+
+-- ----- GCD: gcd(x²-1, x²-3x+2) = x-1 -----
+def p_sq_minus_1 := cons (0 - 1) (cons 0 (cons 1 nil))
+def p_quad := cons 2 (cons (0 - 3) (cons 1 nil))
+def gcd_result := polyGCD p_sq_minus_1 p_quad
+
+-- 根は x=1。x=1 で 0, x=2 で 1, x=3 で 2
+theorem gcd_at_1 : evalPoly gcd_result 1 == 0 := by eval
+theorem gcd_at_2 : evalPoly gcd_result 2 == 1 := by eval
+theorem gcd_at_3 : evalPoly gcd_result 3 == 2 := by eval
+
+-- ----- factor: x²-5x+6 = (x-2)(x-3), 根は {2, 3} -----
+def p_625 := cons 6 (cons (0 - 5) (cons 1 nil))
+def fact1 := factor p_625
+def roots1 := fst fact1
+
+def sumOfList := \rs -> foldr (\x y -> x + y) 0 rs
+def productOfList := \rs -> foldr (\x y -> x * y) 1 rs
+
+theorem factor_sum     : sumOfList roots1 == 5 := by eval
+theorem factor_product : productOfList roots1 == 6 := by eval
+
+-- ----- factor: x³-6x²+11x-6 = (x-1)(x-2)(x-3) -----
+def p_cubic := cons (0 - 6) (cons 11 (cons (0 - 6) (cons 1 nil)))
+def fact2 := factor p_cubic
+def roots2 := fst fact2
+
+theorem factor_cubic_sum : sumOfList roots2 == 6 := by eval
+theorem factor_cubic_prd : productOfList roots2 == 6 := by eval

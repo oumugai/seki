@@ -1,0 +1,68 @@
+-- ===========================================================
+-- lib/algebra/complex.seki — 複素数
+--
+-- 表現: data Complex = MkC Real Real  (実部, 虚部)
+--
+-- 公開する名前:
+--   data Complex                 — MkC re im
+--   def reC / imC / mkC          — アクセサ + 構築
+--   def cZero / cOne / cI        — 0, 1, 虚数単位 i
+--   def cAdd / cSub / cMul / cDiv / cNeg / cConj
+--   def cAbs2 / cAbs             — |z|² と |z|
+--   def cFromReal r              — 実数の埋め込み
+--   def cEq z1 z2                — 等価判定 (実部・虚部一致)
+-- ===========================================================
+
+data Complex = MkC Real Real
+
+-- ----- アクセサ / 構築 -----
+def reC := \z -> match z with | MkC r _ -> r
+def imC := \z -> match z with | MkC _ i -> i
+
+def mkC := \r i -> MkC r i
+
+-- 数学定数
+def cZero := MkC 0.0 0.0
+def cOne  := MkC 1.0 0.0
+def cI    := MkC 0.0 1.0
+
+def cFromReal := \r -> MkC r 0.0
+
+-- ----- 加減算 -----
+def cAdd := \z w ->
+    MkC ((reC z) + (reC w)) ((imC z) + (imC w))
+
+def cSub := \z w ->
+    MkC ((reC z) - (reC w)) ((imC z) - (imC w))
+
+def cNeg := \z -> MkC (0.0 - (reC z)) (0.0 - (imC z))
+
+-- ----- 共役 -----
+def cConj := \z -> MkC (reC z) (0.0 - (imC z))
+
+-- ----- 乗算: (a+bi)(c+di) = (ac-bd) + (ad+bc)i -----
+def cMul := \z w ->
+    let a = reC z in
+    let b = imC z in
+    let c = reC w in
+    let d = imC w in
+    MkC (a * c - b * d) (a * d + b * c)
+
+-- ----- 絶対値 -----
+def cAbs2 := \z -> (reC z) * (reC z) + (imC z) * (imC z)
+def cAbs  := \z -> sqrt (cAbs2 z)
+
+-- ----- 除算: z/w = z * conj(w) / |w|² -----
+def cDiv := \z w ->
+    let denom = cAbs2 w in
+    let n = cMul z (cConj w) in
+    MkC ((reC n) / denom) ((imC n) / denom)
+
+-- ----- 等価判定 -----
+def cEq := \z w ->
+    ((reC z) == (reC w)) and ((imC z) == (imC w))
+
+-- ----- 等価判定 (誤差付き) -----
+def cEqApprox := \eps z w ->
+    let absR_ = \r -> if r < 0.0 then 0.0 - r else r in
+    (absR_ ((reC z) - (reC w)) < eps) and (absR_ ((imC z) - (imC w)) < eps)

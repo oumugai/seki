@@ -1,0 +1,31 @@
+-- ===========================================================
+-- tests/seki/test_numeric_newton.seki — Newton 法
+-- ===========================================================
+
+import "../../lib/numeric/newton.seki"
+
+-- ----- √2 を解 x² - 2 = 0 として求める -----
+def fsq := \x -> x * x - 2.0
+def fsq_prime := \x -> 2.0 * x
+
+def sqrt2_approx := newton fsq fsq_prime 1.0 20
+
+theorem newton_sqrt2 :
+    absR (sqrt2_approx * sqrt2_approx - 2.0) < 0.0000000001
+  := by eval
+
+-- ----- 黄金比 φ: 解 x² - x - 1 = 0 -----
+def fphi := \x -> x * x - x - 1.0
+def fphi_prime := \x -> 2.0 * x - 1.0
+
+def phi_approx := newton fphi fphi_prime 1.0 20
+
+theorem newton_golden : absR (phi_approx - 1.6180339887) < 0.00001 := by eval
+
+-- ----- 立方根 ∛8 = 2: 解 x³ - 8 = 0 -----
+def fcb := \x -> x * x * x - 8.0
+def fcb_prime := \x -> 3.0 * x * x
+
+def cbrt8_approx := newton fcb fcb_prime 1.0 30
+
+theorem newton_cbrt8 : absR (cbrt8_approx - 2.0) < 0.0000001 := by eval

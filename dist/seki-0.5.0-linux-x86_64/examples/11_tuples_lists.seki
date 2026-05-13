@@ -1,0 +1,72 @@
+-- ===========================================================
+-- 11: タプル・リスト・直積 — 表現力の拡張
+-- ===========================================================
+
+-- ----- タプル ---------------------------------------------------
+def p := (3, "hello", true)            -- 三つ組
+fst p                                  -- 3
+snd p                                  -- "hello"
+
+-- ----- 直積集合 -------------------------------------------------
+def Pair := Nat times Bool
+(5, true)  in Pair
+(5, 7)     in Pair                    -- false: 7 ∉ Bool
+
+def Color := {"red", "green", "blue"}
+def Coloring := Nat times Color       -- 数値と色の組
+(1, "red")  in Coloring
+(1, "pink") in Coloring               -- false
+
+-- 三項以上もOK
+def RGB := Nat times Nat times Nat
+(255, 128, 0) in RGB
+
+-- ----- 直積上の forall (有限部分で) -----
+def Small := {0, 1, 2}
+def Tags := {"a", "b"}
+theorem all_pairs_in_product
+  : forall p in (Small times Tags), (fst p) in Small and (snd p) in Tags
+  := by eval
+
+-- ----- リスト -------------------------------------------------
+def xs := [1, 2, 3, 4, 5]
+length xs                              -- 5
+head xs                                -- 1
+tail xs                                -- [2,3,4,5]
+reverse xs                             -- [5,4,3,2,1]
+append [1,2] [3,4]                     -- [1,2,3,4]
+toSet xs                               -- 集合に変換 {1,2,3,4,5}
+
+-- 空リストと cons
+nil                                    -- []
+cons 0 xs                              -- [0,1,2,3,4,5]
+
+-- ----- リスト型 (List A) ----------------------------------------
+def IntList := List Int
+[1, 2, 3] in IntList
+[1, "two", 3] in IntList               -- false: "two" ∉ Int
+
+def StrList := List String
+["a", "b", "c"] in StrList
+
+-- ----- ユーザ定義のリスト操作 -----
+-- map と filter は cons/head/tail/null で記述できる
+def map : (Int -> Int) -> List Int -> List Int := \f xs ->
+    if null xs then nil
+    else cons (f (head xs)) (map f (tail xs))
+
+def filter : (Int -> Bool) -> List Int -> List Int := \p xs ->
+    if null xs then nil
+    else if p (head xs) then cons (head xs) (filter p (tail xs))
+    else filter p (tail xs)
+
+map  (\n -> n * n) [1, 2, 3, 4, 5]                 -- [1,4,9,16,25]
+filter (\n -> n mod 2 == 0) [1, 2, 3, 4, 5, 6]     -- [2,4,6]
+
+-- foldr (右畳み込み)
+def foldr := \f init xs ->
+    if null xs then init
+    else f (head xs) (foldr f init (tail xs))
+
+foldr (\x acc -> x + acc) 0 [1,2,3,4,5]            -- 15
+foldr (\x acc -> x * acc) 1 [1,2,3,4,5]            -- 120 (= 5!)

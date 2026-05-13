@@ -1,0 +1,108 @@
+-- ===========================================================
+-- sample/todo_api/lib.seki — TODO REST のハンドラと状態管理
+-- ===========================================================
+--
+-- 集合論的に: ハンドラは `HttpRequest → HttpResponse` の関数で、副作用は
+-- `Ref<Dict Int String>` と `Ref<Int>` を経由する (Phase 4 で Send+Sync).
+
+-- ----- 状態: in-memory store -----
+def store := mkRef (emptyDict ())
+def nextId := mkRef 1
+
+-- ----- パス解析 -----
+-- "/todos/42" prefix "/todos/" → Ok 42, prefix mismatch → Err.
+def parsePathId := \prefix path ->
+    let plen = strLen prefix in
+    if strLen path < plen + 1 then Err "missing id"
+    else if substring 0 plen path == prefix then
+        let rest = substring plen (strLen path - plen) path in
+        match strToInt rest with
+        | Some n -> Ok n
+        | None   -> Err (strConcat "bad id: " rest)
+    else
+        Err "path does not match"
+
+-- ----- JSON 変換 -----
+def todoToJson := \id title ->
+    JObj [("id", JNum (intToReal id)), ("title", JStr title)]
+
+def listToJson := \d ->
+    let ks = dictKeys d in
+    let pairToJson = \k ->
+        match dictGet k d with
+        | Some title -> todoToJson k title
+        | None       -> JNull
+    in
+    JArr (map pairToJson ks)
+
+-- JSON body から "title" を抽出
+def parseCreateBody := \body ->
+    match jsonParse body with
+    | Err e -> Err (strConcat "bad JSON: " e)
+    | Ok doc ->
+        match jsonField doc "title" with
+        | Some (JStr t) -> Ok t
+        | _ -> Err "missing 'title' field"
+
+-- ----- エンドポイントハンドラ -----
+
+def handleList := \_req ->
+    let d = readRef store in
+    httpJson (jsonEncode (listToJson d))
+
+def handleGet := \req ->
+    match parsePathId "/todos/" (reqPath req) with
+    | Err e -> HttpResponse 400 [("Content-Type", "text/plain")] e
+    | Ok id ->
+        match dictGet id (readRef store) with
+        | None -> httpNotFound ()
+        | Some title -> httpJson (jsonEncode (todoToJson id title))
+
+def handleCreate := \req ->
+    match parseCreateBody (reqBody req) with
+    | Err e -> HttpResponse 400 [("Content-Type", "text/plain")] e
+    | Ok title ->
+        let id = readRef nextId in
+        let _  = writeRef nextId (id + 1) in
+        let d  = readRef store in
+        let _  = writeRef store (dictInsert id title d) in
+        HttpResponse 201 [("Content-Type", "application/json")]
+                     (jsonEncode (todoToJson id title))
+
+def handleDelete := \req ->
+    match parsePathId "/todos/" (reqPath req) with
+    | Err e -> HttpResponse 400 [("Content-Type", "text/plain")] e
+    | Ok id ->
+        let d = readRef store in
+        if dictMember id d then
+            let _ = writeRef store (dictRemove id d) in
+            HttpResponse 204 [] ""
+        else
+            httpNotFound ()
+
+def handleHealth := \_req ->
+    httpJson "{\"status\":\"ok\"}"
+
+-- ----- メインルーター -----
+def handler := \req ->
+    let m = reqMethod req in
+    let p = reqPath req in
+    if m == "GET" and p == "/" then
+        httpHtml "<h1>seki TODO API</h1>"
+    else if m == "GET" and p == "/healthz" then
+        handleHealth req
+    else if m == "GET" and p == "/todos" then
+        handleList req
+    else if m == "GET" and strStartsWith "/todos/" p then
+        handleGet req
+    else if m == "POST" and p == "/todos" then
+        handleCreate req
+    else if m == "DELETE" and strStartsWith "/todos/" p then
+        handleDelete req
+    else
+        httpNotFound ()
+
+-- ----- テスト用: state を初期化するヘルパ -----
+def resetState := \_ ->
+    let _ = writeRef store (emptyDict ()) in
+    writeRef nextId 1

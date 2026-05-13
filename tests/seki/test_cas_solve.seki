@@ -1,0 +1,49 @@
+-- ===========================================================
+-- tests/seki/test_cas_solve.seki — solveLinear / solveQuad
+-- ===========================================================
+
+import "../../lib/cas/solve.seki"
+
+-- ----- 線形方程式 -----
+-- 2x + 6 = 0 → x = -3
+theorem linear_2x6 : checkRat (solveLinear 2 6) (0 - 3) 1 := by eval
+
+-- 5x - 15 = 0 → x = 3
+theorem linear_5x15 : checkRat (solveLinear 5 (0 - 15)) 3 1 := by eval
+
+-- 7x + 1 = 0 → x = -1/7
+theorem linear_7x1 : checkRat (solveLinear 7 1) (0 - 1) 7 := by eval
+
+-- a = 0: 解なし
+theorem linear_degenerate :
+    match solveLinear 0 5 with
+    | None -> true
+    | _ -> false
+  := by eval
+
+-- ----- 2 次方程式 -----
+-- x² - 5x + 6 = 0 → 2 実根
+theorem quad_two_real :
+    match solveQuad 1 (0 - 5) 6 with
+    | TwoSol _ _ -> true
+    | _ -> false
+  := by eval
+
+-- x² + 1 = 0 → 実数解なし
+theorem quad_no_real :
+    match solveQuad 1 0 1 with
+    | NoRealSol -> true
+    | _ -> false
+  := by eval
+
+-- x² - 2x + 1 = 0 → 重根
+theorem quad_double :
+    match solveQuad 1 (0 - 2) 1 with
+    | OneSol _ -> true
+    | _ -> false
+  := by eval
+
+-- ----- 判別式 -----
+theorem disc_positive : discriminant 1 (0 - 5) 6 == 1   := by eval     -- 25-24
+theorem disc_zero     : discriminant 1 (0 - 2) 1 == 0   := by eval     -- 4-4
+theorem disc_negative : discriminant 1 0 1     == 0 - 4 := by eval     -- 0-4

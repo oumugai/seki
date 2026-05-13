@@ -1,0 +1,113 @@
+-- ===========================================================
+-- 21: 型推論 / 終了性検査 / 型クラス
+--
+-- このサンプルは 3 つの新機能を一通り紹介する:
+--   1. 型推論 — `def` 定義時に推論された型が表示される
+--   2. 終了性検査 — 構造的減少が確認できない再帰に warning
+--   3. 型クラス — class / instance + メソッドプロジェクション
+-- ===========================================================
+
+-- ----- 型推論 ---------------------------------------------------
+-- 引数に型注釈なしでも、本体から推論される
+def double := \x -> x * 2
+-- 出力: def double : (Set -> Int) = <fn:x>
+-- (パラメータ型が推論できない場合は Set として残る)
+
+-- 引数に注釈を付ければ、Arrow 型まで推論される
+def square : Nat -> Nat := \(n : Nat) -> n * n
+-- 出力: def square : (Nat -> Nat) = <fn:n>
+
+-- 多変数 + 部分推論
+def addThree := \(x : Int) (y : Int) (z : Int) -> x + y + z
+-- 出力: def addThree : (Int -> (Int -> (Int -> Int))) = <fn:x,y,z>
+
+-- リテラルから決まる型
+def trueOrFalse := if 1 > 2 then "yes" else "no"
+-- 出力: def trueOrFalse : String = "no"
+
+-- ----- 終了性検査 -----------------------------------------------
+-- 構造的に減少する再帰: 警告なし
+def fact := \n -> if n == 0 then 1 else n * fact (n - 1)
+def listLen := \xs -> if null xs then 0 else 1 + listLen (tail xs)
+
+-- 構造的減少が見えない再帰: warning
+-- (gcd は実は終了するが、b が a mod b より小さくなることまで static には見えない)
+def gcd := \a b -> if b == 0 then a else gcd b (a mod b)
+-- 出力 (stderr):
+-- warning: termination of `gcd` not verified (recursive call #1 has no structurally-smaller argument)
+
+-- 半分にする系も検出される
+def lg := \n -> if n <= 1 then 0 else 1 + lg (n / 2)
+-- 出力: 警告なし (n / 2 は構造的に小さい)
+
+-- ----- 型クラス -------------------------------------------------
+-- class 宣言は (1) 辞書 record、(2) 各メソッドの projection に desugar される
+
+class Eq A where
+    eq : A -> A -> Bool ;
+    neq : A -> A -> Bool
+
+-- desugar 後:
+--   data EqDict A = MkEqDict (A -> A -> Bool) (A -> A -> Bool)
+--   def eq  := \dict -> match dict with | MkEqDict f _ -> f
+--   def neq := \dict -> match dict with | MkEqDict _ g -> g
+
+-- instance はその辞書の値を作る
+instance EqInt : Eq Int where
+    eq = \a b -> a == b ;
+    neq = \a b -> a != b
+
+instance EqStr : Eq String where
+    eq = \a b -> a == b ;
+    neq = \a b -> a != b
+
+-- 使用: メソッドの第一引数に辞書を明示的に渡す
+eq EqInt 3 3                          -- true
+eq EqInt 3 5                          -- false
+neq EqInt 3 5                         -- true
+eq EqStr "hello" "hello"              -- true
+eq EqStr "a" "b"                      -- false
+
+-- ----- 1 メソッドの class ----------------------------------------
+class Show A where
+    show : A -> String
+
+instance ShowBool : Show Bool where
+    show = \b -> if b then "true" else "false"
+
+show ShowBool true                    -- "true"
+show ShowBool false                   -- "false"
+
+-- ----- 複数メソッドの class -------------------------------------
+class Ord A where
+    lt : A -> A -> Bool ;
+    le : A -> A -> Bool ;
+    gt : A -> A -> Bool ;
+    ge : A -> A -> Bool
+
+instance OrdInt : Ord Int where
+    lt = \a b -> a < b ;
+    le = \a b -> a <= b ;
+    gt = \a b -> a > b ;
+    ge = \a b -> a >= b
+
+lt OrdInt 3 5                         -- true
+ge OrdInt 5 5                         -- true
+gt OrdInt 3 5                         -- false
+
+-- ----- 辞書を引数として持つ汎用関数 -----------------------------
+-- max は Ord 辞書を受け取り、それを使って大小比較する
+def maxBy := \ord a b ->
+    if (gt ord a b) then a else b
+
+maxBy OrdInt 3 7                      -- 7
+maxBy OrdInt 10 5                     -- 10
+
+-- ----- まとめ --------------------------------------------------
+-- 型クラスは現在 "明示的な辞書渡し" の構文糖。Lean / Haskell の
+-- ような自動解決はないが、辞書を引数として渡すスタイルは静的型なし
+-- でも安全で、 stdlib 拡張に活用できる。
+--
+-- 型推論は def 定義時にもっとも具体的な型を推測する。
+-- 終了性検査は構造帰納法で扱える recursion を sanity check する
+-- (false positive は warning のみで実行は継続)。

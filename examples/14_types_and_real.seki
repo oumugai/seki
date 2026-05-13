@@ -1,0 +1,131 @@
+-- ===========================================================
+-- 14: 型を集合として実装する + 実数型 (Real)
+--
+-- seki の組込型はすべて集合として表現される。Bool は文字通り
+-- {false, true} という 2 元集合。Real は IEEE-754 f64 を要素として
+-- 持つ無限集合 (機械精度の近似)。
+-- ===========================================================
+
+-- ----- Bool / Prop は文字通りの 2 元集合 -----------------------
+-- prelude で `def Bool := {false, true}` と定義されているのと同じ
+theorem bool_is_two_set : Bool == {false, true} := refl
+theorem prop_is_two_set : Prop == {false, true} := refl
+theorem prop_eq_bool    : Prop == Bool := refl
+
+-- 集合操作の例
+{false, true} subset Bool
+true in Bool
+
+-- ----- Nat と Int の集合論的視点 -------------------------------
+-- Nat は内包的に「非負整数」と等価:
+def NatPred := {x in Int | x >= 0}
+
+-- 同値性の確認 (有限範囲で)
+def TestRange := {-3, -2, -1, 0, 1, 2, 3, 4, 5}
+theorem nat_equiv_pred
+  : forall x in TestRange, (x in Nat) == (x in NatPred)
+  := by eval
+
+-- 0 は Nat と NatPred の両方の最小元
+theorem zero_in_nat     : 0 in Nat := by eval
+theorem zero_in_natpred : 0 in NatPred := by eval
+
+-- 負整数は Nat ではなく NatPred でもない
+theorem neg_notin_nat   : forall x in {-5, -3, -1}, x notin Nat := by eval
+
+-- ----- Real 型 ----------------------------------------------
+-- Real はすべての f64 浮動小数点数の集合
+-- リテラルは小数点を含む (1.5, 0.0, -3.14 など)
+
+-- 基本的な所属
+3.14 in Real
+-2.5 in Real
+
+-- Int ⊂ Real (整数値も実数の元として扱える)
+3 in Real
+0 in Real
+
+-- ----- Real 算術 ---------------------------------------------
+1.0 + 2.0                        -- 3.0
+3.5 - 1.5                        -- 2.0
+1.5 * 4.0                        -- 6.0
+10.0 / 4.0                       -- 2.5
+
+-- Int↔Real 自動昇格
+1 + 2.5                          -- 3.5  (Int → Real)
+3.0 * 2                          -- 6.0
+3 / 2.0                          -- 1.5  (Real division)
+3 / 2                            -- 1    (Int division は変わらず整数のまま)
+
+-- 単項マイナス
+-2.5
+-(1.5 + 0.5)
+
+-- ----- Real 組込関数 -----------------------------------------
+intToReal 5                      -- 5.0
+floor 3.7                        -- 3
+ceil 3.2                         -- 4
+round 3.5                        -- 4
+abs (-2.5)                       -- 2.5
+sqrt 2.0                         -- ≈1.414
+sqrt 9.0                         -- 3.0
+pow 2.0 10                       -- 1024.0
+pow 3.0 2.0                      -- 9.0
+
+-- 数学定数
+pi
+e
+
+-- ----- Real 関数の定義 ---------------------------------------
+-- 二次関数 f(x) = x² + 2x + 1 = (x + 1)²
+def quad : Real -> Real := \(x : Real) -> x * x + 2.0 * x + 1.0
+
+quad 0.0                         -- 1.0
+quad (-1.0)                      -- 0.0
+quad 2.0                         -- 9.0
+
+-- 平方根近似 (ニュートン法、3 反復)
+def newton := \(x : Real) (a : Real) ->
+    (x + a / x) / 2.0
+
+def sqrt2 : Real := newton (newton (newton 1.0 2.0) 2.0) 2.0
+sqrt2                            -- ≈1.414
+
+-- ----- 命題の証明 (Real は標本検証) ---------------------------
+
+-- 単純な等式 (refl で証明)
+theorem add_zero_real : 1.5 + 0.0 == 1.5 := refl
+
+-- forall over Real は 7 個の標本値で smoke-test される
+-- (-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0)
+theorem real_zero_id  : forall x in Real, x + 0.0 == x := by eval
+theorem real_one_id   : forall x in Real, x * 1.0 == x := by eval
+theorem real_neg_id   : forall x in Real, x + (-x) == 0.0 := by eval
+
+-- 二乗が非負: forall over Real 標本で確認
+theorem real_sq_nonneg : forall x in Real, x * x >= 0.0 := by eval
+
+-- ----- 注意: Real での by algebra は未対応 ---------------------
+-- by algebra は Int / Nat 上の多項式恒等式専用。
+-- Real 上の同様の証明には by eval (標本検証) を使う:
+--
+-- theorem real_distrib
+--   : forall a in Real, forall b in Real, forall c in Real,
+--         a * (b + c) == a * b + a * c
+--   := by eval     -- 7³ = 343 ケースの標本でチェック
+
+-- ただし、Int を経由すれば by algebra で証明可能:
+theorem int_distrib
+  : forall a in Int, forall b in Int, forall c in Int,
+        a * (b + c) == a * b + a * c
+  := by algebra   -- ℤ 全体で健全な証明
+
+-- ----- 集合論的観点まとめ ------------------------------------
+-- 各組込型の集合論的位置づけ:
+--   Bool   = {false, true}                  (有限 2 元集合)
+--   Prop   = Bool                            (alias)
+--   Nat    = atomic (≅ {x in Int | x >= 0})  (無限)
+--   Int    = atomic                          (無限)
+--   Real   = atomic (f64 全体の集合)         (無限)
+--   String = atomic                          (無限)
+--   Set    = atomic (universe; Russell に注意) (proper class)

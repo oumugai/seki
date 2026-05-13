@@ -1,0 +1,59 @@
+-- ===========================================================
+-- lib/numth/primes.seki — 素数判定・Eratosthenes・Fermat 小テスト
+--
+-- 公開する名前:
+--   def isPrime n            — n が素数か判定 (試し割り)
+--   def smallestFactor n     — n の最小因数 (n が合成数のとき)
+--   def primesUpTo n         — n 以下の素数リスト
+--   def nthPrime k           — k 番目の素数 (1-indexed: nthPrime 1 = 2)
+--   def fermatLittle a p     — フェルマー小テスト: p が素数なら a^(p-1) ≡ 1 (mod p)
+-- ===========================================================
+
+import "algebra/modular.seki"
+
+-- 試し割りで素数判定
+-- d は 2..√n まで試す。簡単のため d <= n/2 を上限に。
+def hasDivisorFrom := \n d ->
+    if d * d > n then false
+    else if n mod d == 0 then true
+    else hasDivisorFrom n (d + 1)
+
+def isPrime := \n ->
+    if n < 2 then false
+    else if n == 2 then true
+    else if n mod 2 == 0 then false
+    else not (hasDivisorFrom n 3)
+
+-- 最小素因数
+def smallestFactorFrom := \n d ->
+    if d * d > n then n      -- n 自身が素数
+    else if n mod d == 0 then d
+    else smallestFactorFrom n (d + 1)
+
+def smallestFactor := \n ->
+    if n < 2 then 0
+    else if n mod 2 == 0 then 2
+    else smallestFactorFrom n 3
+
+-- ----- Eratosthenes の篩 (素朴版): 1..n から isPrime で抽出 -----
+def primesFrom := \i n ->
+    if i > n then nil
+    else if isPrime i then cons i (primesFrom (i + 1) n)
+    else primesFrom (i + 1) n
+
+def primesUpTo := \n -> primesFrom 2 n
+
+-- k 番目の素数 (1-indexed)
+def nthPrimeRec := \k i ->
+    if isPrime i then
+        if k == 1 then i
+        else nthPrimeRec (k - 1) (i + 1)
+    else nthPrimeRec k (i + 1)
+
+def nthPrime := \k -> nthPrimeRec k 2
+
+-- ----- Fermat 小テスト -----
+-- p が素数なら gcd(a, p) = 1 のとき a^(p-1) ≡ 1 (mod p)。
+-- 偽の場合は p が合成数 (Carmichael 数を除く)。
+def fermatLittle := \a p ->
+    powMod p a (p - 1) == 1

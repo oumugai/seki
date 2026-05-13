@@ -1,0 +1,91 @@
+-- ===========================================================
+-- lib/numeric/eigen.seki — 2x2 / 3x3 行列の固有値 (数値)
+--
+-- 行列の一般演算 (det, nth, minorM 等) は `algebra/matrix.seki` を参照。
+-- 本ファイルは特性多項式の構築と Newton 法による根の数値計算に特化。
+--
+-- 公開する名前:
+--   2x2: trace2 / det2 / charPoly2 / eigenvalues2
+--   3x3: trace3 / princMinorSum3 / charPoly3 / eigenvalues3
+--   data Eigvals = NoReal | Single Real | Pair Real Real
+-- ===========================================================
+
+import "algebra/matrix.seki"
+
+-- ===========================================================
+-- 2x2 — ネストペア表現 ((a, b), (c, d))
+-- ===========================================================
+
+def trace2 := \m -> (fst (fst m)) + (snd (snd m))
+def det2   := \m -> (fst (fst m)) * (snd (snd m)) - (snd (fst m)) * (fst (snd m))
+
+-- λ² - trace*λ + det の係数 [det, -trace, 1]
+def charPoly2 := \m -> cons (det2 m) (cons (0 - trace2 m) (cons 1 nil))
+
+data Eigvals = NoReal | Single Real | Pair Real Real
+
+def eigenvalues2 := \m ->
+    let t = trace2 m in
+    let d = det2 m in
+    let disc = t * t - 4 * d in
+    if disc < 0 then NoReal
+    else if disc == 0 then Single ((intToReal t) / 2.0)
+    else
+        let sd = sqrt (intToReal disc) in
+        Pair ((intToReal t - sd) / 2.0) ((intToReal t + sd) / 2.0)
+
+-- ===========================================================
+-- 3x3 — List (List Int) 表現 (algebra/matrix.seki と同形式)
+-- ===========================================================
+
+def trace3 := \m ->
+    let r0 = nth 0 m in let r1 = nth 1 m in let r2 = nth 2 m in
+    let m00 = nth 0 r0 in let m11 = nth 1 r1 in let m22 = nth 2 r2 in
+    m00 + m11 + m22
+
+-- 主小行列 2x2 の行列式の和 (c₁ 係数)
+def princMinorSum3 := \m ->
+    let r0 = nth 0 m in let r1 = nth 1 m in let r2 = nth 2 m in
+    let m00 = nth 0 r0 in let m01 = nth 1 r0 in let m02 = nth 2 r0 in
+    let m10 = nth 0 r1 in let m11 = nth 1 r1 in let m12 = nth 2 r1 in
+    let m20 = nth 0 r2 in let m21 = nth 1 r2 in let m22 = nth 2 r2 in
+    (m00 * m11 - m01 * m10) + (m00 * m22 - m02 * m20) + (m11 * m22 - m12 * m21)
+
+-- 特性多項式の係数 (a, (b, c)) — λ³ - aλ² + bλ - c
+def charPoly3 := \m ->
+    let a = trace3 m in
+    let b = princMinorSum3 m in
+    let c = det m in
+    (a, (b, c))
+
+-- ----- Newton 法による特性多項式の根 -----
+def cp3Eval := \abc lam ->
+    let a = fst abc in
+    let b = fst (snd abc) in
+    let c = snd (snd abc) in
+    lam * lam * lam - (intToReal a) * lam * lam + (intToReal b) * lam - (intToReal c)
+
+def cp3Deriv := \abc lam ->
+    let a = fst abc in
+    let b = fst (snd abc) in
+    3.0 * lam * lam - 2.0 * (intToReal a) * lam + (intToReal b)
+
+def absR_eigen := \r -> if r < 0.0 then 0.0 - r else r
+
+def newtonRoot := \abc x0 iters ->
+    if iters == 0 then x0
+    else
+        let v = cp3Eval abc x0 in
+        let d = cp3Deriv abc x0 in
+        if (absR_eigen d) < 0.0000001 then x0
+        else newtonRoot abc (x0 - v / d) (iters - 1)
+
+-- 3 つの初期値から 3 つの根を探す
+-- 戻り値: (r1, (r2, r3)) ネストペアで 3 値を持つ
+def eigenvalues3 := \m ->
+    let cp = charPoly3 m in
+    let t = intToReal (fst cp) in
+    let r1 = newtonRoot cp (t * 0.7) 50 in
+    let r2 = newtonRoot cp (t * 0.3) 50 in
+    let r3 = newtonRoot cp (0.0 - t * 0.5) 50 in
+    (r1, (r2, r3))
