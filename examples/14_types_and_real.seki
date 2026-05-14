@@ -105,20 +105,39 @@ theorem real_neg_id   : forall x in Real, x + (-x) == 0.0 := by eval
 -- 二乗が非負: forall over Real 標本で確認
 theorem real_sq_nonneg : forall x in Real, x * x >= 0.0 := by eval
 
--- ----- 注意: Real での by algebra は未対応 ---------------------
--- by algebra は Int / Nat 上の多項式恒等式専用。
--- Real 上の同様の証明には by eval (標本検証) を使う:
---
--- theorem real_distrib
---   : forall a in Real, forall b in Real, forall c in Real,
---         a * (b + c) == a * b + a * c
---   := by eval     -- 7³ = 343 ケースの標本でチェック
+-- ----- Real 上の by algebra ----------------------------------
+-- by algebra は有理係数の多項式正規化で Real リテラル (0.0, 1.5, 0.25 …) と
+-- 自由変数を扱う。f64 の二進表現が小さな分母で表せる範囲なら厳密に判定する。
 
--- ただし、Int を経由すれば by algebra で証明可能:
+theorem real_distrib
+  : forall a in Real, forall b in Real, forall c in Real,
+        a * (b + c) == a * b + a * c
+  := by algebra
+
+theorem real_zero_neutral
+  : forall x in Real, x + 0.0 == x
+  := by algebra
+
+theorem real_half_sum
+  : forall x in Real, 0.5 * x + 0.5 * x == x
+  := by algebra
+
+-- もちろん Int 上の同じ証明もそのまま通る:
 theorem int_distrib
   : forall a in Int, forall b in Int, forall c in Int,
         a * (b + c) == a * b + a * c
-  := by algebra   -- ℤ 全体で健全な証明
+  := by algebra
+
+-- ----- if 式を含む証明 --------------------------------------
+-- 条件式を場合分けして両分岐を多項式恒等式 / 仮説の含意で閉じる。
+theorem abs_real_nonneg
+  : forall x in Real, (if x >= 0.0 then x else (-x)) >= 0.0
+  := by algebra
+
+theorem max_lower_bound
+  : forall x in Int, forall y in Int,
+        (if x >= y then x else y) >= y
+  := by algebra
 
 -- ----- 集合論的観点まとめ ------------------------------------
 -- 各組込型の集合論的位置づけ:

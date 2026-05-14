@@ -1,0 +1,60 @@
+-- ===========================================================
+-- lib/probability/continuous.seki — 連続分布の確率密度関数 / 累積分布関数
+--
+-- 解析関数として与える確率密度 (pdf) と、数値積分で計算する累積分布 (cdf)。
+-- analysis/integ.seki の Simpson 法を利用する。
+--
+-- 公開する名前:
+--   def normalPdf mu sigma x         — 正規分布の pdf
+--   def normalCdf mu sigma x         — 正規分布の cdf (Simpson 数値積分)
+--   def expPdf rate x                — 指数分布の pdf
+--   def expCdf rate x                — 指数分布の cdf (解析的)
+--   def uniformPdf a b x             — 一様分布の pdf
+--   def uniformCdf a b x             — 一様分布の cdf
+--   def integrateOver lo hi pdf n    — pdf を [lo, hi] で Simpson 積分
+-- ===========================================================
+
+import "analysis/integ.seki"
+
+-- 数学定数: 2π
+def twoPi := 6.283185307179586
+
+-- ----- 正規分布 N(μ, σ²) -----
+-- pdf(x) = exp(-(x-μ)² / (2σ²)) / (σ √(2π))
+def normalPdf := \(mu : Real) (sigma : Real) (x : Real) ->
+    let z = (x - mu) / sigma in
+    let coef = 1.0 / (sigma * sqrt twoPi) in
+    coef * exp (0.0 - 0.5 * z * z)
+
+-- cdf(x) = P(X ≤ x) を Simpson 積分で近似
+-- 注意: 解析的には erf 関数だが、本実装は数値積分で十分実用
+def normalCdf := \(mu : Real) (sigma : Real) (x : Real) ->
+    -- 積分範囲: μ - 8σ から x まで (左裾は十分小さい)
+    let lo = mu - 8.0 * sigma in
+    let pdf := \(t : Real) -> normalPdf mu sigma t in
+    if x <= lo then 0.0
+    else integSimpson 200 pdf lo x
+
+-- ----- 指数分布 Exp(λ) -----
+def expPdf := \(rate : Real) (x : Real) ->
+    if x < 0.0 then 0.0
+    else rate * exp (0.0 - rate * x)
+
+def expCdf := \(rate : Real) (x : Real) ->
+    if x < 0.0 then 0.0
+    else 1.0 - exp (0.0 - rate * x)
+
+-- ----- 一様分布 U(a, b) -----
+def uniformPdf := \(a : Real) (b : Real) (x : Real) ->
+    if x < a then 0.0
+    else if x > b then 0.0
+    else 1.0 / (b - a)
+
+def uniformCdf := \(a : Real) (b : Real) (x : Real) ->
+    if x < a then 0.0
+    else if x > b then 1.0
+    else (x - a) / (b - a)
+
+-- ----- 一般: ユーザー定義 pdf の数値積分 -----
+def integrateOver := \(lo : Real) (hi : Real) pdf (n : Int) ->
+    integSimpson n pdf lo hi

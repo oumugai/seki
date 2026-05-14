@@ -1,0 +1,367 @@
+-- ===========================================================
+-- lib/numeric/linalg.seki — 一般 n×n 行列の数値線形代数
+--
+-- ベクトル/行列は `List Real`, `List (List Real)` で表現。
+-- (algebra/matrix.seki, algebra/vector.seki と互換)
+--
+-- 公開する名前:
+--   行列要素アクセス・構築:
+--     def matAtR i j m / matSetR i j v m
+--     def identityR n / zeroMatR rows cols
+--   一般 LU / Gauss-Jordan 逆行列:
+--     def matInverse m              — n×n の逆行列
+--     def linSolve A b              — A x = b の解 (一般 n)
+--   行列ノルム / 正規化:
+--     def matFrobeniusNorm m
+--   QR 分解 (Gram-Schmidt 修正版):
+--     def qrDecompose m             — (Q, R)
+--   Cholesky 分解 (SPD 行列用):
+--     def cholesky m                — 下三角 L (m = L L^T)
+--   QR アルゴリズムによる固有値 (一般 n、実固有値):
+--     def eigenvaluesGen m iters    — List Real (固有値の近似)
+--   行列冪乗・指数:
+--     def matPow m k                — m^k (整数冪)
+--     def matExp m terms            — テイラー級数による e^m の近似
+-- ===========================================================
+
+import "algebra/matrix.seki"
+import "algebra/vector.seki"
+
+-- ----- Real 専用の行列アクセサ ---------------------------------
+def matAtR := \i j m -> nth j (nth i m)
+
+-- リスト要素の置換 (i 番目を v に)
+def listSet := \i v xs ->
+    if null xs then nil
+    else if i == 0 then cons v (tail xs)
+    else cons (head xs) (listSet (i - 1) v (tail xs))
+
+def matSetR := \i j v m ->
+    let row = nth i m in
+    let newRow = listSet j v row in
+    listSet i newRow m
+
+-- ----- ゼロ行列・単位行列 (Real 版) -----------------------------
+def zeroRowR := \cols ->
+    if cols <= 0 then nil
+    else cons 0.0 (zeroRowR (cols - 1))
+
+def zeroMatR := \rows cols ->
+    if rows <= 0 then nil
+    else cons (zeroRowR cols) (zeroMatR (rows - 1) cols)
+
+def identityRowR := \n i ->
+    if n <= 0 then nil
+    else cons (if i == 0 then 1.0 else 0.0) (identityRowR (n - 1) (i - 1))
+
+def identityRecR := \n cur ->
+    if cur >= n then nil
+    else cons (identityRowR n cur) (identityRecR n (cur + 1))
+
+def identityR := \n -> identityRecR n 0
+
+-- ===========================================================
+-- §1. Gauss-Jordan による逆行列 (一般 n×n)
+-- ===========================================================
+-- A | I -> I | A^{-1}: 行操作で左半分を I にすると右半分が A^{-1} になる。
+
+-- 行列の i 行を c 倍する
+def scaleRow := \c row ->
+    if null row then nil
+    else cons (c * (head row)) (scaleRow c (tail row))
+
+-- 行 r1 から c * 行 r2 を引く: r1 := r1 - c * r2
+def rowSubScaled := \c r1 r2 ->
+    if null r1 then nil
+    else if null r2 then r1
+    else cons ((head r1) - c * (head r2)) (rowSubScaled c (tail r1) (tail r2))
+
+-- m の i 行と j 行を入れ替える
+def swapRows := \i j m ->
+    let ri = nth i m in
+    let rj = nth j m in
+    listSet i rj (listSet j ri m)
+
+-- 列 col のうち、行 row 以降で最大の絶対値を持つ行のインデックスを返す
+def absRm := \r -> if r < 0.0 then 0.0 - r else r
+
+def pivotScan := \col startRow bestRow bestVal m ->
+    if startRow >= length m then bestRow
+    else
+        let v = absRm (matAtR startRow col m) in
+        if v > bestVal then pivotScan col (startRow + 1) startRow v m
+        else pivotScan col (startRow + 1) bestRow bestVal m
+
+def findPivot := \col row m -> pivotScan col row row (absRm (matAtR row col m)) m
+
+-- 行 srcRow (ピボット行) で 他全ての行から col 成分を消去
+def gjEliminateAll := \col srcRow targetRow m ->
+    if targetRow >= length m then m
+    else if targetRow == srcRow then
+        gjEliminateAll col srcRow (targetRow + 1) m
+    else
+        let factor = matAtR targetRow col m in
+        if absRm factor < 0.0000000001 then
+            gjEliminateAll col srcRow (targetRow + 1) m
+        else
+            let pivotRow = nth srcRow m in
+            let targetRowVec = nth targetRow m in
+            let newRow = rowSubScaled factor targetRowVec pivotRow in
+            let m2 = listSet targetRow newRow m in
+            gjEliminateAll col srcRow (targetRow + 1) m2
+
+-- col 列を処理: ピボットを選び、ピボット行をスケール、他行を消去
+def gjStep := \col m ->
+    let pivIdx = findPivot col col m in
+    let m1 = swapRows col pivIdx m in
+    let pivVal = matAtR col col m1 in
+    if absRm pivVal < 0.0000000001 then m1  -- 特異行列: スキップ
+    else
+        let pivRow = nth col m1 in
+        let scaledRow = scaleRow (1.0 / pivVal) pivRow in
+        let m2 = listSet col scaledRow m1 in
+        gjEliminateAll col col 0 m2
+
+-- 全列について Gauss-Jordan
+def gjRec := \col m ->
+    if col >= length m then m
+    else gjRec (col + 1) (gjStep col m)
+
+-- 行列の水平連結
+def hConcatRows := \r1 r2 ->
+    if null r1 then r2
+    else cons (head r1) (hConcatRows (tail r1) r2)
+
+def hConcat := \m1 m2 ->
+    if null m1 then nil
+    else if null m2 then m1
+    else cons (hConcatRows (head m1) (head m2)) (hConcat (tail m1) (tail m2))
+
+-- 行 row の前半 n 個を捨て、後半 n 個を取り出す
+def dropN := \n xs ->
+    if n <= 0 then xs
+    else if null xs then nil
+    else dropN (n - 1) (tail xs)
+
+def rightHalfRows := \n m ->
+    if null m then nil
+    else cons (dropN n (head m)) (rightHalfRows n (tail m))
+
+-- A | I を作る → 行操作 → 右半を取り出す = A^{-1}
+def matInverse := \m ->
+    let n = length m in
+    let augmented = hConcat m (identityR n) in
+    let reduced = gjRec 0 augmented in
+    rightHalfRows n reduced
+
+-- ===========================================================
+-- §2. 一般 n の連立方程式 A x = b
+-- ===========================================================
+-- gauss は (拡大係数行列) を受け取るので、A と b を結合して呼び出す。
+
+-- b ベクトルを A の各行の末尾に付ける
+def appendCol := \m b ->
+    if null m then nil
+    else if null b then m
+    else cons (hConcatRows (head m) (cons (head b) nil)) (appendCol (tail m) (tail b))
+
+def linSolve := \a b -> gauss (appendCol a b)
+
+-- ===========================================================
+-- §3. 行列ノルム
+-- ===========================================================
+-- Frobenius ノルム: sqrt(Σ_ij m_ij²)
+def rowSumSqAux := \row ->
+    if null row then 0
+    else (head row) * (head row) + rowSumSqAux (tail row)
+
+def matSumSqAux := \m ->
+    if null m then 0
+    else (rowSumSqAux (head m)) + matSumSqAux (tail m)
+
+def matFrobeniusNorm := \m -> sqrt (matSumSqAux m)
+
+-- ===========================================================
+-- §4. QR 分解 (修正 Gram-Schmidt)
+-- ===========================================================
+-- m の列ベクトル {a_1, ..., a_n} を直交正規化して Q を作り、
+-- R[i][j] = q_i · a_j を上三角に並べる。
+-- 入力: m (n×n)、出力: (Q, R) のペア (どちらも n×n)
+
+-- ベクトル要素の和
+def vsumElems := \v ->
+    if null v then 0
+    else (head v) + vsumElems (tail v)
+
+-- vec から (c * vec2) を引く
+def vSubScaled := \c v w ->
+    if null v then nil
+    else if null w then v
+    else cons ((head v) - c * (head w)) (vSubScaled c (tail v) (tail w))
+
+-- ノルム = sqrt(dot v v)
+def vnormR := \v -> sqrt (vdot v v)
+
+-- ベクトルを単位化: v / |v|
+def vunit := \v ->
+    let n = vnormR v in
+    if n < 0.0000000001 then v
+    else smul (1.0 / n) v
+
+-- 行列 m の j 列を取り出す (汎用)
+def colOf := \j m -> colJ j m
+
+-- 修正 Gram-Schmidt: 既に直交化済みの列 qs から新しい列 a を直交化
+def gsOrthogonalize := \qs a ->
+    if null qs then a
+    else
+        let q = head qs in
+        let c = vdot q a in
+        let a2 = vSubScaled c a q in
+        gsOrthogonalize (tail qs) a2
+
+-- リスト末尾に要素を追加
+def listAppend := \xs y ->
+    if null xs then cons y nil
+    else cons (head xs) (listAppend (tail xs) y)
+
+-- 列 j まで処理した時点での Q の列リスト (各列をベクトルとして) を構築
+def qrCols := \j n cols qs ->
+    if j >= n then qs
+    else
+        let a = head cols in
+        let orth = gsOrthogonalize qs a in
+        let q = vunit orth in
+        qrCols (j + 1) n (tail cols) (listAppend qs q)
+
+-- cols → リストの列を縦に並べた行列に組み立て直す
+-- (qs は「列のリスト」として保持; 行列に戻すには転置すればよい)
+def colsToMat := \qs -> matTranspose qs
+
+-- R[i][j] = q_i · a_j を計算
+def rEntries := \qsT cols i n ->
+    if null cols then nil
+    else
+        let a = head cols in
+        let q_i = nth i qsT in
+        cons (vdot q_i a) (rEntries qsT (tail cols) i n)
+
+def rMatRec := \qsT cols i n ->
+    if i >= n then nil
+    else cons (rEntries qsT cols i n) (rMatRec qsT cols (i + 1) n)
+
+-- 入力 m の列ベクトル列を取り出す
+def matColsAux := \j n m ->
+    if j >= n then nil
+    else cons (colOf j m) (matColsAux (j + 1) n m)
+
+def matCols' := \m -> matColsAux 0 (matCols m) m
+
+-- qrDecompose: (Q, R) を返す
+def qrDecompose := \m ->
+    let n = matRows m in
+    let cols = matCols' m in
+    let qList = qrCols 0 n cols nil in     -- 直交化された列のリスト
+    let q = matTranspose qList in           -- Q = 列を並べた行列
+    let qT = qList in                       -- Q^T = 元の qList
+    let r = rMatRec qT cols 0 n in
+    (q, r)
+
+-- ===========================================================
+-- §5. Cholesky 分解 (SPD 行列用)
+-- ===========================================================
+-- A = L L^T (L は下三角、対角は正)
+-- L[i][i] = sqrt(A[i][i] - Σ_{k<i} L[i][k]²)
+-- L[j][i] = (A[j][i] - Σ_{k<i} L[j][k]*L[i][k]) / L[i][i]  (j > i)
+
+-- Σ_{k=0}^{i-1} L[i][k] * L[j][k] を計算
+def cholSum := \L i j k acc ->
+    if k >= i then acc
+    else
+        let lik = matAtR i k L in
+        let ljk = matAtR j k L in
+        cholSum L i j (k + 1) (acc + lik * ljk)
+
+-- 列 i を埋める: L[j][i] for j = i, i+1, ..., n-1
+def cholFillCol := \A L n i j ->
+    if j >= n then L
+    else if j == i then
+        let aii = matAtR i i A in
+        let s = cholSum L i i 0 0.0 in
+        let lii = sqrt (aii - s) in
+        let L2 = matSetR i i lii L in
+        cholFillCol A L2 n i (j + 1)
+    else
+        let aji = matAtR j i A in
+        let s = cholSum L i j 0 0.0 in
+        let lii = matAtR i i L in
+        let lji = (aji - s) / lii in
+        let L2 = matSetR j i lji L in
+        cholFillCol A L2 n i (j + 1)
+
+def cholRec := \A L n i ->
+    if i >= n then L
+    else
+        let L2 = cholFillCol A L n i i in
+        cholRec A L2 n (i + 1)
+
+def cholesky := \A ->
+    let n = matRows A in
+    let L0 = zeroMatR n n in
+    cholRec A L0 n 0
+
+-- ===========================================================
+-- §6. QR アルゴリズム — 一般 n×n の (実) 固有値
+-- ===========================================================
+-- 反復: A_{k+1} = R_k Q_k where (Q_k, R_k) = qr(A_k)
+-- 収束すると A は上三角に近づき、対角線が固有値の近似となる。
+-- 実固有値のみを抽出 (複素固有値は対角ブロック 2x2 として残るが、本実装では
+-- 単純に対角値を取り出す簡略版)。
+
+def qrIterate := \A iters ->
+    if iters <= 0 then A
+    else
+        let qr = qrDecompose A in
+        let q = fst qr in
+        let r = snd qr in
+        let A2 = matMul r q in
+        qrIterate A2 (iters - 1)
+
+-- 行列の対角要素を抽出
+def diagList := \m i n ->
+    if i >= n then nil
+    else cons (matAtR i i m) (diagList m (i + 1) n)
+
+def eigenvaluesGen := \m iters ->
+    let n = matRows m in
+    let converged = qrIterate m iters in
+    diagList converged 0 n
+
+-- ===========================================================
+-- §7. 行列冪乗 / 行列指数 (Taylor 級数)
+-- ===========================================================
+
+def matPowRec := \m acc k ->
+    if k <= 0 then acc
+    else matPowRec m (matMul acc m) (k - 1)
+
+def matPow := \m k ->
+    let n = matRows m in
+    matPowRec m (identityR n) k
+
+-- e^M ≈ Σ_{k=0}^{terms-1} M^k / k!
+def factR := \k ->
+    if k <= 1 then 1
+    else k * factR (k - 1)
+
+def matExpRec := \m k terms acc ->
+    if k >= terms then acc
+    else
+        let mk = matPow m k in
+        let scaled = matSmul (1.0 / factR k) mk in
+        let acc2 = matAdd acc scaled in
+        matExpRec m (k + 1) terms acc2
+
+def matExp := \m terms ->
+    let n = matRows m in
+    matExpRec m 0 terms (zeroMatR n n)

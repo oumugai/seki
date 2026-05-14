@@ -1,0 +1,51 @@
+-- ===========================================================
+-- tests/seki/test_probability.seki — 離散・連続分布
+-- ===========================================================
+
+import "../../lib/probability/discrete.seki"
+import "../../lib/probability/continuous.seki"
+
+def absP := \(r : Real) -> if r < 0.0 then 0.0 - r else r
+
+-- ----- 一様離散分布: サイコロ -----
+def die := uniformDiscrete 1 6
+def intToR := \x -> intToReal x
+
+-- E[X] = 3.5
+theorem die_mean
+  : absP (expectation die intToR - 3.5) < 0.0000001
+  := by eval
+
+-- ----- Bernoulli(0.7) -----
+-- E[X] = 0.7
+def bern := bernoulli 0.7
+theorem bern_mean
+  : absP (expectation bern intToR - 0.7) < 0.0000001
+  := by eval
+
+-- ----- Binomial(10, 0.5) -----
+-- E[X] = n*p = 5
+def bin := binomialDist 10 0.5
+theorem bin_mean
+  : absP (expectation bin intToR - 5.0) < 0.0000001
+  := by eval
+
+-- ----- 正規分布の pdf at 0 = 1/√(2π) ≈ 0.398942 -----
+theorem normal_pdf_at_zero
+  : absP (normalPdf 0.0 1.0 0.0 - 0.3989422804014327) < 0.0000001
+  := by eval
+
+-- 正規分布の cdf at 0 = 0.5 (Simpson 積分の精度内)
+theorem normal_cdf_at_zero
+  : absP (normalCdf 0.0 1.0 0.0 - 0.5) < 0.0001
+  := by eval
+
+-- 指数分布: cdf(rate=1, x=1) = 1 - 1/e ≈ 0.632
+theorem exp_cdf_at_one
+  : absP (expCdf 1.0 1.0 - 0.6321205588285577) < 0.0000001
+  := by eval
+
+-- 一様分布 U(0, 1): cdf(0.5) = 0.5
+theorem uniform_cdf
+  : absP (uniformCdf 0.0 1.0 0.5 - 0.5) < 0.0000001
+  := by eval

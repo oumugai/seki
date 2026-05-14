@@ -1,0 +1,41 @@
+-- ===========================================================
+-- lib/analysis/gronwall.seki — Grönwall 不等式と関連バウンド
+--
+-- Grönwall 不等式は、線型微分不等式 `u'(t) ≤ α u(t) + β` から積分
+-- バウンド `u(t) ≤ u_0 e^{αt} + β(e^{αt} - 1)/α` を導く。摂動論や
+-- ODE の安定性解析でよく使う。本ファイルではスカラー版を提供する。
+--
+-- 公開する名前:
+--   def gronwallScalar alpha beta u0 t  — 連続版バウンド
+--   def gronwallDiscrete alpha beta u0 n — 離散版 (u_{n+1} ≤ α u_n + β)
+--   def gronwallIntegral alpha gFn u0 t — 一般化: 積分形 u(t) ≤ u_0 + ∫_0^t (α u(s) + g(s)) ds
+-- ===========================================================
+
+-- ----- 連続スカラー Grönwall -----
+-- u'(t) ≤ α u(t) + β  (α, β ≥ 0; α=0 の場合は線型バウンド)
+-- 解バウンド: u(t) ≤ u_0 * e^{αt} + (β/α) * (e^{αt} - 1)
+--             α=0 のときは u(t) ≤ u_0 + β t
+def absRGron := \(r : Real) -> if r < 0.0 then 0.0 - r else r
+def gronwallScalar := \(alpha : Real) (beta : Real) (u0 : Real) (t : Real) ->
+    if (absRGron alpha) < 0.0000000001 then
+        u0 + beta * t
+    else
+        let eat : Real = exp (alpha * t) in
+        u0 * eat + (beta / alpha) * (eat - 1.0)
+
+-- ----- 離散版 -----
+-- u_{n+1} ≤ α u_n + β  ⇒  u_n ≤ α^n u_0 + β (α^n - 1)/(α - 1)
+-- (α ≠ 1 の場合; α=1 のときは u_n ≤ u_0 + n β)
+def gronwallDiscrete := \(alpha : Real) (beta : Real) (u0 : Real) (n : Int) ->
+    if (absRGron (alpha - 1.0)) < 0.0000000001 then
+        u0 + beta * (intToReal n)
+    else
+        let an : Real = pow alpha n in
+        u0 * an + beta * (an - 1.0) / (alpha - 1.0)
+
+-- ----- 積分形 Grönwall (数値版): u(t) ≤ u_0 + ∫_0^t (α u(s) + g(s)) ds -----
+-- 一般 g には数値 ODE が要るが、簡易版として g が一定 (代表値) と
+-- 近似して gronwallScalar に帰着する。
+def gronwallIntegral := \alpha gFn u0 t ->
+    let beta_const = gFn (t * 0.5) in
+    gronwallScalar alpha beta_const u0 t

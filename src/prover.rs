@@ -20,7 +20,7 @@
 
 use crate::algebra::{
     expr_to_poly, polynomial_neg, polynomial_nonneg, polynomial_nonpos, polynomial_pos,
-    polynomial_strictly_positive_in_nat, PolyDomain,
+    polynomial_strictly_positive_in_nat, ratpoly_equal, PolyDomain,
 };
 use crate::ast::{subst, BinOp, Expr, Proof, UnOp};
 use crate::eval::{enumerate_set, EvalCtx};
@@ -330,19 +330,120 @@ impl<'a> Prover<'a> {
                 )))
             }
         };
-        Ok(unfold_calls(e, name, &params, &body))
+        // First: β-unfold `name` itself.
+        let one_step = unfold_calls(e, name, &params, &body);
+        // Then: transitively unfold any **non-recursive** user-defined
+        // function called from the result.  This lets `unfold g then
+        // algebra` see through `g x = f x + 1` where `f` is a separate
+        // definition.  Recursive functions are detected by checking
+        // whether their body mentions their own name, and are left at
+        // one-level unfolding (preserving the existing safety guarantee).
+        Ok(unfold_nonrec_transitive(
+            &one_step,
+            &self.ctx.globals,
+            &[name],
+        ))
     }
 
-    /// `by algebra`:  prove a relational claim over **all integers (or naturals)**
-    /// by reducing the relation to a polynomial sign analysis.  Supports
-    /// `==`, `!=`, `<`, `<=`, `>`, `>=`, plus integer division and modulo by
-    /// constant divisors (handled inside `expr_to_poly`).
+    /// `by algebra`:  prove a relational claim over **all integers (or naturals
+    /// or reals)** by reducing the relation to a polynomial sign analysis.
+    /// Supports `==`, `!=`, `<`, `<=`, `>`, `>=`, integer division and modulo
+    /// by constant divisors, **Real** coefficients via rational arithmetic,
+    /// and **if-expressions** via case-splitting on each condition.
     ///
     /// Sound: a `proved` outcome means the relation holds for every valuation
-    /// of the free variables in the chosen domain (Nat or Int).
+    /// of the free variables in the chosen domain (Nat, Int, or Real).
+    ///
+    /// Case-split semantics for `if c then t else e`:
+    ///   - Replace the if with `t` and recurse (success means: in the world
+    ///     where `c` is true, the relation holds).
+    ///   - Replace the if with `e` and recurse (success means: in the world
+    ///     where `c` is false, the relation holds).
+    ///   - As a sweetener, when `c` is `v == val` (variable equals literal),
+    ///     we substitute `v := val` in the then-branch so the polynomial
+    ///     checker sees the value the condition guarantees.
+    ///
+    /// Either branch alone closing means that whole side of the case-split is
+    /// proved unconditionally — `by algebra` then only needs the other branch
+    /// to succeed.
     fn verify_algebra(&self, prop: &Expr, _env: &Env) -> SekiResult<Value> {
         let dom = detect_domain(prop);
-        let body = strip_foralls(prop);
+        let body = strip_foralls(prop).clone();
+        // Inject implicit non-negativity hypotheses for every `forall x in
+        // Nat` binder.  This is sound (each such x really is ≥ 0) and lets
+        // the case-split contradiction engine close branches like
+        // `(50 + k) < 50` when `k in Nat`.
+        let mut initial_hyps: Vec<(Expr, bool)> = Vec::new();
+        collect_nat_hyps(prop, &mut initial_hyps);
+        // Also handle a top-level implication `premise -> conclusion`:
+        // turn the premise into a hypothesis and continue with the
+        // conclusion as the goal.
+        let (conclusion, premises) = peel_implications(&body);
+        for p in premises {
+            initial_hyps.push((p, true));
+        }
+        self.prove_algebra_rel(&conclusion, dom, &initial_hyps)
+    }
+
+    /// Recursive worker for `verify_algebra`: case-splits on any `if`
+    /// subexpression first, then falls through to the polynomial check.
+    ///
+    /// `hyps` is the list of relational facts known to hold in the current
+    /// branch (each `(relation, is_true)` — `is_true=false` means the
+    /// negation of the relation holds, i.e. we're in the else-branch of
+    /// `if relation`).  These let us close branches whose goal is implied
+    /// by the path we took to get here.
+    fn prove_algebra_rel(
+        &self,
+        body: &Expr,
+        dom: PolyDomain,
+        hyps: &[(Expr, bool)],
+    ) -> SekiResult<Value> {
+        // If any prior hypothesis is contradicted (same condition assumed
+        // both true and false on this path), the branch is vacuously true.
+        if hyps_contradict(hyps) {
+            return Ok(Value::Bool(true));
+        }
+        if let Some((then_body, else_body, cond)) = split_first_if(body) {
+            // In the then-branch, propagate `cond ⇒ true` everywhere by
+            // rewriting matching `if cond then T else E` subterms to `T`.
+            // Mirror in the else-branch.  This collapses repeat occurrences
+            // of the same condition (typical for matrix-style proofs where
+            // the LHS and RHS both branch on the same predicate).
+            let then_collapsed = collapse_if_cond(&then_body, &cond, true);
+            let else_collapsed = collapse_if_cond(&else_body, &cond, false);
+            let then_refined = if let Some((v, val)) = eq_var_value(&cond) {
+                crate::ast::subst(&then_collapsed, &v, &val)
+            } else {
+                then_collapsed
+            };
+            let else_refined = else_collapsed;
+            let mut then_hyps = hyps.to_vec();
+            then_hyps.push((cond.clone(), true));
+            let mut else_hyps = hyps.to_vec();
+            else_hyps.push((cond.clone(), false));
+            self.prove_algebra_rel(&then_refined, dom, &then_hyps)
+                .map_err(|e| {
+                    SekiError::Proof(format!(
+                        "by algebra (then-branch of `if {}`): {}",
+                        cond, e
+                    ))
+                })?;
+            self.prove_algebra_rel(&else_refined, dom, &else_hyps)
+                .map_err(|e| {
+                    SekiError::Proof(format!(
+                        "by algebra (else-branch of `if {}`): {}",
+                        cond, e
+                    ))
+                })?;
+            return Ok(Value::Bool(true));
+        }
+        // Try to discharge via a hypothesis before the polynomial check.
+        for (hcond, htrue) in hyps {
+            if hypothesis_proves(hcond, *htrue, body) {
+                return Ok(Value::Bool(true));
+            }
+        }
         let (op, lhs, rhs) = match body {
             Expr::BinOp(op, l, r)
                 if matches!(
@@ -370,7 +471,7 @@ impl<'a> Prover<'a> {
                 "by algebra: rhs contains expressions outside the polynomial fragment".into(),
             )
         })?;
-        let diff = lp.sub(rp); // diff = lhs - rhs
+        let diff = lp.sub(rp);
         let ok = match op {
             BinOp::Eq => diff.terms.is_empty(),
             BinOp::Neq => polynomial_pos(&diff, dom) || polynomial_neg(&diff, dom),
@@ -381,13 +482,21 @@ impl<'a> Prover<'a> {
             _ => unreachable!(),
         };
         if ok {
-            Ok(Value::Bool(true))
-        } else {
-            Err(SekiError::Proof(format!(
-                "by algebra: cannot prove {} {} {} over {:?}",
-                lhs, op, rhs, dom
-            )))
+            return Ok(Value::Bool(true));
         }
+        // Rational-function fallback for equality goals: clear denominators
+        // by cross-multiplication.  Sound modulo the standard convention
+        // that denominators are non-zero (i.e. we prove the equality on
+        // the open set where divisions are defined — see `RatPoly`).
+        if op == BinOp::Eq {
+            if let Some(true) = ratpoly_equal(lhs, rhs) {
+                return Ok(Value::Bool(true));
+            }
+        }
+        Err(SekiError::Proof(format!(
+            "by algebra: cannot prove {} {} {} over {:?}",
+            lhs, op, rhs, dom
+        )))
     }
 
     /// `by induction`:  prove `forall n in <domain>, P(n)`.  The shape of
@@ -1029,28 +1138,508 @@ fn is_relation(op: &BinOp) -> bool {
     )
 }
 
-/// Decide whether free variables in `prop` should be treated as Nat (≥ 0) or
-/// Int.  Heuristic: if every binder's domain (as a syntactic Expr) is `Nat`,
-/// we use Nat; otherwise Int.  Mixed domains default to Int (more
-/// conservative — fewer signs are inferable).
+/// Decide whether free variables in `prop` should be treated as Nat (≥ 0),
+/// Int, or Real.  Heuristic over the binder chain:
+///   - every domain is `Nat` ⇒ `Nat`
+///   - any domain is `Real` ⇒ `Real` (the unsigned-coefficient analyses still
+///     apply, since rationals embed into ℝ)
+///   - otherwise ⇒ `Int` (the conservative default)
 fn detect_domain(prop: &Expr) -> PolyDomain {
-    fn looks_like_nat(e: &Expr) -> bool {
-        matches!(e, Expr::Var { name: s, .. } if s == "Nat")
+    fn looks_like(e: &Expr, name: &str) -> bool {
+        matches!(e, Expr::Var { name: s, .. } if s == name)
     }
     let mut cur = prop;
     let mut all_nat = true;
+    let mut saw_real = false;
     let mut saw_any = false;
     while let Expr::Forall { domain, body, .. } = cur {
         saw_any = true;
-        if !looks_like_nat(domain) {
+        if !looks_like(domain, "Nat") {
             all_nat = false;
+        }
+        if looks_like(domain, "Real") {
+            saw_real = true;
         }
         cur = body;
     }
     if saw_any && all_nat {
         PolyDomain::Nat
+    } else if saw_real {
+        PolyDomain::Real
     } else {
         PolyDomain::Int
+    }
+}
+
+/// If `body` contains an `if c then t else e` subexpression, return:
+///   * `body` with the first such if replaced by `t`,
+///   * `body` with the first such if replaced by `e`,
+///   * the condition `c`.
+/// "First" means: leftmost in a left-to-right walk over the AST.  Used by
+/// `prove_algebra_rel` to case-split on conditions.
+fn split_first_if(body: &Expr) -> Option<(Expr, Expr, Expr)> {
+    use Expr::*;
+    match body {
+        If { cond, then_branch, else_branch } => Some((
+            (**then_branch).clone(),
+            (**else_branch).clone(),
+            (**cond).clone(),
+        )),
+        BinOp(op, l, r) => {
+            if let Some((tl, el, c)) = split_first_if(l) {
+                return Some((
+                    BinOp(op.clone(), Box::new(tl), r.clone()),
+                    BinOp(op.clone(), Box::new(el), r.clone()),
+                    c,
+                ));
+            }
+            if let Some((tr, er, c)) = split_first_if(r) {
+                return Some((
+                    BinOp(op.clone(), l.clone(), Box::new(tr)),
+                    BinOp(op.clone(), l.clone(), Box::new(er)),
+                    c,
+                ));
+            }
+            None
+        }
+        UnOp(op, x) => split_first_if(x).map(|(t, e, c)| {
+            (
+                UnOp(op.clone(), Box::new(t)),
+                UnOp(op.clone(), Box::new(e)),
+                c,
+            )
+        }),
+        App { func, args } => {
+            if let Some((tf, ef, c)) = split_first_if(func) {
+                return Some((
+                    App { func: Box::new(tf), args: args.clone() },
+                    App { func: Box::new(ef), args: args.clone() },
+                    c,
+                ));
+            }
+            for (i, a) in args.iter().enumerate() {
+                if let Some((ta, ea, c)) = split_first_if(a) {
+                    let mut targs = args.clone();
+                    let mut eargs = args.clone();
+                    targs[i] = ta;
+                    eargs[i] = ea;
+                    return Some((
+                        App { func: func.clone(), args: targs },
+                        App { func: func.clone(), args: eargs },
+                        c,
+                    ));
+                }
+            }
+            None
+        }
+        Let { name, ty, value, body: lb, rec } => {
+            if let Some((tv, ev, c)) = split_first_if(value) {
+                return Some((
+                    Let {
+                        name: name.clone(),
+                        ty: ty.clone(),
+                        value: Box::new(tv),
+                        body: lb.clone(),
+                        rec: *rec,
+                    },
+                    Let {
+                        name: name.clone(),
+                        ty: ty.clone(),
+                        value: Box::new(ev),
+                        body: lb.clone(),
+                        rec: *rec,
+                    },
+                    c,
+                ));
+            }
+            split_first_if(lb).map(|(t, e, c)| {
+                (
+                    Let {
+                        name: name.clone(),
+                        ty: ty.clone(),
+                        value: value.clone(),
+                        body: Box::new(t),
+                        rec: *rec,
+                    },
+                    Let {
+                        name: name.clone(),
+                        ty: ty.clone(),
+                        value: value.clone(),
+                        body: Box::new(e),
+                        rec: *rec,
+                    },
+                    c,
+                )
+            })
+        }
+        _ => None,
+    }
+}
+
+/// If `cond` has the form `v == literal` or `literal == v` where `v` is a
+/// simple variable and `literal` is a constant Int/Real, return `(v, literal)`.
+/// Used by case-splitting to substitute the known value of `v` in the
+/// then-branch — sound because the then-branch only runs when `cond` is true.
+fn eq_var_value(cond: &Expr) -> Option<(String, Expr)> {
+    if let Expr::BinOp(BinOp::Eq, l, r) = cond {
+        if let (Expr::Var { name, .. }, lit) = (l.as_ref(), r.as_ref()) {
+            if is_simple_literal(lit) {
+                return Some((name.clone(), lit.clone()));
+            }
+        }
+        if let (lit, Expr::Var { name, .. }) = (l.as_ref(), r.as_ref()) {
+            if is_simple_literal(lit) {
+                return Some((name.clone(), lit.clone()));
+            }
+        }
+    }
+    None
+}
+
+fn is_simple_literal(e: &Expr) -> bool {
+    matches!(
+        e,
+        Expr::Int(_) | Expr::Real(_) | Expr::Bool(_)
+    ) || matches!(
+        e,
+        Expr::UnOp(UnOp::Neg, inner) if matches!(inner.as_ref(), Expr::Int(_) | Expr::Real(_))
+    )
+}
+
+/// Decide whether the assumption `hcond` (taken as true when `htrue`, or
+/// false when `!htrue`) implies the relational `goal`.  Sound and incomplete
+/// — covers the common cases:
+///   * **identity**           `c == g` (same relation)
+///   * **negation**           `g == !c` matches the else-branch
+///   * **weakening of `>=`**  `x >= y` implies `x >= y - k` for any nonneg `k`
+///   * **strict→nonstrict**   `x > y` implies `x >= y`
+///   * **equality strongest** `x == y` implies any `x rel y` that `0 rel 0`
+fn hypothesis_proves(hcond: &Expr, htrue: bool, goal: &Expr) -> bool {
+    let (cop, cl, cr) = match hcond {
+        Expr::BinOp(op, l, r) if is_relation(op) => (op.clone(), l.as_ref(), r.as_ref()),
+        _ => return false,
+    };
+    let (gop, gl, gr) = match goal {
+        Expr::BinOp(op, l, r) if is_relation(op) => (op.clone(), l.as_ref(), r.as_ref()),
+        _ => return false,
+    };
+    let cp_lhs = match crate::algebra::expr_to_poly(cl) {
+        Some(p) => p,
+        None => return false,
+    };
+    let cp_rhs = match crate::algebra::expr_to_poly(cr) {
+        Some(p) => p,
+        None => return false,
+    };
+    let gp_lhs = match crate::algebra::expr_to_poly(gl) {
+        Some(p) => p,
+        None => return false,
+    };
+    let gp_rhs = match crate::algebra::expr_to_poly(gr) {
+        Some(p) => p,
+        None => return false,
+    };
+    let cp = cp_lhs.sub(cp_rhs); // hypothesis: cp `cop` 0
+    let gp = gp_lhs.sub(gp_rhs); // goal:        gp `gop` 0
+
+    // Determine the effective operator on `cp`: if htrue is false, negate.
+    let eff_cop = if htrue { cop } else { negate_relation(&cop) };
+
+    relation_implies(&eff_cop, &cp, &gop, &gp)
+}
+
+/// Logical negation of a strict/nonstrict comparison.
+fn negate_relation(op: &BinOp) -> BinOp {
+    match op {
+        BinOp::Eq => BinOp::Neq,
+        BinOp::Neq => BinOp::Eq,
+        BinOp::Lt => BinOp::Ge,
+        BinOp::Le => BinOp::Gt,
+        BinOp::Gt => BinOp::Le,
+        BinOp::Ge => BinOp::Lt,
+        other => other.clone(),
+    }
+}
+
+/// Sound implication check between two relations expressed as polynomials.
+/// Both relations are written in the form `p rel 0`.  Returns true when
+/// `hyp` proves `goal` for every valuation.
+fn relation_implies(
+    hop: &BinOp,
+    hp: &crate::algebra::Polynomial,
+    gop: &BinOp,
+    gp: &crate::algebra::Polynomial,
+) -> bool {
+    // Same relation, same polynomial — trivially.
+    if hop == gop && hp == gp {
+        return true;
+    }
+    // Same relation but the goal is the "flipped" form: `-hp <op> 0` where
+    // `<op>` is the symmetric (e.g. `>=` ↔ `<=`) of `op`.
+    // We normalise by trying both `gp` and `-gp` paired with the flipped op.
+    let neg_gp = gp.clone().neg();
+    if hop == &flip_relation(gop) && hp == &neg_gp {
+        return true;
+    }
+    // Equality is the strongest fact: hp == 0 implies any relation of hp
+    // against 0 that is reflexive on 0.
+    if hop == &BinOp::Eq && hp == gp {
+        return matches!(
+            gop,
+            BinOp::Eq | BinOp::Le | BinOp::Ge
+        );
+    }
+    if hop == &BinOp::Eq && hp == &neg_gp {
+        return matches!(
+            gop,
+            BinOp::Eq | BinOp::Le | BinOp::Ge
+        );
+    }
+    // hp > 0 implies hp >= 0, hp != 0
+    if hop == &BinOp::Gt && hp == gp && matches!(gop, BinOp::Ge | BinOp::Gt | BinOp::Neq) {
+        return true;
+    }
+    // hp < 0 implies hp <= 0, hp != 0
+    if hop == &BinOp::Lt && hp == gp && matches!(gop, BinOp::Le | BinOp::Lt | BinOp::Neq) {
+        return true;
+    }
+    // hp >= 0 implies hp >= 0
+    if hop == &BinOp::Ge && hp == gp && matches!(gop, BinOp::Ge) {
+        return true;
+    }
+    // hp <= 0 implies hp <= 0
+    if hop == &BinOp::Le && hp == gp && matches!(gop, BinOp::Le) {
+        return true;
+    }
+    // Symmetric forms with flipped sign / op:
+    //   hp >= 0  iff  -hp <= 0
+    //   hp > 0   iff  -hp < 0
+    if hp == &neg_gp {
+        match (hop, gop) {
+            (BinOp::Ge, BinOp::Le) | (BinOp::Le, BinOp::Ge) => return true,
+            (BinOp::Gt, BinOp::Lt) | (BinOp::Lt, BinOp::Gt) => return true,
+            (BinOp::Gt, BinOp::Le) => return true, // -hp < 0  ⇒  -hp <= 0
+            (BinOp::Lt, BinOp::Ge) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Swap `<` ↔ `>`, `<=` ↔ `>=`, `==` ↔ `==`, `!=` ↔ `!=`.  This is the
+/// relation you obtain after multiplying both sides by `-1`.
+fn flip_relation(op: &BinOp) -> BinOp {
+    match op {
+        BinOp::Lt => BinOp::Gt,
+        BinOp::Le => BinOp::Ge,
+        BinOp::Gt => BinOp::Lt,
+        BinOp::Ge => BinOp::Le,
+        other => other.clone(),
+    }
+}
+
+/// Detect a contradiction among hypotheses.  Covers:
+///   * **syntactic**       same condition assumed both true and false
+///   * **polynomial sign** two hypotheses on the same linear combination
+///     of polynomials but with disjoint sign requirements (e.g. `k >= 0`
+///     and `(50+k) < 50`, which simplifies to `k < 0`)
+///
+/// When this holds, the current branch is unreachable and any goal
+/// trivially follows.
+fn hyps_contradict(hyps: &[(Expr, bool)]) -> bool {
+    // 1. Cheap syntactic check
+    for (i, (c1, t1)) in hyps.iter().enumerate() {
+        for (c2, t2) in hyps.iter().skip(i + 1) {
+            if t1 != t2 && c1 == c2 {
+                return true;
+            }
+        }
+    }
+    // 2. Polynomial sign check.  Convert each hypothesis to `(poly, op)`
+    //    where the operator constrains `poly` against 0.  Pairs of
+    //    hypotheses about the same poly (modulo sign) whose sign-sets
+    //    have empty intersection produce a contradiction.
+    let mut hyp_polys: Vec<(crate::algebra::Polynomial, SignSet)> = Vec::new();
+    for (h, htrue) in hyps {
+        if let Some((p, ss)) = hyp_to_signset(h, *htrue) {
+            hyp_polys.push((p, ss));
+        }
+    }
+    for (i, (p1, ss1)) in hyp_polys.iter().enumerate() {
+        for (p2, ss2) in hyp_polys.iter().skip(i + 1) {
+            if p1 == p2 {
+                if !ss1.intersects(*ss2) {
+                    return true;
+                }
+            } else if p1 == &p2.clone().neg() {
+                // hyp1 about p, hyp2 about -p — flip ss2 sign set
+                if !ss1.intersects(ss2.flip()) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Possible signs of a polynomial: a subset of `{<0, =0, >0}`.
+/// Two hypotheses on the same polynomial are jointly satisfiable iff
+/// their sign sets intersect.
+#[derive(Clone, Copy, Debug)]
+struct SignSet {
+    neg: bool,
+    zero: bool,
+    pos: bool,
+}
+
+impl SignSet {
+    fn intersects(self, other: SignSet) -> bool {
+        (self.neg && other.neg)
+            || (self.zero && other.zero)
+            || (self.pos && other.pos)
+    }
+    /// Sign set after the polynomial is negated (`<0` ↔ `>0`, `=0` stays).
+    fn flip(self) -> SignSet {
+        SignSet { neg: self.pos, zero: self.zero, pos: self.neg }
+    }
+}
+
+/// Convert `(rel-expr, is_true)` into `(poly, signset)` describing what
+/// `poly` is allowed to be.  Returns `None` if the relation isn't a
+/// recognised numeric comparison.
+fn hyp_to_signset(h: &Expr, htrue: bool) -> Option<(crate::algebra::Polynomial, SignSet)> {
+    let (op, l, r) = match h {
+        Expr::BinOp(op, l, r) if is_relation(op) => (op.clone(), l.as_ref(), r.as_ref()),
+        _ => return None,
+    };
+    let lp = crate::algebra::expr_to_poly(l)?;
+    let rp = crate::algebra::expr_to_poly(r)?;
+    let poly = lp.sub(rp); // poly `op` 0
+    let eff_op = if htrue { op } else { negate_relation(&op) };
+    let ss = match eff_op {
+        BinOp::Eq => SignSet { neg: false, zero: true, pos: false },
+        BinOp::Neq => SignSet { neg: true, zero: false, pos: true },
+        BinOp::Lt => SignSet { neg: true, zero: false, pos: false },
+        BinOp::Le => SignSet { neg: true, zero: true, pos: false },
+        BinOp::Gt => SignSet { neg: false, zero: false, pos: true },
+        BinOp::Ge => SignSet { neg: false, zero: true, pos: true },
+        _ => return None,
+    };
+    Some((poly, ss))
+}
+
+/// Walk every `forall x in Nat, ...` binder in `prop` and accumulate
+/// `(x >= 0, true)` hypotheses.  These are sound non-negativity facts
+/// every Nat-bound variable enjoys; they let the contradiction engine
+/// close branches that violate non-negativity.
+fn collect_nat_hyps(prop: &Expr, out: &mut Vec<(Expr, bool)>) {
+    let mut cur = prop;
+    while let Expr::Forall { var, domain, body } = cur {
+        if matches!(domain.as_ref(), Expr::Var { name: s, .. } if s == "Nat") {
+            let var_e = Expr::Var { name: var.clone(), line: 0, col: 0 };
+            let hyp = Expr::BinOp(
+                BinOp::Ge,
+                Box::new(var_e),
+                Box::new(Expr::Int(0)),
+            );
+            out.push((hyp, true));
+        }
+        cur = body;
+    }
+}
+
+/// Strip leading propositional implications from `body`.  Recognises both
+///   * the `=>` desugaring `(not P) or Q`  (parse-time)
+///   * the function-type `Arrow(P, Q)` whose LHS is a relational expression
+///     (so the user can write `... > 0 -> conclusion` and have it treated
+///     as implication rather than a doomed function type).
+///
+/// Returns `(conclusion, premises_in_order)`.  Each premise becomes a
+/// `(expr, true)` hypothesis for the algebra prover.
+fn peel_implications(body: &Expr) -> (Expr, Vec<Expr>) {
+    let mut premises = Vec::new();
+    let mut cur = body.clone();
+    loop {
+        match &cur {
+            // `(not P) or Q` — the `=>` desugaring
+            Expr::BinOp(BinOp::Or, l, r) => {
+                if let Expr::UnOp(UnOp::Not, inner) = l.as_ref() {
+                    if matches!(inner.as_ref(), Expr::BinOp(op, _, _) if is_relation(op)) {
+                        premises.push((**inner).clone());
+                        cur = (**r).clone();
+                        continue;
+                    }
+                }
+                break;
+            }
+            // `P -> Q` where P is a relational expression — treat as
+            // implication.  The function-arrow interpretation would have
+            // failed type-checking anyway (Bool isn't a Set).
+            Expr::Arrow(l, r) => {
+                if matches!(l.as_ref(), Expr::BinOp(op, _, _) if is_relation(op)) {
+                    premises.push((**l).clone());
+                    cur = (**r).clone();
+                    continue;
+                }
+                break;
+            }
+            _ => break,
+        }
+    }
+    (cur, premises)
+}
+
+/// Rewrite `e` by replacing every `if cond then T else E` subterm whose
+/// condition is structurally equal to `target_cond` with `T` (when
+/// `target_value` is true) or `E` (when false).  This is the standard
+/// "propagate the case assumption" pass used after splitting on a
+/// condition.  Sound because, on the branch where the condition has a
+/// fixed value, all occurrences of `if cond ...` reduce to that branch.
+fn collapse_if_cond(e: &Expr, target_cond: &Expr, target_value: bool) -> Expr {
+    use Expr::*;
+    match e {
+        If { cond, then_branch, else_branch } => {
+            let inner_then = collapse_if_cond(then_branch, target_cond, target_value);
+            let inner_else = collapse_if_cond(else_branch, target_cond, target_value);
+            let inner_cond = collapse_if_cond(cond, target_cond, target_value);
+            if inner_cond == *target_cond {
+                if target_value {
+                    inner_then
+                } else {
+                    inner_else
+                }
+            } else {
+                If {
+                    cond: Box::new(inner_cond),
+                    then_branch: Box::new(inner_then),
+                    else_branch: Box::new(inner_else),
+                }
+            }
+        }
+        BinOp(op, l, r) => BinOp(
+            op.clone(),
+            Box::new(collapse_if_cond(l, target_cond, target_value)),
+            Box::new(collapse_if_cond(r, target_cond, target_value)),
+        ),
+        UnOp(op, x) => UnOp(
+            op.clone(),
+            Box::new(collapse_if_cond(x, target_cond, target_value)),
+        ),
+        App { func, args } => App {
+            func: Box::new(collapse_if_cond(func, target_cond, target_value)),
+            args: args
+                .iter()
+                .map(|a| collapse_if_cond(a, target_cond, target_value))
+                .collect(),
+        },
+        Let { name, ty, value, body, rec } => Let {
+            name: name.clone(),
+            ty: ty.clone(),
+            value: Box::new(collapse_if_cond(value, target_cond, target_value)),
+            body: Box::new(collapse_if_cond(body, target_cond, target_value)),
+            rec: *rec,
+        },
+        _ => e.clone(),
     }
 }
 
@@ -1233,6 +1822,138 @@ fn simplify_list_ops(e: &Expr, ctx: &EvalCtx, env: &Env) -> Expr {
 /// Strip all leading `forall x in T, ...` binders, returning the body.
 /// We don't track the bound variable list because in the polynomial encoding
 /// every free variable is universally quantified by default.
+/// True if `body` references the closure's own `name` somewhere — i.e.
+/// the definition is recursive (direct recursion only, mutually-recursive
+/// pairs are still treated as non-recursive individually, which is fine:
+/// the bounded-iteration loop in `unfold_nonrec_transitive` cuts off mutual
+/// expansion before it blows up).
+fn closure_is_recursive(name: &str, body: &Expr) -> bool {
+    use Expr::*;
+    match body {
+        Var { name: n, .. } => n == name,
+        Lambda { body, .. } => closure_is_recursive(name, body),
+        App { func, args } => {
+            closure_is_recursive(name, func)
+                || args.iter().any(|a| closure_is_recursive(name, a))
+        }
+        Let { value, body, .. } => {
+            closure_is_recursive(name, value) || closure_is_recursive(name, body)
+        }
+        If { cond, then_branch, else_branch } => {
+            closure_is_recursive(name, cond)
+                || closure_is_recursive(name, then_branch)
+                || closure_is_recursive(name, else_branch)
+        }
+        BinOp(_, l, r) => {
+            closure_is_recursive(name, l) || closure_is_recursive(name, r)
+        }
+        UnOp(_, x) => closure_is_recursive(name, x),
+        SetEnum(xs) | Tuple(xs) | List(xs) => {
+            xs.iter().any(|x| closure_is_recursive(name, x))
+        }
+        SetComp { domain, pred, .. } => {
+            closure_is_recursive(name, domain) || closure_is_recursive(name, pred)
+        }
+        Arrow(a, b) => closure_is_recursive(name, a) || closure_is_recursive(name, b),
+        DepArrow { from, to, .. } => {
+            closure_is_recursive(name, from) || closure_is_recursive(name, to)
+        }
+        Forall { domain, body, .. } | Exists { domain, body, .. } => {
+            closure_is_recursive(name, domain) || closure_is_recursive(name, body)
+        }
+        _ => false,
+    }
+}
+
+/// Collect every variable name appearing free in `e` (no scope tracking;
+/// over-approximates for binders, which is fine because we only use this
+/// to decide which definitions to attempt unfolding).
+fn collect_free_var_names(e: &Expr, out: &mut std::collections::BTreeSet<String>) {
+    use Expr::*;
+    match e {
+        Var { name, .. } => {
+            out.insert(name.clone());
+        }
+        Lambda { body, .. } => collect_free_var_names(body, out),
+        App { func, args } => {
+            collect_free_var_names(func, out);
+            for a in args {
+                collect_free_var_names(a, out);
+            }
+        }
+        Let { value, body, .. } => {
+            collect_free_var_names(value, out);
+            collect_free_var_names(body, out);
+        }
+        If { cond, then_branch, else_branch } => {
+            collect_free_var_names(cond, out);
+            collect_free_var_names(then_branch, out);
+            collect_free_var_names(else_branch, out);
+        }
+        BinOp(_, l, r) => {
+            collect_free_var_names(l, out);
+            collect_free_var_names(r, out);
+        }
+        UnOp(_, x) => collect_free_var_names(x, out),
+        SetEnum(xs) | Tuple(xs) | List(xs) => {
+            for x in xs {
+                collect_free_var_names(x, out);
+            }
+        }
+        SetComp { domain, pred, .. } => {
+            collect_free_var_names(domain, out);
+            collect_free_var_names(pred, out);
+        }
+        Arrow(a, b) => {
+            collect_free_var_names(a, out);
+            collect_free_var_names(b, out);
+        }
+        DepArrow { from, to, .. } => {
+            collect_free_var_names(from, out);
+            collect_free_var_names(to, out);
+        }
+        Forall { domain, body, .. } | Exists { domain, body, .. } => {
+            collect_free_var_names(domain, out);
+            collect_free_var_names(body, out);
+        }
+        _ => {}
+    }
+}
+
+/// Transitively β-unfold every **non-recursive** user-defined function call
+/// appearing in `e`.  Continues until a fixed point or until the bound
+/// `MAX_UNFOLD_ITERS` is reached.  `seeded` lists the function names
+/// already unfolded by the calling tactic (so we don't try them again at
+/// the top level — they're handled by `do_unfold` itself).
+fn unfold_nonrec_transitive(
+    e: &Expr,
+    globals: &crate::value::Globals,
+    _seeded: &[&str],
+) -> Expr {
+    const MAX_UNFOLD_ITERS: usize = 32;
+    let mut current = e.clone();
+    for _ in 0..MAX_UNFOLD_ITERS {
+        let mut names = std::collections::BTreeSet::new();
+        collect_free_var_names(&current, &mut names);
+        let mut changed = false;
+        for name in &names {
+            if let Some(Value::Closure { params, body, .. }) = globals.defs.get(name) {
+                if !closure_is_recursive(name, body) {
+                    let next = unfold_calls(&current, name, params, body);
+                    if next != current {
+                        current = next;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    current
+}
+
 fn strip_foralls(e: &Expr) -> &Expr {
     let mut cur = e;
     while let Expr::Forall { body, .. } = cur {

@@ -1,0 +1,145 @@
+-- ===========================================================
+-- lib/probability/discrete.seki — 離散確率分布
+--
+-- 表現: data Distrib A = Distrib (List (A, Real))
+--   ペアのリストで (値, 確率) のペア集合を表す。
+--   重みの和は 1.0 になっていることが期待されるが、本ファイルの
+--   関数群は正規化版 (normalize) 経由でユーザーが整える。
+--
+-- 公開する名前:
+--   data Distrib A                — 分布
+--   def distFromList xs           — 等確率の経験分布
+--   def distSupport d             — 値のリスト
+--   def distProbs d               — 確率のリスト
+--   def distProbAt d v eqFn       — 値 v の確率を取得
+--   def normalize d               — 確率の和を 1 にする
+--   def expectation d phi         — E[φ(X)] = Σ p_i * φ(x_i)
+--   def variance d                — Var[X] (X が Real のとき)
+--   def mean d                    — E[X]
+--   def stddev d                  — sqrt(Var[X])
+--
+-- 既知分布の構築:
+--   def bernoulli p               — {0, 1}, P(1)=p
+--   def binomialDist n p          — Binom(n, p)
+--   def uniformDiscrete lo hi     — {lo, lo+1, ..., hi}
+-- ===========================================================
+
+data Distrib A = MkDistrib (List (A, Real))
+
+def distData := \d -> match d with | MkDistrib xs -> xs
+
+-- ----- リストから等確率分布を作る -----
+def equalProbList := \xs p ->
+    if null xs then nil
+    else cons ((head xs), p) (equalProbList (tail xs) p)
+
+def distFromList := \xs ->
+    let n = length xs in
+    let p = 1.0 / (intToReal n) in
+    MkDistrib (equalProbList xs p)
+
+-- ----- 台 (値のみ) と確率列の取り出し -----
+def supportRec := \pairs ->
+    if null pairs then nil
+    else cons (fst (head pairs)) (supportRec (tail pairs))
+
+def distSupport := \d -> supportRec (distData d)
+
+def probsRec := \pairs ->
+    if null pairs then nil
+    else cons (snd (head pairs)) (probsRec (tail pairs))
+
+def distProbs := \d -> probsRec (distData d)
+
+-- ----- 値 v に対する確率 (eqFn は値の等価判定) -----
+def lookupProb := \pairs v eqFn ->
+    if null pairs then 0.0
+    else
+        let p = head pairs in
+        if eqFn (fst p) v then snd p
+        else lookupProb (tail pairs) v eqFn
+
+def distProbAt := \d v eqFn -> lookupProb (distData d) v eqFn
+
+-- ----- 正規化: 確率の和を 1 にする -----
+def sumProbsAux := \pairs ->
+    if null pairs then 0
+    else (snd (head pairs)) + sumProbsAux (tail pairs)
+
+def scalePairs := \pairs c ->
+    if null pairs then nil
+    else
+        let p = head pairs in
+        cons ((fst p), c * (snd p)) (scalePairs (tail pairs) c)
+
+def normalize := \d ->
+    let pairs = distData d in
+    let total = sumProbsAux pairs in
+    if total <= 0.0 then d
+    else MkDistrib (scalePairs pairs (1.0 / total))
+
+-- ===========================================================
+-- §1. 期待値・分散・標準偏差
+-- ===========================================================
+
+-- E[φ(X)] = Σ p_i * φ(x_i)
+-- φ: A → Real
+def expRec := \pairs phi ->
+    if null pairs then 0
+    else
+        let p = head pairs in
+        (snd p) * (phi (fst p)) + expRec (tail pairs) phi
+
+def expectation := \d phi -> expRec (distData d) phi
+
+-- 値が Real のとき: E[X], E[X²], Var[X], σ
+def identityR := \x -> x
+def squareR := \x -> x * x
+
+def mean := \d -> expectation d identityR
+def variance := \d ->
+    let mu = mean d in
+    let ex2 = expectation d squareR in
+    ex2 - mu * mu
+
+def stddev := \d -> sqrt (variance d)
+
+-- ===========================================================
+-- §2. 既知の離散分布
+-- ===========================================================
+
+-- Bernoulli(p): P(1) = p, P(0) = 1 - p
+def bernoulli := \(p : Real) ->
+    MkDistrib (cons (0, 1.0 - p) (cons (1, p) nil))
+
+-- 二項係数 C(n, k)
+def binomCoeff := \n k ->
+    if k < 0 then 0
+    else if k > n then 0
+    else if k == 0 then 1
+    else if k == n then 1
+    else binomCoeff (n - 1) (k - 1) + binomCoeff (n - 1) k
+
+-- p^k * (1-p)^(n-k)
+def binomTerm := \n k p ->
+    let c = intToReal (binomCoeff n k) in
+    let pk = pow p k in
+    let qnk = pow (1.0 - p) (n - k) in
+    c * pk * qnk
+
+def binomDistAux := \n k pairs p ->
+    if k > n then pairs
+    else
+        let prob = binomTerm n k p in
+        binomDistAux n (k + 1) (cons (k, prob) pairs) p
+
+def binomialDist := \(n : Int) (p : Real) ->
+    MkDistrib (binomDistAux n 0 nil p)
+
+-- 一様離散 {lo, lo+1, ..., hi}
+def uniformAux := \cur hi ->
+    if cur > hi then nil
+    else cons cur (uniformAux (cur + 1) hi)
+
+def uniformDiscrete := \(lo : Int) (hi : Int) ->
+    distFromList (uniformAux lo hi)

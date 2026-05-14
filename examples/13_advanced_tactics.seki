@@ -29,6 +29,52 @@ theorem psd_3var
         a*a + b*b + c*c >= 0
   := by algebra
 
+-- ----- Real 上の by algebra ----------------------------------
+-- by algebra は Real リテラル (0.5, 1.0, ...) を有理係数で扱うので
+-- Int と同じ多項式恒等式が Real 上でも健全に証明できる。
+theorem real_distrib
+  : forall a in Real, forall b in Real, forall c in Real,
+        a * (b + c) == a * b + a * c
+  := by algebra
+
+theorem real_sq_nonneg : forall x in Real, x * x >= 0.0 := by algebra
+
+theorem real_half_id
+  : forall x in Real, 0.5 * x + 0.5 * x == x
+  := by algebra
+
+-- ----- if-式を含む証明 (場合分け) --------------------------------
+-- 各条件分岐の式を多項式に変換し、必要なら条件式そのものを仮説として利用。
+theorem abs_int_nonneg
+  : forall x in Int, (if x >= 0 then x else (-x)) >= 0
+  := by algebra
+
+theorem abs_real_nonneg
+  : forall x in Real, (if x >= 0.0 then x else (-x)) >= 0.0
+  := by algebra
+
+theorem max_lower_bound
+  : forall x in Int, forall y in Int,
+        (if x >= y then x else y) >= y
+  := by algebra
+
+theorem min_upper_bound
+  : forall x in Int, forall y in Int,
+        (if x <= y then x else y) <= x
+  := by algebra
+
+-- 条件が同じ if が両辺にあるケース: 同時に折り畳まれる
+theorem identity_entry_scalar
+  : forall i in Int, forall j in Int, forall x in Int,
+        (if i == j then 1 * x else 0 * x) == (if i == j then x else 0)
+  := by algebra
+
+-- unfold と組み合わせると、if 式を含む関数定義もそのまま証明可能:
+def absR := \x -> if x >= 0.0 then x else (0.0 - x)
+theorem absR_nonneg
+  : forall x in Real, absR x >= 0.0
+  := by unfold absR then algebra
+
 -- ----- 整数除算と mod (定数除数) ---------------------------------
 theorem half_double
   : forall n in Int, (2 * n) / 2 == n

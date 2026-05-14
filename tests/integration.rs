@@ -335,6 +335,125 @@ fn algebra_handles_div_mod_const() {
 }
 
 #[test]
+fn algebra_handles_real_polynomial() {
+    let g = run(r"
+        theorem r_zero  : forall x in Real, x + 0.0 == x := by algebra
+        theorem r_one   : forall x in Real, x * 1.0 == x := by algebra
+        theorem r_neg   : forall x in Real, x + (-x) == 0.0 := by algebra
+        theorem r_sq_nn : forall x in Real, x * x >= 0.0 := by algebra
+        theorem r_distrib
+          : forall a in Real, forall b in Real, forall c in Real,
+                a * (b + c) == a * b + a * c
+          := by algebra
+        theorem r_half  : forall x in Real, 0.5 * x + 0.5 * x == x := by algebra
+    ");
+    for n in &["r_zero", "r_one", "r_neg", "r_sq_nn", "r_distrib", "r_half"] {
+        assert!(g.theorems.contains_key(*n), "{} not proven", n);
+    }
+}
+
+#[test]
+fn algebra_handles_if_expressions() {
+    let g = run(r"
+        theorem if_trivial
+          : forall x in Int, (if x > 0 then x else x) == x
+          := by algebra
+        theorem abs_nn
+          : forall x in Int, (if x >= 0 then x else (-x)) >= 0
+          := by algebra
+        theorem max_lb
+          : forall x in Int, forall y in Int,
+                (if x >= y then x else y) >= y
+          := by algebra
+        theorem real_abs_nn
+          : forall x in Real, (if x >= 0.0 then x else (-x)) >= 0.0
+          := by algebra
+        theorem identity_entry
+          : forall i in Int, forall j in Int, forall x in Int,
+                (if i == j then 1 * x else 0 * x) == (if i == j then x else 0)
+          := by algebra
+    ");
+    for n in &["if_trivial", "abs_nn", "max_lb", "real_abs_nn", "identity_entry"] {
+        assert!(g.theorems.contains_key(*n), "{} not proven", n);
+    }
+}
+
+#[test]
+fn algebra_rejects_false_if_branch() {
+    // Sanity: case-splitting must not silently swallow a false branch.
+    let res = std::panic::catch_unwind(|| {
+        run("theorem bad : forall x in Int, (if x > 0 then x else 0) == x := by algebra");
+    });
+    assert!(res.is_err(), "false if-claim should not be proved");
+}
+
+#[test]
+fn algebra_nat_nonneg_hypothesis_closes_branches() {
+    // B1: `forall k in Nat, ...` automatically gives `k >= 0`, which combines
+    // with the else-branch hypothesis `50 + k < 50` to close that branch by
+    // contradiction.
+    let g = run(r"
+        def alphaNum := \(step : Int) (warmup : Int) ->
+            if step >= warmup then warmup else step
+        theorem alpha_capped_nat
+          : forall k in Nat, alphaNum (50 + k) 50 == 50
+          := by unfold alphaNum then algebra
+    ");
+    assert!(g.theorems.contains_key("alpha_capped_nat"));
+}
+
+#[test]
+fn algebra_handles_propositional_implication() {
+    // B2: `P -> Q` in propositions is implication, not function type.
+    let g = run(r"
+        theorem implies_test
+          : forall mu in Real, forall lam in Real, mu + lam > 0.0 ->
+                1.0 - mu / (mu + lam) == lam / (mu + lam)
+          := by algebra
+    ");
+    assert!(g.theorems.contains_key("implies_test"));
+}
+
+#[test]
+fn algebra_clears_real_denominators() {
+    // B3: rational-function fallback handles variable denominators
+    let g = run(r"
+        theorem rat_simplify
+          : forall N in Real, (1.0 / (2.0 * (2.0 * N))) * 4.0 * N == 1.0
+          := by algebra
+        theorem rat_simplify2
+          : forall a in Real, forall b in Real, a / b * b == a
+          := by algebra
+    ");
+    assert!(g.theorems.contains_key("rat_simplify"));
+    assert!(g.theorems.contains_key("rat_simplify2"));
+}
+
+#[test]
+fn algebra_folds_real_constants() {
+    // B4: constant-folding through Mul/Add: `2.0 * 16.0` reduces to `32.0`.
+    let g = run(r"
+        theorem const_fold
+          : 1.0 / (2.0 * 16.0) == 1.0 / 32.0
+          := by algebra
+    ");
+    assert!(g.theorems.contains_key("const_fold"));
+}
+
+#[test]
+fn algebra_transitive_unfold() {
+    // B6: `unfold g` recursively unfolds non-recursive callees of g.
+    let g = run(r"
+        def f := \x -> x * 2
+        def g := \x -> f x + 1
+        theorem g_unfolds
+          : forall x in Int, g x == 2 * x + 1
+          := by unfold g then algebra
+    ");
+    assert!(g.theorems.contains_key("g_unfolds"));
+}
+
+#[test]
 fn induction_handles_inequalities() {
     let g = run(r"
         def sum := \n -> if n == 0 then 0 else n + sum (n - 1)

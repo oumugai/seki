@@ -1,0 +1,171 @@
+-- ===========================================================
+-- lib/numeric/matrix_eq.seki — 行列方程式の数値解
+--
+-- 任意 n×n の Lyapunov / Sylvester / Riccati 方程式を Kronecker
+-- ベクトル化を経由した線型方程式に帰着して解く。
+--
+-- 公開する名前:
+--   def kronecker A B           — Kronecker 積 A ⊗ B
+--   def vec m                   — 列スタックによる vec(m)
+--   def unvec n vec             — vec(m) を n×n 行列に戻す (列スタック逆)
+--   def lyapunovSolve A Q       — A^T P + P A = -Q の数値解 P
+--   def sylvesterSolve A B C    — A X + X B = C の数値解 X
+--   def careSolve A B Q R       — 連続代数 Riccati: A^T P + P A - P B R^{-1} B^T P + Q = 0
+--                                  (反復 Newton-Kleinman 法)
+-- ===========================================================
+
+import "linalg.seki"
+import "gauss.seki"
+
+-- ===========================================================
+-- §1. Kronecker 積と vec / unvec
+-- ===========================================================
+-- (A ⊗ B)[i][j] のサイズは (m_a * m_b) × (n_a * n_b)
+-- (A ⊗ B)[i_a * m_b + i_b][j_a * n_b + j_b] = A[i_a][j_a] * B[i_b][j_b]
+
+def kronRowAux := \aRowi B jaIdx jb -> 0  -- placeholder, replaced below
+
+-- A の行 i_a と B の行 i_b について、列 (j_a * n_b + j_b) の値は
+-- A[i_a][j_a] * B[i_b][j_b]
+def kronEntry := \A B ia ib ja jb ->
+    let a_val = matAtR ia ja A in
+    let b_val = matAtR ib jb B in
+    a_val * b_val
+
+-- B の 1 行と A[ia][ja] を掛けたものを生成: A の j_a 列ごとに B[ib] 全列を並べる
+def kronOneRowSpan := \A B ia ib ja nA nB ->
+    if ja >= nA then nil
+    else
+        let aVal = matAtR ia ja A in
+        let bRow = nth ib B in
+        let scaled = smul aVal bRow in
+        let rest = kronOneRowSpan A B ia ib (ja + 1) nA nB in
+        hConcatRows scaled rest
+
+def kronAllRows := \A B ia ib mA mB nA nB ->
+    if ib >= mB then nil
+    else
+        let r = kronOneRowSpan A B ia ib 0 nA nB in
+        cons r (kronAllRows A B ia (ib + 1) mA mB nA nB)
+
+def kronOuter := \A B ia mA mB nA nB ->
+    if ia >= mA then nil
+    else
+        let block = kronAllRows A B ia 0 mA mB nA nB in
+        let rest = kronOuter A B (ia + 1) mA mB nA nB in
+        hConcat block rest  -- wrong: should append rows
+        -- Actually: hConcat concatenates row-wise; we want vertical concat.
+
+-- 縦結合: 行リスト同士の連結
+def vConcat := \m1 m2 ->
+    if null m1 then m2
+    else cons (head m1) (vConcat (tail m1) m2)
+
+def kronOuterV := \A B ia mA mB nA nB ->
+    if ia >= mA then nil
+    else
+        let block = kronAllRows A B ia 0 mA mB nA nB in
+        let rest = kronOuterV A B (ia + 1) mA mB nA nB in
+        vConcat block rest
+
+def kronecker := \A B ->
+    let mA = matRows A in let nA = matCols A in
+    let mB = matRows B in let nB = matCols B in
+    kronOuterV A B 0 mA mB nA nB
+
+-- ----- vec / unvec -----
+-- vec(M): 列スタック (列を順に縦に並べたベクトル)
+def vecColAux := \j n m ->
+    if j >= n then nil
+    else hConcatRows (colJ j m) (vecColAux (j + 1) n m)
+
+def vec := \m ->
+    let n = matCols m in
+    vecColAux 0 n m
+
+-- unvec(v, n): n*n 要素の v を n×n 列スタック行列に戻す
+def takeN := \n xs ->
+    if n <= 0 then nil
+    else if null xs then nil
+    else cons (head xs) (takeN (n - 1) (tail xs))
+
+def splitColumns := \v n j ->
+    if j >= n then nil
+    else
+        let col = takeN n v in
+        let rest = dropN n v in
+        cons col (splitColumns rest n (j + 1))
+
+-- 列のリストから行列を組み立てる (転置)
+def unvec := \v n ->
+    let cols = splitColumns v n 0 in
+    matTranspose cols
+
+-- ===========================================================
+-- §2. Lyapunov 方程式: A^T P + P A = -Q (P 求める、A は Hurwitz が前提)
+-- ===========================================================
+-- vec を取ると: (I ⊗ A^T + A^T ⊗ I) vec(P) = -vec(Q)
+-- ベクトル化された連立方程式を Gauss で解く。
+
+def lyapunovSolve := \A Q ->
+    let n = matRows A in
+    let I_n = identityR n in
+    let AT = matTranspose A in
+    let lhs1 = kronecker I_n AT in
+    let lhs2 = kronecker AT I_n in
+    let lhs = matAdd lhs1 lhs2 in
+    let rhsVec = smul (0.0 - 1.0) (vec Q) in
+    let pvec = linSolve lhs rhsVec in
+    unvec pvec n
+
+-- ===========================================================
+-- §3. Sylvester 方程式: A X + X B = C
+-- ===========================================================
+-- vec を取ると: (I_q ⊗ A + B^T ⊗ I_p) vec(X) = vec(C)
+-- (p, q はサイズ — A: p×p, B: q×q, X: p×q)
+
+def sylvesterSolve := \A B C ->
+    let p = matRows A in
+    let q = matRows B in
+    let I_p = identityR p in
+    let I_q = identityR q in
+    let BT = matTranspose B in
+    let lhs1 = kronecker I_q A in
+    let lhs2 = kronecker BT I_p in
+    let lhs = matAdd lhs1 lhs2 in
+    let xvec = linSolve lhs (vec C) in
+    unvec xvec p
+
+-- ===========================================================
+-- §4. 連続代数 Riccati 方程式 (CARE):
+--     A^T P + P A - P B R^{-1} B^T P + Q = 0
+-- ===========================================================
+-- Newton-Kleinman 反復:
+--   K_k = R^{-1} B^T P_k
+--   A_k = A - B K_k
+--   A_k^T P_{k+1} + P_{k+1} A_k = -(Q + K_k^T R K_k)
+-- 各ステップは Lyapunov を解くだけ。初期 P_0 が Hurwitz を作るよう
+-- に与えられれば二次収束する。
+
+def careStep := \A B Q R P ->
+    let Rinv = matInverse R in
+    let BT = matTranspose B in
+    let K = matMul (matMul Rinv BT) P in
+    let BK = matMul B K in
+    let A_cl = matSub A BK in           -- A - B K
+    let KT = matTranspose K in
+    let KTRK = matMul (matMul KT R) K in
+    let rhs = matAdd Q KTRK in
+    lyapunovSolve A_cl rhs
+
+def careRec := \A B Q R P iters ->
+    if iters <= 0 then P
+    else
+        let P2 = careStep A B Q R P in
+        careRec A B Q R P2 (iters - 1)
+
+-- 注: P_0 = I は実用上 Hurwitz を作れないケースもあるが、まず簡単な初期解として与える
+def careSolve := \A B Q R ->
+    let n = matRows A in
+    let P0 = identityR n in
+    careRec A B Q R P0 20

@@ -68,3 +68,47 @@ theorem mat_rows : matRows m3 == 3 := by eval
 theorem mat_cols : matCols m3 == 3 := by eval
 theorem mat_rect_rows : matRows c == 2 := by eval
 theorem mat_rect_cols : matCols c == 3 := by eval
+
+-- ----- 行列演算は List 再帰なので by algebra ではなく by eval / by induction を使う -----
+-- ただし Int/Real 成分レベルの恒等式は by algebra で全要素値について健全に証明できる:
+
+-- 行列加法の可換性 (成分レベル): a+b == b+a
+theorem mat_entry_add_comm
+  : forall x in Int, forall y in Int, x + y == y + x
+  := by algebra
+
+-- 行列乗算の分配律 (成分レベル): a*(b+c) == a*b + a*c
+theorem mat_entry_mul_distrib
+  : forall a in Int, forall b in Int, forall c in Int,
+        a * (b + c) == a * b + a * c
+  := by algebra
+
+-- Real 成分版: 浮動小数点行列でも同じ恒等式が成り立つ
+theorem mat_entry_real_add_comm
+  : forall x in Real, forall y in Real, x + y == y + x
+  := by algebra
+
+theorem mat_entry_real_distrib
+  : forall a in Real, forall b in Real, forall c in Real,
+        a * (b + c) == a * b + a * c
+  := by algebra
+
+-- 2x2 行列の行列式公式の代数的検証:  det = a*d - b*c
+-- (i.e., 行列式の Laplace 展開と直接公式が一致する Real 上の恒等式)
+theorem det_2x2_formula
+  : forall a in Real, forall b in Real, forall c in Real, forall d in Real,
+        a * d - b * c == a * d + (-1.0) * b * c
+  := by algebra
+
+-- 行列乗算 (2x2 × 2x2) の (0,0) 成分: a*e + b*g
+theorem mul_2x2_entry00
+  : forall a in Real, forall b in Real, forall e in Real, forall g in Real,
+        a * e + b * g == e * a + g * b
+  := by algebra
+
+-- if を含む式の証明: 単位行列の (i,j) 成分は i==j のとき 1, それ以外 0
+-- これを抽象化したスカラー版: (if i == j then 1 else 0) * x == (if i == j then x else 0)
+theorem identity_entry_scalar
+  : forall i in Int, forall j in Int, forall x in Int,
+        (if i == j then 1 * x else 0 * x) == (if i == j then x else 0)
+  := by algebra

@@ -1,0 +1,67 @@
+-- ===========================================================
+-- lib/analysis/taylor.seki — Taylor 展開と Lagrange 残差バウンド
+--
+-- 解析関数 f の Taylor 多項式と、Lagrange 形式の残差項に対する
+-- 構成的バウンドを提供する。摂動論で `f(x+h) = f(x) + … + R_n`
+-- の R_n をバウンドするのが典型的な用途。
+--
+-- 公開する名前:
+--   def taylorPoly fDerivs x x0 nTerms       — 1次元 Taylor 多項式
+--   def lagrangeRemainderBound Lk h k         — |R_k| ≤ L_k h^k / k!
+--   def taylorExpAt x x0 nTerms               — exp の Taylor 展開
+--   def taylorSinAt x x0 nTerms               — sin の (有限項) 展開
+-- ===========================================================
+
+-- ----- 階乗 (Int) -----
+def factTaylor := \k ->
+    if k <= 1 then 1
+    else k * factTaylor (k - 1)
+
+-- ----- 整数冪 -----
+def powIntR := \(x : Real) (k : Int) ->
+    if k <= 0 then 1.0
+    else x * (powIntR x (k - 1))
+
+-- ----- Lagrange 残差バウンド: |R_k(x)| ≤ L_k * |h|^k / k! -----
+-- f が k 階連続微分可能で f^(k) の絶対値が L_k 以下のとき、
+-- Taylor 残差は h^k / k! で抑えられる。
+def absR := \r -> if r < 0.0 then 0.0 - r else r
+
+def lagrangeRemainderBound := \Lk h k ->
+    let absH = absR h in
+    let hk = powIntR absH k in
+    Lk * hk / (intToReal (factTaylor k))
+
+-- ----- Taylor 多項式の一般式 -----
+-- fDerivs(j, x0) は f の x0 における j 階微分の値を返すと仮定
+-- f(x) ≈ Σ_{j=0}^{nTerms-1} fDerivs(j, x0) * (x - x0)^j / j!
+def taylorTermsAux := \fDerivs x x0 j nTerms acc ->
+    if j >= nTerms then acc
+    else
+        let coeff = fDerivs j x0 in
+        let h = x - x0 in
+        let hj = powIntR h j in
+        let term = coeff * hj / (intToReal (factTaylor j)) in
+        taylorTermsAux fDerivs x x0 (j + 1) nTerms (acc + term)
+
+def taylorPoly := \fDerivs x x0 nTerms ->
+    taylorTermsAux fDerivs x x0 0 nTerms 0.0
+
+-- ----- 具体例: exp(x) を x0 まわりで展開 -----
+-- exp の j 階微分は exp 自身。
+def expDerivAt := \j x0 -> exp x0
+
+def taylorExpAt := \x x0 nTerms ->
+    taylorPoly expDerivAt x x0 nTerms
+
+-- ----- 具体例: sin(x) を x0 まわりで展開 -----
+-- d/dx sin = cos, d²/dx² sin = -sin, d³/dx³ sin = -cos, d⁴/dx⁴ sin = sin
+def sinDerivAt := \j x0 ->
+    let r = j mod 4 in
+    if r == 0 then sin x0
+    else if r == 1 then cos x0
+    else if r == 2 then 0.0 - (sin x0)
+    else 0.0 - (cos x0)
+
+def taylorSinAt := \x x0 nTerms ->
+    taylorPoly sinDerivAt x x0 nTerms

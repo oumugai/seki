@@ -95,3 +95,32 @@ theorem mul_one  : cEqApprox 0.0001 (cMul z1 cOne) z1 := by eval
 theorem add_neg
   : cEqApprox 0.0001 (cAdd z1 (cNeg z1)) cZero
   := by eval
+
+-- ----- Real 成分での代数的恒等式 (by algebra で全実数値について健全に証明) -----
+-- 複素数の構成要素レベル — Real 上の多項式恒等式を直接検証する。
+-- これらは「個別の値」ではなく「すべての Real 値」について成り立つ。
+
+-- 実部の加法可換性: (a+c) = (c+a)
+theorem real_re_add_comm
+  : forall a in Real, forall c in Real, a + c == c + a
+  := by algebra
+
+-- 実部の乗法分配律: a*(c+e) - b*(d+f) = (a*c - b*d) + (a*e - b*f)
+-- これは cMul の実部の展開式そのもの。
+theorem real_cmul_distrib_re
+  : forall a in Real, forall b in Real, forall c in Real,
+    forall d in Real, forall e in Real, forall f in Real,
+        a * (c + e) - b * (d + f) == (a * c - b * d) + (a * e - b * f)
+  := by algebra
+
+-- |z|² = re² + im² の代数的検証 (実部・虚部を取り出した時の恒等式)
+theorem real_cabs2_eq
+  : forall a in Real, forall b in Real,
+        a * a + b * b == a * a - b * (0.0 - b)
+  := by algebra
+
+-- 共役の積 = 絶対値² (実部のみ; 虚部は 0)
+theorem real_conj_prod_re
+  : forall a in Real, forall b in Real,
+        a * a - b * (0.0 - b) == a * a + b * b
+  := by algebra

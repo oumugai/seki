@@ -1318,6 +1318,88 @@ pub fn make_builtin_prelude() -> Globals {
         }
     }
 
+    // Real → Real transcendental builtins.  Each accepts Int (promoted to
+    // Real) or Real and returns Real.  Generic helper to keep noise down.
+    fn unary_real_fn(args: &[Value], name: &str, f: fn(f64) -> f64) -> Result<Value, String> {
+        let x = match &args[0] {
+            Value::Real(r) => *r,
+            Value::Int(n) => *n as f64,
+            v => {
+                return Err(format!(
+                    "{}: expected numeric, got {}",
+                    name,
+                    v.type_name()
+                ))
+            }
+        };
+        Ok(Value::Real(f(x)))
+    }
+    fn b_exp(args: &[Value]) -> Result<Value, String> {
+        unary_real_fn(args, "exp", f64::exp)
+    }
+    fn b_ln(args: &[Value]) -> Result<Value, String> {
+        let x = match &args[0] {
+            Value::Real(r) => *r,
+            Value::Int(n) => *n as f64,
+            v => return Err(format!("ln: expected numeric, got {}", v.type_name())),
+        };
+        if x <= 0.0 {
+            return Err(format!("ln: non-positive argument {}", x));
+        }
+        Ok(Value::Real(x.ln()))
+    }
+    fn b_log10(args: &[Value]) -> Result<Value, String> {
+        let x = match &args[0] {
+            Value::Real(r) => *r,
+            Value::Int(n) => *n as f64,
+            v => return Err(format!("log10: expected numeric, got {}", v.type_name())),
+        };
+        if x <= 0.0 {
+            return Err(format!("log10: non-positive argument {}", x));
+        }
+        Ok(Value::Real(x.log10()))
+    }
+    fn b_sin(args: &[Value]) -> Result<Value, String> {
+        unary_real_fn(args, "sin", f64::sin)
+    }
+    fn b_cos(args: &[Value]) -> Result<Value, String> {
+        unary_real_fn(args, "cos", f64::cos)
+    }
+    fn b_tan(args: &[Value]) -> Result<Value, String> {
+        unary_real_fn(args, "tan", f64::tan)
+    }
+    fn b_asin(args: &[Value]) -> Result<Value, String> {
+        unary_real_fn(args, "asin", f64::asin)
+    }
+    fn b_acos(args: &[Value]) -> Result<Value, String> {
+        unary_real_fn(args, "acos", f64::acos)
+    }
+    fn b_atan(args: &[Value]) -> Result<Value, String> {
+        unary_real_fn(args, "atan", f64::atan)
+    }
+    fn b_atan2(args: &[Value]) -> Result<Value, String> {
+        let y = match &args[0] {
+            Value::Real(r) => *r,
+            Value::Int(n) => *n as f64,
+            v => return Err(format!("atan2: expected numeric y, got {}", v.type_name())),
+        };
+        let x = match &args[1] {
+            Value::Real(r) => *r,
+            Value::Int(n) => *n as f64,
+            v => return Err(format!("atan2: expected numeric x, got {}", v.type_name())),
+        };
+        Ok(Value::Real(y.atan2(x)))
+    }
+    fn b_sinh(args: &[Value]) -> Result<Value, String> {
+        unary_real_fn(args, "sinh", f64::sinh)
+    }
+    fn b_cosh(args: &[Value]) -> Result<Value, String> {
+        unary_real_fn(args, "cosh", f64::cosh)
+    }
+    fn b_tanh(args: &[Value]) -> Result<Value, String> {
+        unary_real_fn(args, "tanh", f64::tanh)
+    }
+
     // ====================================================================
     // System-development builtins (general-purpose language layer)
     // ====================================================================
@@ -3016,6 +3098,20 @@ pub fn make_builtin_prelude() -> Globals {
     g.defs.insert("round".into(), bi("round", 1, b_round));
     g.defs.insert("sqrt".into(), bi("sqrt", 1, b_sqrt));
     g.defs.insert("pow".into(), bi("pow", 2, b_pow));
+    // Transcendental Real builtins
+    g.defs.insert("exp".into(), bi("exp", 1, b_exp));
+    g.defs.insert("ln".into(), bi("ln", 1, b_ln));
+    g.defs.insert("log10".into(), bi("log10", 1, b_log10));
+    g.defs.insert("sin".into(), bi("sin", 1, b_sin));
+    g.defs.insert("cos".into(), bi("cos", 1, b_cos));
+    g.defs.insert("tan".into(), bi("tan", 1, b_tan));
+    g.defs.insert("asin".into(), bi("asin", 1, b_asin));
+    g.defs.insert("acos".into(), bi("acos", 1, b_acos));
+    g.defs.insert("atan".into(), bi("atan", 1, b_atan));
+    g.defs.insert("atan2".into(), bi("atan2", 2, b_atan2));
+    g.defs.insert("sinh".into(), bi("sinh", 1, b_sinh));
+    g.defs.insert("cosh".into(), bi("cosh", 1, b_cosh));
+    g.defs.insert("tanh".into(), bi("tanh", 1, b_tanh));
     // String primitives — only the ones that *require* O(n) Rust access to
     // the underlying `String` bytes (or are large enough to warrant native
     // implementation).  Compositions like `strContains` / `strStartsWith` /

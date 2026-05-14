@@ -1,0 +1,112 @@
+-- ===========================================================
+-- lib/analysis/multidiff.seki — 多変数微分・Jacobian・Hessian・
+--                              ベクトル/行列値関数の Fréchet 微分
+--
+-- diff.seki のスカラー数値微分を拡張し、ベクトル値・行列値関数を
+-- 中心差分で数値的に微分する。
+--
+-- 公開する名前:
+--   def jacobian h f xs            — f : List Real → List Real の Jacobian
+--   def hessian h f xs             — f : List Real → Real の Hessian
+--   def frechetVec h F X Xdot      — F : Vector → Vector の方向微分 DF(X)[Xdot]
+--   def frechetMat h F M Mdot      — F : Matrix → Matrix の方向微分 DF(M)[Mdot]
+-- ===========================================================
+
+import "diff.seki"
+import "algebra/matrix.seki"
+import "algebra/vector.seki"
+
+-- ----- ベクトル中心差分: i 番目の引数で偏微分 -----
+-- (algebra/vector.seki の vec ベース)
+
+-- リスト要素の置換
+def listSetMD := \i v xs ->
+    if null xs then nil
+    else if i == 0 then cons v (tail xs)
+    else cons (head xs) (listSetMD (i - 1) v (tail xs))
+
+def listAtMD := \i xs ->
+    if i == 0 then head xs
+    else listAtMD (i - 1) (tail xs)
+
+-- ----- スカラー値多変数 f : List Real → Real の偏微分 ∂_i f -----
+def partialMD := \h f xs i ->
+    let xi = listAtMD i xs in
+    let xsPlus = listSetMD i (xi + h) xs in
+    let xsMinus = listSetMD i (xi - h) xs in
+    (f xsPlus - f xsMinus) / (2.0 * h)
+
+-- ----- 勾配 ∇f : List Real (j 番目要素は ∂f/∂x_j) -----
+def gradRecMD := \h f xs i n ->
+    if i >= n then nil
+    else cons (partialMD h f xs i) (gradRecMD h f xs (i + 1) n)
+
+def gradient := \h f xs -> gradRecMD h f xs 0 (length xs)
+
+-- ----- Jacobian J_f : List (List Real) (i,j) = ∂f_i/∂x_j -----
+-- f : List Real → List Real
+-- 各成分関数 f_i について勾配を計算し、行として並べる
+def componentFnMD := \f i ->
+    \xs -> listAtMD i (f xs)
+
+def jacRecMD := \h f xs i m n ->
+    if i >= m then nil
+    else
+        let fi = componentFnMD f i in
+        let grad_i = gradient h fi xs in
+        cons grad_i (jacRecMD h f xs (i + 1) m n)
+
+def jacobian := \h f xs ->
+    let m = length (f xs) in
+    let n = length xs in
+    jacRecMD h f xs 0 m n
+
+-- ----- Hessian H_f : List (List Real) — ∂²f/(∂x_i ∂x_j) -----
+-- f : List Real → Real
+-- 中心差分の中心差分: H[i][j] = (f(x+he_i+he_j) - f(x+he_i-he_j)
+--                                - f(x-he_i+he_j) + f(x-he_i-he_j)) / (4h²)
+
+def hessElem := \h f xs i j ->
+    if i == j then
+        let xi = listAtMD i xs in
+        let xp = listSetMD i (xi + h) xs in
+        let xm = listSetMD i (xi - h) xs in
+        ((f xp) - 2.0 * (f xs) + (f xm)) / (h * h)
+    else
+        let xi = listAtMD i xs in
+        let xj = listAtMD j xs in
+        let x_pp = listSetMD j (xj + h) (listSetMD i (xi + h) xs) in
+        let x_pm = listSetMD j (xj - h) (listSetMD i (xi + h) xs) in
+        let x_mp = listSetMD j (xj + h) (listSetMD i (xi - h) xs) in
+        let x_mm = listSetMD j (xj - h) (listSetMD i (xi - h) xs) in
+        ((f x_pp) - (f x_pm) - (f x_mp) + (f x_mm)) / (4.0 * h * h)
+
+def hessRowMD := \h f xs i j n ->
+    if j >= n then nil
+    else cons (hessElem h f xs i j) (hessRowMD h f xs i (j + 1) n)
+
+def hessRecMD := \h f xs i n ->
+    if i >= n then nil
+    else cons (hessRowMD h f xs i 0 n) (hessRecMD h f xs (i + 1) n)
+
+def hessian := \h f xs -> hessRecMD h f xs 0 (length xs)
+
+-- ----- ベクトル値関数の Fréchet 方向微分: DF(X)[Xdot] -----
+-- (F(X + h*Xdot) - F(X - h*Xdot)) / (2h)
+def frechetVec := \h F X Xdot ->
+    let scaled = smul h Xdot in
+    let X_plus = vadd X scaled in
+    let X_minus = vsub X scaled in
+    let Fp = F X_plus in
+    let Fm = F X_minus in
+    smul (1.0 / (2.0 * h)) (vsub Fp Fm)
+
+-- ----- 行列値関数の Fréchet 方向微分: DF(M)[Mdot] -----
+-- M, Mdot : Matrix (= List (List Real))
+def frechetMat := \h F M Mdot ->
+    let scaled = matSmul h Mdot in
+    let M_plus = matAdd M scaled in
+    let M_minus = matSub M scaled in
+    let Fp = F M_plus in
+    let Fm = F M_minus in
+    matSmul (1.0 / (2.0 * h)) (matSub Fp Fm)

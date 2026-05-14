@@ -1,0 +1,64 @@
+-- ===========================================================
+-- tests/seki/test_numeric_matrix_eq.seki — 行列方程式
+-- ===========================================================
+
+import "../../lib/numeric/matrix_eq.seki"
+
+def absRme := \(r : Real) -> if r < 0.0 then 0.0 - r else r
+
+-- ----- Kronecker 積: 単純例 -----
+-- [[1, 2]] ⊗ [[3, 4]] = [[3, 4, 6, 8]]
+def A11 := [[1.0, 2.0]]
+def B11 := [[3.0, 4.0]]
+theorem kron_simple
+  : matEq (kronecker A11 B11) [[3.0, 4.0, 6.0, 8.0]] == true
+  := by eval
+
+-- ----- vec / unvec の往復 -----
+-- 列スタック: vec [[1, 3], [2, 4]] == [1, 2, 3, 4] (列優先)
+def M22 := [[1.0, 3.0], [2.0, 4.0]]
+theorem vec_unvec_roundtrip
+  : matEq (unvec (vec M22) 2) M22 == true
+  := by eval
+
+-- ----- Lyapunov: 対角 A = diag(-1, -2), Q = I の解析解 P = diag(0.5, 0.25) -----
+def Adiag := [[0.0 - 1.0, 0.0], [0.0, 0.0 - 2.0]]
+def Q_I := identityR 2
+def P_lyap := lyapunovSolve Adiag Q_I
+
+theorem lyap_p00
+  : absRme (matAtR 0 0 P_lyap - 0.5) < 0.000001
+  := by eval
+
+theorem lyap_p11
+  : absRme (matAtR 1 1 P_lyap - 0.25) < 0.000001
+  := by eval
+
+-- ----- Sylvester: 対角 A = diag(2, 3), B = diag(1, 2), C = diag(3, 5) -----
+-- 各要素は X[i,i] = C[i,i] / (A[i,i] + B[i,i]) なので X = I
+def Asyl := [[2.0, 0.0], [0.0, 3.0]]
+def Bsyl := [[1.0, 0.0], [0.0, 2.0]]
+def Csyl := [[3.0, 0.0], [0.0, 5.0]]
+def X_syl := sylvesterSolve Asyl Bsyl Csyl
+
+theorem syl_x00
+  : absRme (matAtR 0 0 X_syl - 1.0) < 0.000001
+  := by eval
+
+theorem syl_x11
+  : absRme (matAtR 1 1 X_syl - 1.0) < 0.000001
+  := by eval
+
+-- ----- CARE: A=[[-1, 0], [0, -2]], B=I, Q=I, R=I -----
+-- p11 = -1 + sqrt(2) ≈ 0.414
+-- p22 = -2 + sqrt(5) ≈ 0.236
+def A_care := [[0.0 - 1.0, 0.0], [0.0, 0.0 - 2.0]]
+def P_care := careSolve A_care (identityR 2) (identityR 2) (identityR 2)
+
+theorem care_p00
+  : absRme (matAtR 0 0 P_care - 0.41421356) < 0.0001
+  := by eval
+
+theorem care_p11
+  : absRme (matAtR 1 1 P_care - 0.23606798) < 0.0001
+  := by eval

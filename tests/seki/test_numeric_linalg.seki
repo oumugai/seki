@@ -1,0 +1,61 @@
+-- ===========================================================
+-- tests/seki/test_numeric_linalg.seki — 一般 n×n 線形代数
+-- ===========================================================
+
+import "../../lib/numeric/linalg.seki"
+
+-- ----- 単位行列の逆行列は単位行列 -----
+def i3 := identityR 3
+theorem inv_of_identity
+  : matEq (matInverse i3) i3 == true
+  := by eval
+
+-- ----- 対角行列の逆行列 -----
+-- diag(2, 4) の逆 = diag(0.5, 0.25)
+def diag2 := [[2.0, 0.0], [0.0, 4.0]]
+def inv2 := matInverse diag2
+theorem inv_of_diag_00
+  : matAtR 0 0 inv2 == 0.5
+  := by eval
+theorem inv_of_diag_11
+  : matAtR 1 1 inv2 == 0.25
+  := by eval
+
+-- ----- Cholesky 分解の正当性: L * L^T == A -----
+def A := [[4.0, 12.0, -16.0], [12.0, 37.0, -43.0], [-16.0, -43.0, 98.0]]
+def L := cholesky A
+def LT := matTranspose L
+theorem cholesky_factorizes
+  : matEq (matMul L LT) A == true
+  := by eval
+
+-- ----- QR アルゴリズムによる固有値: 対称三重対角の例 -----
+-- m = [[2, 1, 0], [1, 3, 1], [0, 1, 2]] の固有値は {1, 2, 4}
+def trid := [[2.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]]
+def eig_trid := eigenvaluesGen trid 100
+
+-- 各固有値の近似精度 (0.001 以内)
+def absRtest := \(r : Real) -> if r < 0.0 then 0.0 - r else r
+
+theorem eig_close_to_4
+  : absRtest ((nth 0 eig_trid) - 4.0) < 0.001
+  := by eval
+
+theorem eig_close_to_2
+  : absRtest ((nth 1 eig_trid) - 2.0) < 0.001
+  := by eval
+
+theorem eig_close_to_1
+  : absRtest ((nth 2 eig_trid) - 1.0) < 0.001
+  := by eval
+
+-- ----- 行列指数: e^0 = I -----
+def Z := zeroMatR 2 2
+theorem matExp_zero_is_identity
+  : matEq (matExp Z 5) (identityR 2) == true
+  := by eval
+
+-- ----- Frobenius ノルム: |I_2|_F = sqrt(2) -----
+theorem frob_identity
+  : absRtest (matFrobeniusNorm (identityR 2) - 1.4142135623730951) < 0.0000001
+  := by eval

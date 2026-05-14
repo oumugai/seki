@@ -1,0 +1,81 @@
+-- ===========================================================
+-- lib/probability/montecarlo.seki — モンテカルロ法
+--
+-- 乱数を使った期待値・積分・分散推定。確率測度論の厳密な扱いは
+-- seki の射程外だが、N 個のサンプルに対する経験量はモンテカルロで
+-- 計算できる。
+--
+-- 公開する名前:
+--   def mcSampleAvg sampler n              — sampler N 回呼んで平均
+--   def mcExpectation sampler phi n        — E[φ(X)] のモンテカルロ推定
+--   def mcVariance sampler n               — Var[X] の不偏推定
+--   def mcIntegrate f lo hi n              — ∫ f(x) dx の MC 積分 (一様サンプリング)
+--   def gaussianSample mu sigma            — Box-Muller で N(μ, σ²) サンプル
+--   def lawOfLargeNumbersErr sampler n     — |empirical mean - μ_true| の経験テスト
+-- ===========================================================
+
+-- ----- N 回呼び出した sampler の値の和 -----
+def mcSumRec := \sampler n acc ->
+    if n <= 0 then acc
+    else
+        let x = sampler 0 in
+        mcSumRec sampler (n - 1) (acc + x)
+
+def mcSampleAvg := \sampler (n : Int) ->
+    let s = mcSumRec sampler n 0.0 in
+    s / (intToReal n)
+
+-- ----- E[φ(X)] のモンテカルロ推定 -----
+def mcExpSumRec := \sampler phi n acc ->
+    if n <= 0 then acc
+    else
+        let x = sampler 0 in
+        mcExpSumRec sampler phi (n - 1) (acc + (phi x))
+
+def mcExpectation := \sampler phi (n : Int) ->
+    let s = mcExpSumRec sampler phi n 0.0 in
+    s / (intToReal n)
+
+-- ----- Var[X] の不偏推定 (s² = Σ(x_i - x̄)² / (N - 1)) -----
+def mcSqDevSumRec := \sampler mean n acc ->
+    if n <= 0 then acc
+    else
+        let x = sampler 0 in
+        let d = x - mean in
+        mcSqDevSumRec sampler mean (n - 1) (acc + d * d)
+
+def mcVariance := \sampler (n : Int) ->
+    let mu = mcSampleAvg sampler n in
+    let ssq = mcSqDevSumRec sampler mu n 0.0 in
+    ssq / (intToReal (n - 1))
+
+-- ----- モンテカルロ積分 ∫_lo^hi f(x) dx -----
+-- 一様サンプリング: ((hi - lo) / N) * Σ f(x_i), x_i ~ U(lo, hi)
+def mcIntSumRec := \f lo hi n acc ->
+    if n <= 0 then acc
+    else
+        let u = randomFloat () in
+        let x = lo + u * (hi - lo) in
+        mcIntSumRec f lo hi (n - 1) (acc + (f x))
+
+def mcIntegrate := \f (lo : Real) (hi : Real) (n : Int) ->
+    let s = mcIntSumRec f lo hi n 0.0 in
+    (hi - lo) * s / (intToReal n)
+
+-- ----- Box-Muller 法による正規分布サンプル -----
+-- u1, u2 ~ U(0, 1) ⇒ Z = √(-2 ln u1) * cos(2π u2) ~ N(0, 1)
+def boxMullerStd := \dummy ->
+    let u1 = randomFloat () in
+    let u2 = randomFloat () in
+    let safeU1 = if u1 < 0.0000000001 then 0.0000000001 else u1 in
+    sqrt (0.0 - 2.0 * (ln safeU1)) * cos (6.283185307179586 * u2)
+
+def gaussianSample := \(mu : Real) (sigma : Real) ->
+    \dummy -> mu + sigma * (boxMullerStd dummy)
+
+-- ----- 大数の法則の経験テスト -----
+-- N 個のサンプル平均と真の平均 mu_true の差を返す
+def lawOfLargeNumbersErr := \sampler (mu_true : Real) (n : Int) ->
+    let empirical = mcSampleAvg sampler n in
+    let d = empirical - mu_true in
+    if d < 0.0 then 0.0 - d else d

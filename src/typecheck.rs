@@ -148,7 +148,21 @@ pub fn check_shape(e: &Expr, env: &ShapeEnv) -> SekiResult<Shape> {
         Expr::Lambda { params, body } => {
             let mut env2 = env.clone();
             for p in params {
-                env2 = env2.extend(p.name.clone(), Shape::Unknown);
+                // Lift simple annotations `(x : Real)` etc. into a usable
+                // shape so the body's if-branches can unify on the right
+                // arithmetic type.  Unrecognised annotations stay `Unknown`.
+                let sh = match &p.ty {
+                    Some(Expr::Var { name: s, .. }) => match s.as_str() {
+                        "Int" => Shape::Int,
+                        "Nat" => Shape::Int,
+                        "Real" => Shape::Real,
+                        "Bool" | "Prop" => Shape::Bool,
+                        "String" => Shape::Str,
+                        _ => Shape::Unknown,
+                    },
+                    _ => Shape::Unknown,
+                };
+                env2 = env2.extend(p.name.clone(), sh);
             }
             check_shape(body, &env2)?;
             Ok(Shape::Fn)
@@ -262,6 +276,12 @@ pub fn check_shape(e: &Expr, env: &ShapeEnv) -> SekiResult<Shape> {
         Expr::Arrow(a, b) => {
             let ash = check_shape(a, env)?;
             let bsh = check_shape(b, env)?;
+            // Allow Bool → Bool as **propositional implication** (the user
+            // wrote `P -> Q` where both are Bool-valued).  Otherwise both
+            // sides must be sets — the usual function-type interpretation.
+            if matches!(ash, Shape::Bool) && matches!(bsh, Shape::Bool) {
+                return Ok(Shape::Bool);
+            }
             needs_compat(&ash, Shape::Set, "arrow lhs (must be a set/type)")?;
             needs_compat(&bsh, Shape::Set, "arrow rhs (must be a set/type)")?;
             Ok(Shape::Set)
