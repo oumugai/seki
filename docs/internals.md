@@ -764,6 +764,10 @@ depth が実際の参照深さより小さいときに未解決の `if` を握�
 `SEKI_STRICT_MATCH` 環境変数でオプトイン (既存コードは `lib/`/`examples/`/
 `tests/`/`sample/` 全体で非網羅 match が0件だったため、デフォルト動作
 (警告のみ) を壊さずに追加できた)。
+**P3.6** LSP `textDocument/hover`: 組込関数メタデータ + トップレベル
+`def`/`theorem`/`axiom` の表示。テキストベース (非スコープ対応) の
+最小実装 (`tests/lsp.rs` に実プロセスを起動して JSON-RPC で駆動する
+統合テスト5件を追加)。
 **既に対応済み (旧「実装が比較的容易なもの」からの卒業)**:
 `forall (x y) in S, P` の複数変数糖衣、パターンマッチ網羅性の**警告 →
 オプトインのエラー化**、`by simp` の対称規則
@@ -787,7 +791,11 @@ depth が実際の参照深さより小さいときに未解決の `if` を握�
 - **線形不等式の決定 (`by linarith`)**: 既に単変数版は実装済み (`src/linarith.rs`)。複数変数の Fourier-Motzkin 消去は未対応 — `forall n in Nat, forall m in Nat, n + m >= 0` のような多変数の定数境界はまだ一発で通らない。
 - **依存パラメトリック ADT の専用構文**: `data Vec : Nat -> Set where ...` 構文を加え、`{xs | length xs == n}` を自動生成。
 - **依存ペア型 `Σ (x : A), B(x)`**: refinement で書ける現状を first-class 構文に。
-- **LSP サーバ**: `src/lsp_main.rs` に手書き JSON-RPC framing + diagnostics 配信 (`textDocument/publishDiagnostics`) は実装済み。hover / completion / goto-definition / 型表示は未対応 (`tower-lsp` への移行はしていない — 依存ゼロ方針のため手書きのまま)。
+- **LSP サーバ**: `src/lsp_main.rs` に手書き JSON-RPC framing + diagnostics 配信 (`textDocument/publishDiagnostics`) + 簡易 `textDocument/hover` (2026-08 追加) は実装済み。
+  hover はカーソル位置の識別子をテキストベースで抜き出し (`word_at`)、組込関数カタログ (`builtin_meta`) かドキュメントのトップレベル
+  `def`/`theorem`/`axiom` 名と照合するだけの **非スコープ対応**実装 — lambda パラメータ等がたまたま同名のトップレベル `def` と被ると、
+  そちらの情報を出してしまう既知の限界がある (本格的なスコープ解決には束縛変数を追跡する AST 走査が必要)。
+  completion / goto-definition / 型表示は未対応 (`tower-lsp` への移行はしていない — 依存ゼロ方針のため手書きのまま)。
 - **REPL の強化**: `rustyline` で行編集・履歴・自動補完 (現状は素の `read_line`)。
 
 ### 大きな労力 (本格的な定理証明への道)
