@@ -27,6 +27,7 @@ if c then a else b
 match e with | Some x -> ... | None -> ... | _ -> ...
 forall x in S, body         -- forall (x y) in S, body で多変数 (共通ドメイン)
 exists x in S, body
+sigma (x : A), B            -- 依存ペア型 Σ (B は x を参照可能; 非依存なら A times B と同義)
 {x in S | P}                 -- 内包集合
 ```
 

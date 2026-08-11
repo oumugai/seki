@@ -36,6 +36,11 @@ seki は **pre-1.0** です。これは次を意味します:
   ドキュメントのトップレベル `def`/`theorem`/`axiom` 名と照合して表示/ジャンプ
   する (非スコープ対応の最小実装)。`tests/lsp.rs` に実プロセスを JSON-RPC で
   駆動する統合テストを8件追加。
+- 依存ペア型 (Σ) `sigma (x : A), B(x)`: `DepArrow` (Π) と対をなす新しい
+  `Expr::DepPair` / `SetVal::DepPair`。`(a, b)` のメンバーシップ判定は
+  `a in A and b in B[x:=a]` で、`DepArrow` と異なりサンプリング不要 (候補の
+  pair を直接持っている) — 完全に健全。`B` が `x` を参照しなければ
+  `A times B` と同義。
 
 ### Changed
 

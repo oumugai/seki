@@ -617,6 +617,7 @@ impl<'a> Parser<'a> {
             Tok::KwIf => return self.parse_if(),
             Tok::KwForall => return self.parse_forall(),
             Tok::KwExists => return self.parse_exists(),
+            Tok::KwSigma => return self.parse_sigma(),
             Tok::KwMatch => return self.parse_match(),
             Tok::KwFor => return self.parse_for(),
             _ => {}
@@ -1009,6 +1010,28 @@ impl<'a> Parser<'a> {
         self.expect(&Tok::Comma, "',' after exists domain")?;
         let body = self.parse_expr()?;
         Ok(build_nested_quantifier(false, &vars, domain, body))
+    }
+
+    /// Dependent pair (Σ) type: `sigma (x : A), B(x)` — the set of 2-tuples
+    /// `(a, b)` with `a in A` and `b in B[x:=a]`. Uses the same `(x : A)`
+    /// binder shape as `DepArrow`'s `(x : A) -> B` (its "Π" counterpart),
+    /// not the `x in A,` shape used by `forall`/`exists` — a dependent
+    /// pair's first component is a *value* the second component's type
+    /// depends on, exactly like a dependent function's argument.
+    fn parse_sigma(&mut self) -> SekiResult<Expr> {
+        self.expect(&Tok::KwSigma, "sigma")?;
+        self.expect(&Tok::LParen, "'(' after sigma")?;
+        let binder = self.eat_ident("sigma binder")?;
+        self.expect(&Tok::Colon, "':' in sigma binder")?;
+        let from = self.parse_or()?;
+        self.expect(&Tok::RParen, "')' to close sigma binder")?;
+        self.expect(&Tok::Comma, "',' after sigma binder")?;
+        let to = self.parse_expr()?;
+        Ok(Expr::DepPair {
+            binder,
+            from: Box::new(from),
+            to: Box::new(to),
+        })
     }
 
     /// Parse one or more variable names for a quantifier:

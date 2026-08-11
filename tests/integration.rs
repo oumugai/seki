@@ -1048,6 +1048,41 @@ fn dependent_arrow_rejects_invalid_function() {
 }
 
 #[test]
+fn sigma_dependent_pair_membership_check() {
+    // `sigma (n : A), B(n)` — a 2-tuple `(a, b)` is a member iff `a in A`
+    // and `b in B[n:=a]`. Unlike DepArrow this is exact (no sampling),
+    // since membership testing has the concrete pair in hand.
+    let g = run(r"
+        def Pos := {x in Int | x > 0}
+        def SmallEven := \n -> {y in Int | y >= 0 and y < n and y mod 2 == 0}
+        def DepPairSet := sigma (n : Pos), SmallEven n
+
+        theorem member_ok : ((4, 2) in DepPairSet) == true := by eval
+        theorem member_bad_snd : ((4, 3) in DepPairSet) == false := by eval
+        theorem member_bad_fst : ((0 - 1, 0) in DepPairSet) == false := by eval
+        theorem member_not_a_pair : (5 in DepPairSet) == false := by eval
+    ");
+    for t in &["member_ok", "member_bad_snd", "member_bad_fst", "member_not_a_pair"] {
+        assert!(g.theorems.contains_key(*t), "{} not proven", t);
+    }
+}
+
+#[test]
+fn sigma_non_dependent_case_behaves_like_times() {
+    // When `B` doesn't reference the binder, `sigma (x : A), B` is
+    // semantically the plain product `A times B`.
+    let g = run(r"
+        def NonDep := sigma (x : Int), Bool
+        theorem t1 : ((3, true) in NonDep) == true := by eval
+        theorem t2 : ((3, 3) in NonDep) == false := by eval
+        theorem t3 : ((1, 2, 3) in NonDep) == false := by eval
+    ");
+    for t in &["t1", "t2", "t3"] {
+        assert!(g.theorems.contains_key(*t), "{} not proven", t);
+    }
+}
+
+#[test]
 fn type_inference_records_arrow_for_annotated_lambda() {
     let mut g = make_prelude();
     let env = Env::new();

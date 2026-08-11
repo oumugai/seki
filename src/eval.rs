@@ -224,6 +224,17 @@ impl<'a> EvalCtx<'a> {
                 })))
             }
 
+            Expr::DepPair { binder, from, to } => {
+                let av = self.eval(from, env)?;
+                let aset = expect_set(av, "dep pair domain")?;
+                Ok(Value::Set(Arc::new(SetVal::DepPair {
+                    binder: binder.clone(),
+                    from: aset,
+                    to: (**to).clone(),
+                    env: env.clone(),
+                })))
+            }
+
             Expr::Tuple(items) => {
                 let mut vs = Vec::with_capacity(items.len());
                 for it in items {
@@ -653,6 +664,28 @@ impl<'a> EvalCtx<'a> {
                 }
                 Ok(true)
             }
+            SetVal::DepPair { binder, from, to, env: cap_env } => {
+                // Membership in a dependent pair: `x` must be a 2-tuple
+                // `(a, b)` with `a in from` and `b in to[binder := a]`.
+                // Unlike `DepArrow` (which can only *sample* a function's
+                // behavior over its infinite domain), this is exact — `a`
+                // and `b` are concrete values already in hand, so no
+                // approximation is needed.
+                let parts = match x {
+                    Value::Tuple(xs) if xs.len() == 2 => xs,
+                    _ => return Ok(false),
+                };
+                if !self.member(&parts[0], from, env)? {
+                    return Ok(false);
+                }
+                let bound_env = cap_env.extend(binder.clone(), parts[0].clone());
+                let to_val = self.eval(to, &bound_env)?;
+                let to_set = match to_val {
+                    Value::Set(s) => s,
+                    _ => return Ok(false),
+                };
+                self.member(&parts[1], &to_set, env)
+            }
             SetVal::Product(parts) => {
                 let xs = match x {
                     Value::Tuple(xs) => xs,
@@ -933,6 +966,9 @@ pub fn enumerate_set(s: &SetVal, ctx: &EvalCtx, env: &Env) -> SekiResult<Vec<Val
         SetVal::Arrow { .. } | SetVal::DepArrow { .. } => Err(SekiError::Runtime(
             "cannot enumerate a function type".into(),
         )),
+        SetVal::DepPair { .. } => Err(SekiError::Runtime(
+            "cannot enumerate a dependent pair (sigma) type".into(),
+        )),
         SetVal::Product(parts) => {
             // Cartesian product of enumerable sets.  Bail out if any part is
             // not enumerable (e.g. function type) — but Atomic infinite sets
@@ -1087,6 +1123,10 @@ fn set_is_definitely_nonempty(s: &SetVal) -> bool {
         // (constant functions exist when codomain is non-empty), but we
         // can't decide that without a non-empty codomain check.  Conservative.
         SetVal::DepArrow { .. } => false,
+        // Same reasoning as `DepArrow`: non-empty iff `from` is non-empty
+        // and `to[binder:=a]` is non-empty for some `a`, which needs `to`
+        // evaluated at a concrete `a` to decide. Conservative.
+        SetVal::DepPair { .. } => false,
         // Comprehensions are decidable only by inspection.
         SetVal::Comp { .. } => false,
     }

@@ -768,6 +768,18 @@ depth が実際の参照深さより小さいときに未解決の `if` を握�
 メタデータ + トップレベル `def`/`theorem`/`axiom` の表示・ジャンプ。
 テキストベース (非スコープ対応) の最小実装 (`tests/lsp.rs` に実プロセスを
 起動して JSON-RPC で駆動する統合テスト8件を追加)。
+**P3.7** 依存ペア型 (Σ) `sigma (x : A), B(x)`: `DepArrow` (Π) と対をなす
+新しい `Expr::DepPair` / `SetVal::DepPair`。当初は既存の refinement への
+純粋な parser 脱糖で済ませようとしたが、`Universe`/`Set` が「値全体の
+集合」ではなく「集合全体の集合」(型理論的 universe) を意味することが
+判明し断念 — `DepArrow` と同規模の新しい実行時セマンティクスとして実装
+(ast.rs の Display/alpha_equiv/subst、value.rs の SetVal variant、eval.rs
+のメンバーシップ判定・enumerate 拒否・非空判定、typecheck.rs の shape
+推論、termination.rs/prover.rs の AST 走査ヘルパ群、計12箇所)。
+メンバーシップ判定は `DepArrow` と異なり **サンプリング不要で完全に健全**
+(候補の pair `(a, b)` を直接持っているため)。`tests/integration.rs` に
+`sigma_dependent_pair_membership_check` / `sigma_non_dependent_case_behaves_like_times`
+を追加。
 **既に対応済み (旧「実装が比較的容易なもの」からの卒業)**:
 `forall (x y) in S, P` の複数変数糖衣、パターンマッチ網羅性の**警告 →
 オプトインのエラー化**、`by simp` の対称規則
@@ -790,7 +802,6 @@ depth が実際の参照深さより小さいときに未解決の `if` を握�
 - **可変除数の div / mod**: `==` かつ剰余0のケースは対応済み — `/` は `ratpoly_equal` の交差乗算 (Div をオペーク項に潰さず有理関数として比較、`(a*n)/n == a` 等)、`mod` は `Polynomial::exact_div_by_var` (`(a*n) mod n == 0` — 分子の全項が変数 `v` を factor として持てば健全。符号無関係、2026-08 追加)。未対応のまま残るのは **不等式** (`<`,`<=`,`>`,`>=`) の可変除数 (符号での場合分けが必要) と、剰余が非零 (`mod v == R`, `R != 0`) の一般ケース。
 - **線形不等式の決定 (`by linarith`)**: 既に単変数版は実装済み (`src/linarith.rs`)。複数変数の Fourier-Motzkin 消去は未対応 — `forall n in Nat, forall m in Nat, n + m >= 0` のような多変数の定数境界はまだ一発で通らない。
 - **依存パラメトリック ADT の専用構文**: `data Vec : Nat -> Set where ...` 構文を加え、`{xs | length xs == n}` を自動生成。
-- **依存ペア型 `Σ (x : A), B(x)`**: refinement で書ける現状を first-class 構文に。
 - **LSP サーバ**: `src/lsp_main.rs` に手書き JSON-RPC framing + diagnostics 配信 (`textDocument/publishDiagnostics`) + 簡易 `textDocument/hover` /
   `textDocument/definition` (2026-08 追加) は実装済み。両方ともカーソル位置の識別子をテキストベースで抜き出し (`word_at`)、
   組込関数カタログ (`builtin_meta`) かドキュメントのトップレベル `def`/`theorem`/`axiom` 名と照合するだけの

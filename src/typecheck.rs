@@ -130,7 +130,8 @@ pub fn infer_shape(e: &Expr, env: &ShapeEnv) -> Shape {
         Expr::SetEnum(_)
         | Expr::SetComp { .. }
         | Expr::Arrow(_, _)
-        | Expr::DepArrow { .. } => Shape::Set,
+        | Expr::DepArrow { .. }
+        | Expr::DepPair { .. } => Shape::Set,
         Expr::Tuple(_) => Shape::Tuple,
         Expr::List(_) => Shape::Tuple,                // desugared to nested cons / Tuple
         Expr::Forall { .. } | Expr::Exists { .. } => Shape::Bool,
@@ -293,6 +294,14 @@ pub fn check_shape(e: &Expr, env: &ShapeEnv) -> SekiResult<Shape> {
             let env2 = env.extend(binder.clone(), Shape::Unknown);
             let bsh = check_shape(to, &env2)?;
             needs_compat(&bsh, Shape::Set, "dep arrow codomain (must be a set/type)")?;
+            Ok(Shape::Set)
+        }
+        Expr::DepPair { binder, from, to } => {
+            let ash = check_shape(from, env)?;
+            needs_compat(&ash, Shape::Set, "sigma domain (must be a set/type)")?;
+            let env2 = env.extend(binder.clone(), Shape::Unknown);
+            let bsh = check_shape(to, &env2)?;
+            needs_compat(&bsh, Shape::Set, "sigma codomain (must be a set/type)")?;
             Ok(Shape::Set)
         }
         Expr::Forall { var, domain, body } | Expr::Exists { var, domain, body } => {
@@ -557,7 +566,11 @@ pub fn infer_type(e: &Expr, env: &TypeEnv) -> Option<Expr> {
             UnOp::Neg => infer_type(x, env),
             UnOp::Not => Some(Expr::Var { name: "Bool".into(), line: 0, col: 0 }),
         },
-        Expr::SetEnum(_) | Expr::SetComp { .. } | Expr::Arrow(_, _) | Expr::DepArrow { .. } => {
+        Expr::SetEnum(_)
+        | Expr::SetComp { .. }
+        | Expr::Arrow(_, _)
+        | Expr::DepArrow { .. }
+        | Expr::DepPair { .. } => {
             Some(Expr::Var { name: "Set".into(), line: 0, col: 0 })
         }
         Expr::Tuple(_) | Expr::List(_) => None, // anonymous; no good type

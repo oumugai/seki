@@ -133,6 +133,16 @@ pub enum Expr {
         from: Box<Expr>,
         to: Box<Expr>,
     },
+    /// **dependent pair** (Σ) type: `sigma (x : A), B(x)`. The set of
+    /// 2-tuples `(a, b)` with `a in A` and `b in B[x:=a]`. When `B` does
+    /// not reference `x`, this is semantically `A times B` — the
+    /// non-dependent product. Mirrors `DepArrow` (its "Π" counterpart):
+    /// same binder/from/to shape, same sampling-based non-enumerability.
+    DepPair {
+        binder: String,
+        from: Box<Expr>,
+        to: Box<Expr>,
+    },
 
     /// `(a, b, c)` tuple value (length ≥ 2; `(e)` is just grouping)
     Tuple(Vec<Expr>),
@@ -431,6 +441,9 @@ impl fmt::Display for Expr {
             Expr::DepArrow { binder, from, to } => {
                 write!(f, "(({} : {}) -> {})", binder, from, to)
             }
+            Expr::DepPair { binder, from, to } => {
+                write!(f, "(sigma ({} : {}), {})", binder, from, to)
+            }
             Expr::Forall { var, domain, body } => {
                 write!(f, "(forall {} in {}, {})", var, domain, body)
             }
@@ -497,6 +510,9 @@ impl PartialEq for Expr {
             (Arrow(a1, a2), Arrow(b1, b2)) => a1 == b1 && a2 == b2,
             (DepArrow { binder: ba, from: fa, to: ta },
              DepArrow { binder: bb, from: fb, to: tb }) =>
+                ba == bb && fa == fb && ta == tb,
+            (DepPair { binder: ba, from: fa, to: ta },
+             DepPair { binder: bb, from: fb, to: tb }) =>
                 ba == bb && fa == fb && ta == tb,
             (Tuple(a), Tuple(b)) => a == b,
             (List(a), List(b)) => a == b,
@@ -601,6 +617,21 @@ pub fn subst(e: &Expr, var: &str, value: &Expr) -> Expr {
                 }
             } else {
                 DepArrow {
+                    binder: binder.clone(),
+                    from: Box::new(subst(from, var, value)),
+                    to: Box::new(subst(to, var, value)),
+                }
+            }
+        }
+        DepPair { binder, from, to } => {
+            if binder == var {
+                DepPair {
+                    binder: binder.clone(),
+                    from: Box::new(subst(from, var, value)),
+                    to: to.clone(),
+                }
+            } else {
+                DepPair {
                     binder: binder.clone(),
                     from: Box::new(subst(from, var, value)),
                     to: Box::new(subst(to, var, value)),

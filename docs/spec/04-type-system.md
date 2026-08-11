@@ -16,7 +16,8 @@ seki では型は集合と同一視される。
 | 列挙     | `{1, 2, 3}` | 有限集合 |
 | 内包     | `{x in S \| P x}` | refinement type |
 | 関数型   | `A -> B` | 非依存関数 |
-| 依存型   | `(x : A) -> B(x)` | dependent function |
+| 依存型   | `(x : A) -> B(x)` | dependent function (Π) |
+| 依存ペア | `sigma (x : A), B(x)` | dependent pair (Σ)。`B` が `x` を参照しなければ `A times B` と同義 |
 | 直積     | `A times B` | tuple type |
 | List     | `List T` | T 上の有限リストの集合 |
 | Tree     | `Tree T` | T 上の二分木の集合 |
@@ -152,7 +153,8 @@ IO : Set -> Set
 |---|---|
 | Atomic, Enum, 列挙集合 | ✅ |
 | 関数型 (Arrow) | 🟡 sample-based |
-| 依存型 (DepArrow) | 🟡 sample-based |
+| 依存型 (DepArrow, Π) | 🟡 sample-based |
+| 依存ペア (DepPair, Σ) | ✅ **exact** — 候補の pair `(a, b)` を直接持っているので、関数の全域サンプリングと違い近似不要 |
 | Refinement | 🟡 sample-based、線形整数で linarith 強化 |
 | Product (Tuple) | ✅ |
 | ListOf, TreeOf | 🟡 sample 一定数 |

@@ -237,12 +237,12 @@ seki/
 - **可変除数の mod 単項キャンセル**: `<expr> mod v == 0` (`v` が変数) を、`v` が分子の全項に literal factor として現れる場合に健全に証明 (`Polynomial::exact_div_by_var`)。符号に関係なく成立 (2026-08)
 - **`--strict-match` / `SEKI_STRICT_MATCH`**: パターンマッチ網羅性チェックを警告からコンパイル時エラーへオプトインで昇格 (既存コードへの影響ゼロを確認済み — `lib/`/`examples/`/`tests/`/`sample/` 全体で非網羅 match は現状0件) (2026-08)
 - **LSP `textDocument/hover` / `textDocument/definition`**: 組込関数はメタデータ (シグネチャ/副作用/性質/doc) を、トップレベル `def`/`theorem`/`axiom` はその定義/命題を表示 (hover)、または宣言位置へジャンプ (definition、組込関数はジャンプ先の seki ソースが無いので null)。カーソル位置の識別子をテキストベースで抽出する簡易実装 (スコープ解決はしない — 詳細は `src/lsp_main.rs`) (2026-08)
+- **依存ペア型 (Σ) `sigma (x : A), B(x)`**: `DepArrow` (Π) と対をなす新しい `Expr`/`SetVal` variant。`(a, b)` のメンバーシップは `a in A and b in B[x:=a]` で判定 — 候補の pair を直接持っているので `DepArrow` のようなサンプリング近似は不要で完全に健全。`B` が `x` を参照しなければ `A times B` と同義 (2026-08)
 
 主要な未対応:
 
 - 依存型の完全検査 (現状はサンプリングのみ — 任意の引数で必ず正しい保証はない)
 - 依存パラメトリック ADT の専用構文 (`data Vec : Nat -> Set where ...`) — refinement + 既存 ADT で代用可
-- 依存ペア型 `Σ (x : A), B(x)` の専用構文 (refinement で代用可)
 - 3 次以上の不等式判定 (2次形式の PSD 判定 (`quadratic_psd`) と偶数次かつ係数非負な単項式の和は扱えるが、一般の3次以上は未対応)
 - 可変除数の **不等式** (`<`, `<=`, `>`, `>=`) と、剰余が0以外になる **mod** (`<expr> mod v == R` で `R != 0`) — `==` かつ剰余0の場合 (`(a*n)/n == a`、`(a*n) mod n == 0` 等の単項キャンセル) は既に健全に対応済み (`ratpoly_equal` / `exact_div_by_var`)
 - 整列性原理 (well-ordering) の一般形

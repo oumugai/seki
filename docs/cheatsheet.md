@@ -76,6 +76,7 @@ exists (x y) in S, body
 {x in S | P}               -- 内包集合
 A -> B                     -- 関数型 (右結合)
 (x : A) -> B               -- 依存関数型 (B は x を参照可能)
+sigma (x : A), B            -- 依存ペア型 Σ (B は x を参照可能; 非依存なら A times B と同義)
 A times B times C          -- 直積集合
 ```
 

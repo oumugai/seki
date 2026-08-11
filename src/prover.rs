@@ -130,6 +130,11 @@ fn unfold_calls(
             from: Box::new(unfold_calls(from, name, params, body)),
             to: Box::new(unfold_calls(to, name, params, body)),
         },
+        DepPair { binder, from, to } => DepPair {
+            binder: binder.clone(),
+            from: Box::new(unfold_calls(from, name, params, body)),
+            to: Box::new(unfold_calls(to, name, params, body)),
+        },
         Forall { var, domain, body: fb } => Forall {
             var: var.clone(),
             domain: Box::new(unfold_calls(domain, name, params, body)),
@@ -2250,7 +2255,7 @@ fn collect_free_var_names(e: &Expr, out: &mut std::collections::BTreeSet<String>
             collect_free_var_names(a, out);
             collect_free_var_names(b, out);
         }
-        DepArrow { from, to, .. } => {
+        DepArrow { from, to, .. } | DepPair { from, to, .. } => {
             collect_free_var_names(from, out);
             collect_free_var_names(to, out);
         }
@@ -2347,7 +2352,7 @@ pub fn collect_idents(e: &Expr, out: &mut std::collections::HashSet<String>) {
             collect_idents(a, out);
             collect_idents(b, out);
         }
-        DepArrow { from, to, .. } => {
+        DepArrow { from, to, .. } | DepPair { from, to, .. } => {
             collect_idents(from, out);
             collect_idents(to, out);
         }
@@ -2822,6 +2827,11 @@ fn simp_rewrite(e: &Expr, rules: &[SimpRule]) -> Expr {
             from: Box::new(simp_rewrite(from, rules)),
             to: Box::new(simp_rewrite(to, rules)),
         },
+        DepPair { binder, from, to } => DepPair {
+            binder: binder.clone(),
+            from: Box::new(simp_rewrite(from, rules)),
+            to: Box::new(simp_rewrite(to, rules)),
+        },
         Forall { var, domain, body } => Forall {
             var: var.clone(),
             domain: Box::new(simp_rewrite(domain, rules)),
@@ -3090,6 +3100,11 @@ fn canonicalize(e: &Expr) -> Expr {
             Box::new(canonicalize(b)),
         ),
         DepArrow { binder, from, to } => DepArrow {
+            binder: binder.clone(),
+            from: Box::new(canonicalize(from)),
+            to: Box::new(canonicalize(to)),
+        },
+        DepPair { binder, from, to } => DepPair {
             binder: binder.clone(),
             from: Box::new(canonicalize(from)),
             to: Box::new(canonicalize(to)),

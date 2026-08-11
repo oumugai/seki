@@ -181,6 +181,15 @@ pub enum SetVal {
         to: Expr,
         env: Env,
     },
+    /// Dependent pair (Σ) type: `sigma (x : A), B(x)`. Membership of a
+    /// 2-tuple `(a, b)` requires `a in A` and `b in B[x:=a]`. Mirrors
+    /// `DepArrow` — same binder/env-capturing shape, "Σ" to its "Π".
+    DepPair {
+        binder: String,
+        from: Arc<SetVal>,
+        to: Expr,
+        env: Env,
+    },
     /// Cartesian product:  A times B,  A times B times C, ...
     /// A tuple `(a_1, ..., a_n)` belongs to the product iff each `a_i in T_i`.
     Product(Vec<Arc<SetVal>>),
@@ -346,6 +355,9 @@ impl fmt::Display for SetVal {
             SetVal::Arrow { from, to } => write!(f, "({} -> {})", from, to),
             SetVal::DepArrow { binder, from, to, .. } => {
                 write!(f, "(({} : {}) -> {})", binder, from, to)
+            }
+            SetVal::DepPair { binder, from, to, .. } => {
+                write!(f, "(sigma ({} : {}), {})", binder, from, to)
             }
             SetVal::Product(parts) => {
                 write!(f, "(")?;

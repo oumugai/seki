@@ -162,7 +162,7 @@ fn collect_recursive_calls(
             collect_recursive_calls(a, name, params, env, out);
             collect_recursive_calls(b, name, params, env, out);
         }
-        DepArrow { from, to, .. } => {
+        DepArrow { from, to, .. } | DepPair { from, to, .. } => {
             collect_recursive_calls(from, name, params, env, out);
             collect_recursive_calls(to, name, params, env, out);
         }
