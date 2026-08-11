@@ -1,0 +1,278 @@
+-- ===========================================================
+-- tests/seki/test_ui_models.seki — 複数 Model 型での MVU フレームワーク検証
+-- ===========================================================
+--
+-- mkApp / mkAppIO は Model 型に対してパラメトリック.
+-- 以下の Model shapes で同じ框組 (init / update / view / step / render)
+-- が動くことを確かめる:
+--
+--   1. Model = Int                    (counter)
+--   2. Model = String                 (text editor — payload 入力対応)
+--   3. Model = List String            (single-line todo, no IDs)
+--   4. Model = (Int × Int)            (2-D position)
+--   5. Model = ADT (Light = R | Y | G)  (信号機の有限状態機械)
+--   6. Model = List (Int × String)    (list with payload + parseFormBody)
+
+import "ui/server.seki"
+import "test/runner.seki"
+
+-- ===========================================================
+-- (1) Int model — counter
+-- ===========================================================
+def counter_update := \a n ->
+    if a == "inc" then n + 1
+    else if a == "dec" then if n > 0 then n - 1 else n
+    else n
+
+def counter_view := \n -> pE nil [Text (intToStr n)]
+def counterApp := mkApp 0 counter_update counter_view
+
+theorem counter_inc_int : forall n in Int, counter_update "inc" n == n + 1 := by eval
+
+def t_counter_init   := assertEq 0 (appInit counterApp)
+def t_counter_step   := assertEq 7 (runFromInit counterApp ["inc","inc","inc","inc","inc","inc","inc"])
+def t_counter_html   := assertContains "<p>3</p>"
+                          (dryRun counterApp "c" ["inc","inc","inc"])
+
+-- ===========================================================
+-- (2) String model — text editor (payload 入力対応)
+-- ===========================================================
+-- "append" アクションで payload を末尾に連結, "clear" で空文字列.
+def text_update := \action payload s ->
+    if action == "append" then strConcat s payload
+    else if action == "clear" then ""
+    else s
+
+def text_view := \s ->
+    divE nil [
+        pE [AClass "buf"] [Text s],
+        actionForm "append" "text" "..." "append"
+    ]
+
+def textApp := mkAppIO "" text_update text_view
+
+theorem text_clear_idem : text_update "clear" "" "anything" == "" := by eval
+
+def t_text_init   := assertEq "" (appInit textApp)
+def t_text_step   := assertEq "hello world"
+                       (stepIO textApp "append" " world" (stepIO textApp "append" "hello" ""))
+def t_text_clear  := assertEq ""
+                       (stepIO textApp "clear" "" "junk")
+def t_text_runIO  := assertEq "abc"
+                       (runFromInitIO textApp [("append","a"),("append","b"),("append","c")])
+def t_text_html   := assertContains "<p class=\"buf\">hi</p>"
+                       (renderApp textApp "t" "hi")
+
+-- ===========================================================
+-- (3) List String model — シンプル todo (ID なし)
+-- ===========================================================
+def list_update := \action payload xs ->
+    if action == "add" then
+        let t = formFieldOr payload "text" "" in
+        if strLen t == 0 then xs else cons t xs
+    else if action == "popHead" then
+        if null xs then xs else tail xs
+    else if action == "clear" then nil
+    else xs
+
+def list_view := \xs ->
+    ulE nil (map (\t -> liE nil [Text t]) xs)
+
+def listApp := mkAppIO nil list_update list_view
+
+def t_list_init   := assertEq 0 (length (appInit listApp))
+def t_list_add    := assertEq 2
+                       (length (stepIO listApp "add" "text=b"
+                                  (stepIO listApp "add" "text=a" nil)))
+def t_list_pop    := assertEq 1
+                       (length (stepIO listApp "popHead" ""
+                                  (stepIO listApp "add" "text=a"
+                                    (stepIO listApp "add" "text=b" nil))))
+def t_list_clear  := assertEq 0
+                       (length (stepIO listApp "clear" ""
+                                  (stepIO listApp "add" "text=a" nil)))
+def t_list_html   := assertContains "<ul><li>hi</li></ul>"
+                       (renderApp listApp "l"
+                          (stepIO listApp "add" "text=hi" nil))
+
+-- ===========================================================
+-- (4) (Int × Int) model — 2-D 位置
+-- ===========================================================
+-- Model = (x, y).  方向アクションで±1.
+def pos_update := \action p ->
+    let x = fst p in
+    let y = snd p in
+    if action == "right" then (x + 1, y)
+    else if action == "left" then (x - 1, y)
+    else if action == "up"   then (x, y - 1)
+    else if action == "down" then (x, y + 1)
+    else p
+
+def pos_view := \p ->
+    pE nil [Text (strJoin "" ["(", intToStr (fst p), ", ", intToStr (snd p), ")"])]
+
+def posApp := mkApp (0, 0) pos_update pos_view
+
+theorem pos_right_int
+  : forall x in Int, forall y in Int,
+       fst (pos_update "right" (x, y)) == x + 1
+  := by eval
+
+def t_pos_init    := assertEq (0, 0) (appInit posApp)
+def t_pos_walk_x  := assertEq (3, 0) (runFromInit posApp ["right","right","right"])
+def t_pos_walk_xy := assertEq (2, 1) (runFromInit posApp ["right","right","right","down","left"])
+def t_pos_html    := assertContains "(2, 3)"
+                       (dryRun posApp "p" ["right","right","down","down","down"])
+
+-- ===========================================================
+-- (5) ADT model — 信号機 (有限状態機械)
+-- ===========================================================
+data Light = LRed | LYellow | LGreen
+
+def light_next := \l ->
+    match l with
+    | LRed    -> LGreen
+    | LGreen  -> LYellow
+    | LYellow -> LRed
+
+def light_color := \l ->
+    match l with
+    | LRed    -> "red"
+    | LYellow -> "orange"
+    | LGreen  -> "green"
+
+def light_update := \action l ->
+    if action == "next" then light_next l
+    else if action == "reset" then LRed
+    else l
+
+def light_view := \l ->
+    divE [AAttr "data-state" (light_color l), AStyle (strConcat "background:" (light_color l))]
+         [Text (light_color l)]
+
+def lightApp := mkApp LRed light_update light_view
+
+-- 信号機の周期性は eval で全列挙
+theorem light_cycle_3
+  : light_next (light_next (light_next LRed)) == LRed
+  := by eval
+
+def t_light_init     := assertEq LRed (appInit lightApp)
+def t_light_three    := assertEq LRed
+                          (runFromInit lightApp ["next","next","next"])
+def t_light_reset    := assertEq LRed
+                          (runFromInit lightApp ["next","next","reset"])
+def t_light_html_red := assertContains "background:red"
+                          (dryRun lightApp "L" [])
+def t_light_html_grn := assertContains "background:green"
+                          (dryRun lightApp "L" ["next"])
+
+-- ===========================================================
+-- (6) List (Int × String) model — IDあり + parseFormBody
+-- ===========================================================
+-- Model: (nextId, [(id, text), ...]).
+def tagged_update := \action payload model ->
+    let nid = fst model in
+    let xs  = snd model in
+    if action == "add" then
+        let t = formFieldOr payload "text" "" in
+        if strLen t == 0 then model else (nid + 1, cons (nid, t) xs)
+    else if strStartsWith "del/" action then
+        let plen = strLen "del/" in
+        let rest = substring plen (strLen action - plen) action in
+        match strToInt rest with
+        | Some id -> (nid, filter (\p -> not (fst p == id)) xs)
+        | None    -> model
+    else model
+
+def tagged_view := \model ->
+    let xs = snd model in
+    ulE nil (map (\p -> liE nil [Text (snd p)]) xs)
+
+def taggedApp := mkAppIO (1, nil) tagged_update tagged_view
+
+def afterAddBC :=
+    runFromInitIO taggedApp [
+        ("add", "text=apple"),
+        ("add", "text=banana"),
+        ("add", "text=cherry")
+    ]
+
+def t_tagged_count    := assertEq 3 (length (snd afterAddBC))
+def t_tagged_next_id  := assertEq 4 (fst afterAddBC)
+
+-- 追加してから id=2 を消す → 2 件残る (apple [id=1] と cherry [id=3])
+def afterDel2 := stepIO taggedApp "del/2" "" afterAddBC
+
+def t_tagged_delete   := assertEq 2 (length (snd afterDel2))
+
+-- 消した後の残存 id は {1, 3}
+def t_tagged_remaining_ids :=
+    let ids = map fst (snd afterDel2) in
+    if contains 1 ids and contains 3 ids and not (contains 2 ids)
+    then Pass
+    else FailMsg (strJoin "" ["unexpected ids: ", toStr ids])
+
+-- ===========================================================
+-- 集合論的 property: 任意の Model 型でも framework は壊れない
+-- ===========================================================
+--
+-- すべての app について「アクセサが init を返す」が成り立つ.
+def appList := [
+    ("counter", counterApp),
+    ("text",    textApp),
+    ("list",    listApp),
+    ("pos",     posApp),
+    ("light",   lightApp),
+    ("tagged",  taggedApp)
+]
+
+-- 「appInit a で取り出した model を再度 view に通せば、null/error にならない」
+-- かつ「dryRun の出力が空でない」を全 app で確認.
+def t_all_apps_render_init :=
+    forAllInList appList (\pair ->
+        let name = fst pair in
+        let a    = snd pair in
+        let html = renderApp a "t" (appInit a) in
+        if strLen html > 100 then Pass
+        else FailMsg (strJoin "" ["app '", name, "' produced too-short HTML"]))
+
+-- ===========================================================
+def cases := [
+    -- (1) Int counter
+    TestCase "(Int) init"               t_counter_init,
+    TestCase "(Int) step × 7"           t_counter_step,
+    TestCase "(Int) html contains <p>3" t_counter_html,
+    -- (2) String editor
+    TestCase "(String) init"            t_text_init,
+    TestCase "(String) append + append" t_text_step,
+    TestCase "(String) clear"           t_text_clear,
+    TestCase "(String) runFromInitIO"   t_text_runIO,
+    TestCase "(String) html buf"        t_text_html,
+    -- (3) List String
+    TestCase "(List) init"              t_list_init,
+    TestCase "(List) add 2"             t_list_add,
+    TestCase "(List) popHead"           t_list_pop,
+    TestCase "(List) clear"             t_list_clear,
+    TestCase "(List) html"              t_list_html,
+    -- (4) (Int, Int) position
+    TestCase "(Tuple) init"             t_pos_init,
+    TestCase "(Tuple) walk x"           t_pos_walk_x,
+    TestCase "(Tuple) walk x+y"         t_pos_walk_xy,
+    TestCase "(Tuple) html (2,3)"       t_pos_html,
+    -- (5) ADT Light FSM
+    TestCase "(ADT) init = Red"         t_light_init,
+    TestCase "(ADT) period 3"           t_light_three,
+    TestCase "(ADT) reset"              t_light_reset,
+    TestCase "(ADT) html red"           t_light_html_red,
+    TestCase "(ADT) html green"         t_light_html_grn,
+    -- (6) List (Int × String) tagged
+    TestCase "(Tagged) add × 3 count"   t_tagged_count,
+    TestCase "(Tagged) nextId = 4"      t_tagged_next_id,
+    TestCase "(Tagged) delete id=2"     t_tagged_delete,
+    TestCase "(Tagged) remaining ids"   t_tagged_remaining_ids,
+    -- (∀) framework-level property
+    TestCase "[∀ apps] render(init) non-empty" t_all_apps_render_init
+]
+
+runMain "lib/ui/* with diverse Model types" cases

@@ -238,8 +238,15 @@ impl<'a> Parser<'a> {
         let name = self.eat_ident("theorem name")?;
         self.expect(&Tok::Colon, "':' in theorem")?;
         let prop = self.parse_expr()?;
-        self.expect(&Tok::Assign, "':=' in theorem")?;
-        let proof = self.parse_proof()?;
+        // `:=` is optional: if omitted, default to `by auto` which triggers
+        // portfolio search.  The REPL exploits this to auto-prove a theorem
+        // the moment it is submitted (`theorem t : P` with no proof body).
+        let proof = if matches!(self.peek(), Tok::Assign) {
+            self.bump();
+            self.parse_proof()?
+        } else {
+            Proof::ByAuto
+        };
         Ok(Decl::Theorem { name, prop, proof })
     }
 
@@ -556,6 +563,7 @@ impl<'a> Parser<'a> {
             "intros" => Ok(Proof::ByIntros),
             "linarith" => Ok(Proof::ByLinarith),
             "decide" => Ok(Proof::ByDecide),
+            "auto" => Ok(Proof::ByAuto),
             "unfold" => {
                 let name = self.eat_ident("function name to unfold")?;
                 Ok(Proof::ByUnfold(name))

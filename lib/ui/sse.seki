@@ -1,0 +1,170 @@
+-- ===========================================================
+-- lib/ui/sse.seki — Server-Sent Events (push) 付き MVU サーバ
+-- ===========================================================
+--
+-- アーキテクチャ:
+--
+--   ┌─ main thread ──────────────┐    ┌─ worker (spawn) ───────┐
+--   │ tcpListen / tcpAccept loop │ -> │ parse req, dispatch    │
+--   └─ accept → spawn worker ────┘    └────────────────────────┘
+--                                              │
+--                                              ▼
+--                       ┌─ GET /events ────────┐
+--                       │  - write SSE headers │
+--                       │  - send initial data │
+--                       │  - add to sseSocks   │
+--                       │  - DO NOT close      │
+--                       └──────────────────────┘
+--                       ┌─ POST /action/* ─────┐
+--                       │  - update model      │
+--                       │  - bump version      │
+--                       │  - broadcast to all  │
+--                       │    sockets in        │
+--                       │    sseSocks          │
+--                       └──────────────────────┘
+--
+-- ブラウザ:
+--   const es = new EventSource('/events');
+--   es.onmessage = (e) => fetch('/').then(...).then(replaceDoc);
+--
+-- 単純化のため version は単調増加する int. データは int のみ送り、
+-- 実際の HTML 取得はクライアントが GET / で行う (二段階).
+
+import "dom.seki"
+import "app.seki"
+
+-- ----- SSE 用の追加クライアントスクリプト -----
+def sseClientScript := strJoin "\n" [
+    "(function() {",
+    "  if (typeof EventSource !== 'function') return;",
+    "  var es = new EventSource('/events');",
+    "  es.onmessage = function(e) {",
+    "    fetch('/').then(function(r){ return r.text(); }).then(function(html){",
+    "      document.open(); document.write(html); document.close();",
+    "    });",
+    "  };",
+    "  es.onerror = function() { /* 接続切断: ブラウザが自動再接続 */ };",
+    "})();"
+]
+
+-- ----- SSE response の HTTP プリフィックス -----
+def sseHeaders := strJoin "" [
+    "HTTP/1.0 200 OK\r\n",
+    "Content-Type: text/event-stream\r\n",
+    "Cache-Control: no-cache\r\n",
+    "Connection: keep-alive\r\n",
+    "\r\n"
+]
+
+-- ----- 1 イベントを SSE 形式に整形 -----
+def sseEvent := \payload ->
+    strJoin "" ["data: ", payload, "\n\n"]
+
+-- ===========================================================
+-- ブロードキャスト: 全 SSE socket に書き込み、死んだものを除去
+-- ===========================================================
+--
+-- 注: filter の predicate 内で tcpWrite を呼ぶ. seki は eager 評価なので
+-- 各要素について predicate が必ず評価され、書き込み副作用が走る.
+-- 多行ラムダを避けるため、書き込み判定を別関数に切り出している.
+def tryWriteSSE := \evt s ->
+    match tcpWrite s evt with
+    | Err _ -> false
+    | Ok _  -> true
+
+def broadcastSSE := \sseSocks payload ->
+    let evt = sseEvent payload in
+    let stillAlive = filter (tryWriteSSE evt) (readRef sseSocks) in
+    writeRef sseSocks stillAlive
+
+-- ===========================================================
+-- 1 接続を処理するワーカー (spawn 内で実行)
+-- ===========================================================
+
+def renderSSEPage := \app title css model ->
+    renderPageStyledExt title css sseClientScript ((appView app) model)
+
+def writeRespAndClose := \sock resp ->
+    let _ = tcpWrite sock (httpFormatResponse resp) in
+    tcpClose sock
+
+-- bad request の固定レスポンス生成
+def badReqResp := \e -> HttpResponse 400 [("Content-Type", "text/plain")] e
+
+def handleSSEConn := \sock app title css modelRef sseSocks versionRef ->
+    match tcpRead sock 8192 with
+    | Err _ ->
+        let _ = tcpClose sock in ()
+    | Ok raw ->
+        match httpParseRequest raw with
+        | Err e ->
+            let _ = writeRespAndClose sock (badReqResp e) in ()
+        | Ok req ->
+            let m = reqMethod req in
+            let p = reqPath req in
+            if m == "GET" and p == "/events" then
+                let _ = tcpWrite sock sseHeaders in
+                let v = readRef versionRef in
+                let _ = tcpWrite sock (sseEvent (intToStr v)) in
+                let _ = modifyRef sseSocks (\xs -> cons sock xs) in
+                ()
+            else if m == "POST" and strStartsWith "/action/" p then
+                match parseActionPath p with
+                | None -> writeRespAndClose sock (httpNotFound ())
+                | Some action ->
+                    let current = readRef modelRef in
+                    let next    = stepIO app action (reqBody req) current in
+                    let _       = writeRef modelRef next in
+                    let _       = modifyRef versionRef succ in
+                    let newVer  = readRef versionRef in
+                    let _       = broadcastSSE sseSocks (intToStr newVer) in
+                    let resp    = httpHtml (renderSSEPage app title css next) in
+                    writeRespAndClose sock resp
+            else if m == "GET" and (p == "/" or p == "/index.html") then
+                let cur = readRef modelRef in
+                let resp = httpHtml (renderSSEPage app title css cur) in
+                writeRespAndClose sock resp
+            else if m == "GET" and p == "/healthz" then
+                writeRespAndClose sock (httpOk "ok")
+            else if m == "GET" and p == "/version" then
+                writeRespAndClose sock (httpOk (intToStr (readRef versionRef)))
+            else
+                writeRespAndClose sock (httpNotFound ())
+
+-- ===========================================================
+-- accept loop: 各接続を spawn でワーカースレッドに渡す
+-- ===========================================================
+def sseAcceptLoop := \listener app title css modelRef sseSocks versionRef ->
+    match tcpAccept listener with
+    | Err e -> Err e
+    | Ok sock ->
+        let _ = spawn (\_ ->
+            handleSSEConn sock app title css modelRef sseSocks versionRef) in
+        sseAcceptLoop listener app title css modelRef sseSocks versionRef
+
+-- ===========================================================
+-- 公開 API
+-- ===========================================================
+
+def serveAppSSEStyled := \app title css port ->
+    let modelRef   = mkRef (appInit app) in
+    let sseSocks   = mkRef nil in
+    let versionRef = mkRef 0 in
+    match tcpListen "127.0.0.1" port with
+    | Err e -> Err e
+    | Ok listener ->
+        let banner = strJoin "" [
+            "seki UI app '", title, "' (SSE) listening on http://127.0.0.1:",
+            intToStr port, "  (Ctrl-C to stop)"
+        ] in
+        let _ = println banner in
+        sseAcceptLoop listener app title css modelRef sseSocks versionRef
+
+def serveAppSSE := \app title port ->
+    serveAppSSEStyled app title "" port
+
+-- ===========================================================
+-- 純粋ヘルパ (テスト用): SSE フォーマットが正しいことを assert で確認
+-- ===========================================================
+def isSSEEvent := \s ->
+    strStartsWith "data: " s and strEndsWith "\n\n" s

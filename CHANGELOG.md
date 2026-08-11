@@ -17,13 +17,34 @@ seki は **pre-1.0** です。これは次を意味します:
 
 ### Added
 
+- `by algebra` (および別名 `by linarith`) が仮定の**加算結合**を扱えるようになった:
+  `x > 0 and y > 0 => x + y > 0` のように、連言の前提を複数の仮定へ分解した上で
+  正の重み 1 での和がゴールと一致すれば閉じる (`hyps_sum_proves`)。
+- `tests/seki/test_ui_{dom,app,models}.seki` を `cargo test` に接続
+  (`lib/ui/` — サーバ駆動 UI ライブラリの自動テスト)。
+
 ### Changed
+
+- `docs/internals.md` / `docs/proofs.md` / `docs/spec/05-tactics.md` / `README.md`
+  の「未対応」リストを実装状況に合わせて更新
+  (`forall (x y) in S` 糖衣・match 網羅性警告・`by simp` の対称規則 oscillation
+  解消・`by decide` は既に実装済みだった一方、`by linarith` タクティクが実際には
+  `by algebra` の別名にすぎず専用ソルバ `linarith.rs` に未接続だった点を明記)。
+- `by auto` (ポートフォリオ探索タクティク) と `lib/ui/` を仕様書に追記。
 
 ### Deprecated
 
 ### Removed
 
 ### Fixed
+
+- **クラッシュ修正**: 非末尾再帰なユーザ定義関数を深く評価すると (例:
+  `forall n in Nat` のサンプル検査が `SAMPLE_BOUND` = 200 まで再帰する場合)
+  デフォルトのメインスレッドスタック (Linux で通常 8 MiB) を溢れて
+  `seki` バイナリごと SIGABRT で落ちていた。`main()` の実処理を
+  256 MiB スタックの専用スレッドで実行するよう変更 (`src/main.rs`)。
+  テスト実行時の同種のクラッシュも `.cargo/config.toml` の
+  `RUST_MIN_STACK` で解消。
 
 ### Security
 

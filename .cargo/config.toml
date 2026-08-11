@@ -1,0 +1,9 @@
+# Non-tail-recursive seki evaluation (e.g. sampling a `forall n in Nat` up to
+# SAMPLE_BOUND for a recursive user function) can use several hundred native
+# stack frames. `cargo test` runs each test on a spawned thread, whose default
+# stack size is controlled by `RUST_MIN_STACK` (8 MiB if unset) — too small
+# for this. The `seki` / `seki-lsp` binaries handle the equivalent main-thread
+# limit themselves by spawning their real work on a thread with an explicit
+# larger stack (see `src/main.rs` / `src/lsp_main.rs`).
+[env]
+RUST_MIN_STACK = "67108864"

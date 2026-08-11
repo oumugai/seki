@@ -743,18 +743,27 @@ type error: [12:1] value "purple" is not a member of declared type Color
 **P1.1-P1.3** タクティク合成 `then` + `by unfold` + `by intros`。
 **P2.1** 型クラスの自動辞書解決。
 **P2.3** 群論 / 環・体 / 線形代数のミニライブラリ (sample 22-25)。
+**P2.4** `by algebra` の Real 対応 (有理係数) + if-式の場合分け (case-split) + 矛盾仮説での早期閉包。
+**P2.5** 汎用数学ライブラリ (`lib/numeric/`, `lib/analysis/`, `lib/probability/`)。
+**P3.1** `by auto` (ポートフォリオ探索): refl/eval/decide/algebra/induction/strong_induction と
+unfold・lemma-simp の組合せを順に試し、最初に閉じたものを返す。`theorem t : P` (証明省略) は
+これに desugar される。REPL の `:why` はレンマ優先版 (`try_portfolio_lemma_first`) を使う。
+**P3.2** サーバ駆動 UI ライブラリ (`lib/ui/`: dom/app/server/sse) — MVU パターンで純粋な
+`update`/`render` を書き、`httpServe` 上のイベントループか SSE で配線する (examples 38-39)。
+**既に対応済み (旧「実装が比較的容易なもの」からの卒業)**:
+`forall (x y) in S, P` の複数変数糖衣、パターンマッチ網羅性の**警告**
+(エラー化は Phase 6+ で検討のまま)、`by simp` の対称規則
+(AC-canonicalization で oscillation を解消 — [tactics.md](spec/05-tactics.md) 参照)、
+`by decide` (型クラス無しの直接評価版; `Decidable` 型クラスへの一般化は未対応のまま)。
 
 ### 実装が比較的容易なもの
 
-- **パターンマッチの網羅性検査**: 現在は `match` の最終 fallback が `error "non-exhaustive match"` のランタイムエラー。コンパイル時に検出できればより堅牢。
-- **`forall x y in S` の糖衣**: 現在は `forall x in S, forall y in S, ...` と書く必要があるネストを、複数変数で 1 つの量化子にまとめる。
-- **Expr 単位の位置情報 (span)**: 現状は Decl 単位の `[line:col]` のみ。Expr 全 variant に Span を持たせれば proof error が forall や式の正確な位置を指せる。LSP の前提。
+- **Expr 単位の位置情報 (span)**: 現状は Decl 単位の `[line:col]` のみ。Expr 全 variant に Span を持たせれば proof error が forall や式の正確な位置を指せる。LSP の前提 (`by algebra` の失敗が常にゴール全体の decl 先頭を指す — 深くネストした式で不便)。
 - **`forall n in Nat, n >= k` の境界推論**: 現在 `by algebra` で扱える符号は polynomial-domain ベースだが、定数境界 (例: `forall n in Nat, n + 5 > 4`) は `polynomial_pos` の細粒度化で扱える余地あり。
 - **任意深さの強帰納法**: 現在 `by strong_induction` は深さ 2 固定。`by strong_induction 3` 等で参照前段数を指定できるよう拡張。
 - **`?` 演算子の拡張**: 現在は let-value 専用。任意の式コンテキストで使えるようにすると `f (g x?)` 等が書きやすくなる。
 - **Option 用 `?o` 演算子**: 現在 `?` は Result 専用。Option 用も加えると一貫性が高まる。
-- **`by simp` の対称規則ハンドリング**: `add_comm` のような対称規則は両側で発火し oscillate する。LHS/RHS の項順序付け (KBO 等) で書換え方向を決定すれば改善できる。
-- **`Decidable` 型クラス + `by decide`**: 命題が Bool に落とせるとき自動証明する戦術。型クラスインフラの上に乗る。
+- **パターンマッチ網羅性のエラー化**: 現状は警告 (`check_exhaustiveness`, `parser.rs`) のみで実行は `error "non-exhaustive match"` のランタイムエラーに fallback する。コンパイル時エラーに昇格すれば安全性が上がる (ただし既存コードを壊す可能性があるため要検討)。
 
 ### 中程度の労力
 
@@ -762,11 +771,11 @@ type error: [12:1] value "purple" is not a member of declared type Color
 - **より強い型推論**: 現状 `infer_type` はラムダ・算術・if など主要な構成子に限定されており、`match` パターン束縛・`forall`/`exists` の domain・依存型では `Set` (任意) で諦めている。単方向 (intro 型) と双方向 (check 型) を混ぜた本格的な bidirectional checking で改善余地あり。
 - **3次以上の不等式判定**: 現在 PSD 判定は 2 次形式まで。3 次は一般に難しいが、奇数次の単項式正値性 (`x³ ≥ 0` 失敗、`x²y² ≥ 0` 成功) などの限定パターンは扱える。
 - **可変除数の div / mod**: 現状定数除数のみ。`(a*n) / n` のような単項キャンセルは検出可能。
-- **線形不等式の決定 (`by linarith`)**: Fourier-Motzkin で線形不等式を完全決定。`forall n in Nat, n + 5 > 4` のような定数境界が一発で通る。
+- **線形不等式の決定 (`by linarith`)**: 既に単変数版は実装済み (`src/linarith.rs`)。複数変数の Fourier-Motzkin 消去は未対応 — `forall n in Nat, forall m in Nat, n + m >= 0` のような多変数の定数境界はまだ一発で通らない。
 - **依存パラメトリック ADT の専用構文**: `data Vec : Nat -> Set where ...` 構文を加え、`{xs | length xs == n}` を自動生成。
 - **依存ペア型 `Σ (x : A), B(x)`**: refinement で書ける現状を first-class 構文に。
-- **LSP サーバ最小実装**: hover で型表示、diagnostics をエディタに流す。`tower-lsp` クレートで土台。
-- **REPL の強化**: `rustyline` で行編集・履歴・自動補完。
+- **LSP サーバ**: `src/lsp_main.rs` に手書き JSON-RPC framing + diagnostics 配信 (`textDocument/publishDiagnostics`) は実装済み。hover / completion / goto-definition / 型表示は未対応 (`tower-lsp` への移行はしていない — 依存ゼロ方針のため手書きのまま)。
+- **REPL の強化**: `rustyline` で行編集・履歴・自動補完 (現状は素の `read_line`)。
 
 ### 大きな労力 (本格的な定理証明への道)
 

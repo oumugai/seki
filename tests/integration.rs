@@ -44,6 +44,7 @@ fn run(src: &str) -> Globals {
                 let prover = Prover::new(&ctx);
                 let v = prover.verify(&prop, &proof, &env).expect("verify theorem");
                 g.theorem_props.insert(name.clone(), prop);
+                g.theorem_proofs.insert(name.clone(), proof);
                 g.theorems.insert(name, v);
             }
             Decl::Axiom { name, prop } => {
@@ -412,6 +413,45 @@ fn algebra_handles_propositional_implication() {
           := by algebra
     ");
     assert!(g.theorems.contains_key("implies_test"));
+}
+
+#[test]
+fn algebra_conjunctive_hypotheses_combine_additively() {
+    // Conjoined premises (`a > 0 and b > 0 => ...`) are split into
+    // separate hypotheses, and a positive combination of them (here, a
+    // plain sum) can discharge a goal that neither hypothesis proves
+    // alone — e.g. `x > 0`, `y > 0` ⊢ `x + y > 0`. This is also the
+    // `by linarith` code path (an alias for `by algebra`), so the same
+    // proposition should close under either tactic name.
+    let g = run(r"
+        theorem sum_of_positives
+          : forall (x y) in Int, x > 0 and y > 0 => x + y > 0
+          := by algebra
+        theorem sum_of_positives_linarith
+          : forall (x y) in Int, x > 0 and y > 0 => x + y > 0
+          := by linarith
+        theorem three_way_sum
+          : forall (a b c) in Int, a >= 0 and b > 0 and c >= 0 => a + b + c > 0
+          := by algebra
+    ");
+    for n in &["sum_of_positives", "sum_of_positives_linarith", "three_way_sum"] {
+        assert!(g.theorems.contains_key(*n), "{} not proven", n);
+    }
+}
+
+#[test]
+fn algebra_rejects_unsound_hypothesis_combination() {
+    // Sanity: `x > 0`, `y > 0` must NOT be enough to prove `x - y > 0` —
+    // the additive-combination shortcut in `hyps_sum_proves` must not
+    // overreach into unsound territory.
+    let res = std::panic::catch_unwind(|| {
+        run(r"
+            theorem bad
+              : forall (x y) in Int, x > 0 and y > 0 => x - y > 0
+              := by algebra
+        ");
+    });
+    assert!(res.is_err(), "unsound combination must not be proved");
 }
 
 #[test]
@@ -1271,6 +1311,21 @@ fn seki_lib_test_cas_dsl() {
 }
 
 #[test]
+fn seki_lib_test_ui_dom() {
+    run_seki_test_file("tests/seki/test_ui_dom.seki", 4);
+}
+
+#[test]
+fn seki_lib_test_ui_app() {
+    run_seki_test_file("tests/seki/test_ui_app.seki", 3);
+}
+
+#[test]
+fn seki_lib_test_ui_models() {
+    run_seki_test_file("tests/seki/test_ui_models.seki", 4);
+}
+
+#[test]
 fn parse_sym_builds_symbolic_expr() {
     // Uses the binary path so library imports work via lib-path resolution.
     let tmp = std::env::temp_dir().join("seki_test_parsesym.seki");
@@ -1582,6 +1637,262 @@ fn cas_symbolic_differentiation_polynomial() {
     "#);
     // 2*4 + 3 = 11
     assert!(matches!(g.defs.get("at4"), Some(Value::Int(11))));
+}
+
+#[test]
+fn auto_portfolio_closes_arithmetic_identities() {
+    // `by auto` should dispatch to the right closer for a handful of
+    // representative goals across the tactic palette.
+    let g = run(r"
+        theorem trivial : 2 + 2 == 4 := by auto
+        theorem int_zero : forall a in Int, a + 0 == a := by auto
+        theorem cauchy : forall a in Int, forall b in Int, a*a + b*b >= 2*a*b := by auto
+    ");
+    for n in &["trivial", "int_zero", "cauchy"] {
+        assert!(g.theorems.contains_key(*n), "{} not proven by auto", n);
+    }
+}
+
+#[test]
+fn auto_portfolio_handles_induction_and_unfold() {
+    // The portfolio includes `unfold f then algebra` and bare `by induction`
+    // for goals over Nat, so a user-defined recursive sum should close.
+    let g = run(r"
+        def sum := \n -> if n == 0 then 0 else n + sum (n - 1)
+        theorem gauss : forall n in Nat, 2 * sum n == n * (n + 1) := by auto
+        theorem sum_nn : forall n in Nat, sum n >= 0 := by auto
+    ");
+    for n in &["gauss", "sum_nn"] {
+        assert!(g.theorems.contains_key(*n), "{} not proven by auto", n);
+    }
+}
+
+#[test]
+fn auto_portfolio_rejects_false_proposition() {
+    // Sanity: `by auto` must not silently accept a non-theorem.
+    let res = std::panic::catch_unwind(|| {
+        run("theorem bad : forall n in Nat, n + 1 == n := by auto");
+    });
+    assert!(res.is_err(), "false proposition must not be proved by auto");
+}
+
+#[test]
+fn extract_lemmas_collects_simp_names() {
+    use seki::ast::Proof;
+    use seki::prover::extract_lemmas;
+    let p = Proof::Seq(vec![
+        Proof::ByIntros,
+        Proof::BySimp { lemmas: vec!["foo".into(), "bar".into()] },
+        Proof::ByAlgebra,
+    ]);
+    assert_eq!(extract_lemmas(&p), vec!["foo".to_string(), "bar".to_string()]);
+
+    let p2 = Proof::ByAlgebra;
+    assert!(extract_lemmas(&p2).is_empty());
+
+    let nested = Proof::Seq(vec![
+        Proof::BySimp { lemmas: vec!["a".into()] },
+        Proof::Seq(vec![Proof::BySimp { lemmas: vec!["b".into()] }]),
+    ]);
+    assert_eq!(extract_lemmas(&nested), vec!["a".to_string(), "b".to_string()]);
+}
+
+#[test]
+fn lemma_first_portfolio_picks_a_registered_lemma() {
+    // When a goal restates an existing theorem verbatim, the
+    // lemma-preferring portfolio should close it via `by simp [<that>]`
+    // rather than falling back to a cheap closer that hides the lemma.
+    let mut g = make_prelude();
+    let src = r"
+        def sum := \n -> if n == 0 then 0 else n + sum (n - 1)
+        theorem gauss : forall n in Nat, 2 * sum n == n * (n + 1) := by induction
+    ";
+    let decls = parse_program(src).expect("parse");
+    for ld in decls {
+        let ctx = EvalCtx::new(&g);
+        let env = Env::new();
+        match ld.decl {
+            Decl::Def { name, value, .. } => {
+                let v = ctx.eval(&value, &env).unwrap();
+                g.defs.insert(name, v);
+            }
+            Decl::Theorem { name, prop, proof } => {
+                let prover = Prover::new(&ctx);
+                let v = prover.verify(&prop, &proof, &env).unwrap();
+                g.theorem_props.insert(name.clone(), prop);
+                g.theorems.insert(name, v);
+            }
+            _ => {}
+        }
+    }
+
+    // Now ask `:why`-style for the exact restatement.
+    let restated = parse_program(
+        "theorem _g : forall n in Nat, 2 * sum n == n * (n + 1) := refl",
+    )
+    .unwrap();
+    let prop = match &restated[0].decl {
+        Decl::Theorem { prop, .. } => prop.clone(),
+        _ => panic!("expected theorem"),
+    };
+    let ctx = EvalCtx::new(&g);
+    let env = Env::new();
+    let prover = Prover::new(&ctx);
+    let proof = prover
+        .try_portfolio_lemma_first(&prop, &env)
+        .expect("lemma-first portfolio should close the restatement");
+    let lemmas = seki::prover::extract_lemmas(&proof);
+    assert!(
+        lemmas.iter().any(|l| l == "gauss"),
+        "expected `gauss` in extracted lemmas, got {:?}",
+        lemmas
+    );
+}
+
+#[test]
+fn theorem_proofs_registry_stores_proof_ast() {
+    // The `theorem_proofs` registry must capture the proof AST so the
+    // REPL's dependency re-checker can replay it after a redefinition.
+    let g = run(r"
+        def f := \n -> n + 1
+        theorem t : forall n in Int, f n - 1 == n := by unfold f then algebra
+    ");
+    let proof = g
+        .theorem_proofs
+        .get("t")
+        .expect("proof AST must be saved alongside the theorem");
+    // We don't lock the exact AST shape, but it should mention the
+    // unfold-target and end with an algebraic closer.
+    let rendered = format!("{}", proof);
+    assert!(
+        rendered.contains("unfold f") && rendered.contains("algebra"),
+        "unexpected proof AST: {}",
+        rendered
+    );
+}
+
+#[test]
+fn recheck_succeeds_after_equivalent_redefinition() {
+    // When a def is replaced by something semantically identical, the
+    // stored proof should still verify against the new globals.  This is
+    // the silent-success path the REPL relies on.
+    use seki::ast::{Decl, Proof};
+
+    // Phase 1: define + prove.
+    let mut g = make_prelude();
+    let phase1 = parse_program(
+        r"
+        def double := \n -> n + n
+        theorem dbl : forall n in Int, double n == 2 * n
+          := by unfold double then algebra
+    ",
+    )
+    .unwrap();
+    for ld in phase1 {
+        let ctx = EvalCtx::new(&g);
+        let env = Env::new();
+        match ld.decl {
+            Decl::Def { name, value, .. } => {
+                let v = ctx.eval(&value, &env).unwrap();
+                g.defs.insert(name, v);
+            }
+            Decl::Theorem { name, prop, proof } => {
+                let prover = Prover::new(&ctx);
+                let v = prover.verify(&prop, &proof, &env).unwrap();
+                g.theorem_props.insert(name.clone(), prop);
+                g.theorem_proofs.insert(name.clone(), proof);
+                g.theorems.insert(name, v);
+            }
+            _ => {}
+        }
+    }
+    let saved_proof: Proof = g.theorem_proofs.get("dbl").cloned().unwrap();
+    let saved_prop = g.theorem_props.get("dbl").cloned().unwrap();
+
+    // Phase 2: redefine `double` to an equivalent form, then replay.
+    let phase2 = parse_program(r"def double := \n -> 2 * n").unwrap();
+    for ld in phase2 {
+        if let Decl::Def { name, value, .. } = ld.decl {
+            let ctx = EvalCtx::new(&g);
+            let env = Env::new();
+            let v = ctx.eval(&value, &env).unwrap();
+            g.defs.insert(name, v);
+        }
+    }
+    let ctx = EvalCtx::new(&g);
+    let env = Env::new();
+    let prover = Prover::new(&ctx);
+    prover
+        .verify(&saved_prop, &saved_proof, &env)
+        .expect("stored proof should still verify after equivalent redef");
+}
+
+#[test]
+fn recheck_fails_after_breaking_redefinition() {
+    // When a def is replaced by something that breaks the theorem, the
+    // replay must fail — that's the signal the REPL converts into a
+    // user-facing warning.
+    use seki::ast::Decl;
+
+    let mut g = make_prelude();
+    let phase1 = parse_program(
+        r"
+        def succ_ := \n -> n + 1
+        theorem t : forall n in Int, succ_ n == n + 1
+          := by unfold succ_ then algebra
+    ",
+    )
+    .unwrap();
+    for ld in phase1 {
+        let ctx = EvalCtx::new(&g);
+        let env = Env::new();
+        match ld.decl {
+            Decl::Def { name, value, .. } => {
+                let v = ctx.eval(&value, &env).unwrap();
+                g.defs.insert(name, v);
+            }
+            Decl::Theorem { name, prop, proof } => {
+                let prover = Prover::new(&ctx);
+                let v = prover.verify(&prop, &proof, &env).unwrap();
+                g.theorem_props.insert(name.clone(), prop);
+                g.theorem_proofs.insert(name.clone(), proof);
+                g.theorems.insert(name, v);
+            }
+            _ => {}
+        }
+    }
+    let saved_proof = g.theorem_proofs.get("t").cloned().unwrap();
+    let saved_prop = g.theorem_props.get("t").cloned().unwrap();
+
+    // Redefine `succ_` to be incorrect.
+    let phase2 = parse_program(r"def succ_ := \n -> n + 999").unwrap();
+    for ld in phase2 {
+        if let Decl::Def { name, value, .. } = ld.decl {
+            let ctx = EvalCtx::new(&g);
+            let env = Env::new();
+            let v = ctx.eval(&value, &env).unwrap();
+            g.defs.insert(name, v);
+        }
+    }
+    let ctx = EvalCtx::new(&g);
+    let env = Env::new();
+    let prover = Prover::new(&ctx);
+    assert!(
+        prover.verify(&saved_prop, &saved_proof, &env).is_err(),
+        "stored proof must fail to verify after breaking redef"
+    );
+}
+
+#[test]
+fn theorem_without_assign_defaults_to_auto() {
+    // `theorem name : prop` (no `:=`) is the REPL convenience form: the
+    // parser desugars it to `:= by auto`, so it should prove identically.
+    let g = run(r"
+        theorem distrib
+          : forall a in Int, forall b in Int, forall c in Int,
+                a * (b + c) == a * b + a * c
+    ");
+    assert!(g.theorems.contains_key("distrib"));
 }
 
 #[test]

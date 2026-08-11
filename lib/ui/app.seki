@@ -1,0 +1,76 @@
+-- ===========================================================
+-- lib/ui/app.seki — Elm-style MVU framework
+-- ===========================================================
+--
+-- App は **3 つの純関数 + 初期 model** によって決定される:
+--
+--     init   : Model
+--     update : String -> Model -> Model     -- action 名 + 現在状態 -> 新状態
+--     view   : Model -> View                -- 状態 -> ビュー
+--
+-- 副作用 (HTTP I/O, 時刻, 乱数) は lib/ui/server.seki 側に追い出され、
+-- このファイルの関数はすべて純粋. theorem の対象にできる.
+--
+-- 集合論的に: App は (Model × (Action × Model -> Model) × (Model -> View))
+-- の組として一意に決まる. 状態空間の遷移は update が定義する関数.
+
+import "dom.seki"
+
+-- ===========================================================
+-- App = (init, (updateIO, view)) — 3 値の組
+-- ===========================================================
+--
+-- update は常に 3 引数 `String -> String -> Model -> Model`:
+--   action : サーバが受け取った action 名
+--   payload: POST のリクエストボディ (フォーム入力, JSON 等). 無ければ "".
+--   model  : 現在の状態.
+--
+-- 互換性のために 2 引数の `mkApp` を残す (payload を捨てるラッパ).
+
+-- ----- 3 引数 (payload あり) 版 -----
+def mkAppIO := \init updateIO view -> (init, (updateIO, view))
+
+-- ----- 2 引数 (payload なし) 版: 内部は mkAppIO 経由 -----
+def mkApp := \init update view ->
+    mkAppIO init (\a _ m -> update a m) view
+
+-- ----- アクセサ -----
+def appInit     := \a -> fst a
+def appUpdateIO := \a -> fst (snd a)
+def appView     := \a -> snd (snd a)
+
+-- 互換性: 2 引数の update を返すラッパ (payload を "" で埋める)
+def appUpdate := \a -> \action m -> (appUpdateIO a) action "" m
+
+-- ----- 純粋ステップ -----
+-- 3 引数版 (新コード向け)
+def stepIO := \a action payload model ->
+    (appUpdateIO a) action payload model
+
+-- 2 引数版 (旧コード互換: payload は "")
+def step := \a action model ->
+    stepIO a action "" model
+
+-- ----- model のページレンダリング (HTML 文字列) -----
+def renderApp := \a title model ->
+    renderPage title ((appView a) model)
+
+def renderAppStyled := \a title css model ->
+    renderPageStyled title css ((appView a) model)
+
+-- ----- アクション列を順に適用 (テスト用 / 帰納証明用) -----
+-- foldl で `init = step app action acc` を全リストにわたって畳み込む.
+def runActions := \a actions init ->
+    foldl (\m act -> step a act m) init actions
+
+-- ----- アプリ全体としての fold: いきなり初期状態から走る -----
+def runFromInit := \a actions ->
+    runActions a actions (appInit a)
+
+-- ----- payload 付きアクション列 -----
+-- actions : List (String × String) で (action, payload) のペアを順に適用.
+def runActionsIO := \a actions init ->
+    foldl (\m p -> stepIO a (fst p) (snd p) m) init actions
+
+def runFromInitIO := \a actions ->
+    runActionsIO a actions (appInit a)

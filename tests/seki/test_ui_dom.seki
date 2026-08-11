@@ -1,0 +1,148 @@
+-- ===========================================================
+-- tests/seki/test_ui_dom.seki — lib/ui/dom.seki の検証
+-- ===========================================================
+--
+-- 純粋な renderHtml の動作をテーブル駆動でチェックする.
+-- View ADT の各形 (Text / Elem / 属性 / void / ネスト / エスケープ)
+-- をひとつずつ assertEq で確認.
+
+import "ui/dom.seki"
+import "test/runner.seki"
+
+-- ===========================================================
+-- 基本: Text ノード
+-- ===========================================================
+def t_text_plain   := assertEq "hello"          (renderHtml (Text "hello"))
+def t_text_lt_gt   := assertEq "&lt;b&gt;"     (renderHtml (Text "<b>"))
+def t_text_amp     := assertEq "a &amp; b"      (renderHtml (Text "a & b"))
+def t_text_quote   := assertEq "say &quot;hi&quot;"
+                                                (renderHtml (Text "say \"hi\""))
+
+-- ===========================================================
+-- Elem: 空・属性なし
+-- ===========================================================
+def t_empty_div := assertEq "<div></div>"
+                            (renderHtml (Elem "div" nil nil))
+
+def t_div_with_text := assertEq "<div>hi</div>"
+                                (renderHtml (Elem "div" nil [Text "hi"]))
+
+-- ===========================================================
+-- Elem: 属性つき
+-- ===========================================================
+def t_class := assertEq "<div class=\"box\">x</div>"
+                        (renderHtml (Elem "div" [AClass "box"] [Text "x"]))
+
+def t_id_style := assertEq "<p id=\"hello\" style=\"color:red\">!</p>"
+                           (renderHtml (Elem "p" [AId "hello", AStyle "color:red"] [Text "!"]))
+
+def t_link := assertEq "<a href=\"/x\">go</a>"
+                       (renderHtml (Elem "a" [AHref "/x"] [Text "go"]))
+
+-- ===========================================================
+-- Boolean attribute: ADisabled
+-- ===========================================================
+def t_disabled_true  := assertEq "<button disabled>x</button>"
+                                 (renderHtml (Elem "button" [ADisabled true] [Text "x"]))
+def t_disabled_false := assertEq "<button>x</button>"
+                                 (renderHtml (Elem "button" [ADisabled false] [Text "x"]))
+
+-- ===========================================================
+-- Void タグ (self-closing)
+-- ===========================================================
+def t_br    := assertEq "<br/>"    (renderHtml (Elem "br" nil nil))
+def t_hr    := assertEq "<hr/>"    (renderHtml (Elem "hr" nil nil))
+def t_input := assertEq "<input type=\"text\" value=\"abc\"/>"
+                        (renderHtml (Elem "input" [AType "text", AValue "abc"] nil))
+def t_img   := assertEq "<img src=\"/a.png\"/>"
+                        (renderHtml (Elem "img" [AAttr "src" "/a.png"] nil))
+
+-- ===========================================================
+-- ネスト: ul > li
+-- ===========================================================
+def t_ul_li := assertEq "<ul><li>a</li><li>b</li></ul>"
+                        (renderHtml (Elem "ul" nil [
+                            Elem "li" nil [Text "a"],
+                            Elem "li" nil [Text "b"]
+                        ]))
+
+-- ===========================================================
+-- AOnClick: data-seki-action 属性として埋め込まれる
+-- ===========================================================
+def t_onclick := assertEq "<button data-seki-action=\"inc\">+</button>"
+                          (renderHtml (Elem "button" [AOnClick "inc"] [Text "+"]))
+
+-- ===========================================================
+-- HTML エスケープが子テキストにも効く
+-- ===========================================================
+def t_escape_in_child := assertEq "<p>1 &lt; 2 &amp; 3 &gt; 0</p>"
+                                  (renderHtml (Elem "p" nil [Text "1 < 2 & 3 > 0"]))
+
+-- ===========================================================
+-- 属性値もエスケープされる
+-- ===========================================================
+def t_escape_in_attr := assertEq "<a href=\"/q?a=&amp;b=&lt;c&gt;\">x</a>"
+                                 (renderHtml (Elem "a" [AHref "/q?a=&b=<c>"] [Text "x"]))
+
+-- ===========================================================
+-- actionButton: 形だけ確認 (data-seki-action 属性が含まれる)
+-- ===========================================================
+def t_action_button :=
+    assertContains "data-seki-action=\"inc\""
+                   (renderHtml (actionButton "inc" "+"))
+
+def t_action_button_form :=
+    assertContains "action=\"/action/inc\""
+                   (renderHtml (actionButton "inc" "+"))
+
+def t_action_button_disabled :=
+    assertContains "disabled"
+                   (renderHtml (actionButtonDisabled "dec" "−" true))
+
+-- ===========================================================
+-- 静的検査: void タグ判定の集合論的性質
+-- ===========================================================
+-- isVoidTag は finite な enum なので by eval で完全検証できる
+theorem void_br    : isVoidTag "br"    == true  := by eval
+theorem void_input : isVoidTag "input" == true  := by eval
+theorem void_div   : isVoidTag "div"   == false := by eval
+theorem void_span  : isVoidTag "span"  == false := by eval
+
+-- ===========================================================
+-- テストケース集計
+-- ===========================================================
+def cases := [
+    -- Text
+    TestCase "Text plain"               t_text_plain,
+    TestCase "Text escapes < and >"     t_text_lt_gt,
+    TestCase "Text escapes &"           t_text_amp,
+    TestCase "Text escapes quotes"      t_text_quote,
+    -- Elem (no attrs)
+    TestCase "Empty div"                t_empty_div,
+    TestCase "Div with text"            t_div_with_text,
+    -- Attrs
+    TestCase "Class attr"               t_class,
+    TestCase "Id + style attrs"         t_id_style,
+    TestCase "Link with href"           t_link,
+    -- Boolean
+    TestCase "Disabled true → flag"     t_disabled_true,
+    TestCase "Disabled false → omitted" t_disabled_false,
+    -- Void
+    TestCase "br void"                  t_br,
+    TestCase "hr void"                  t_hr,
+    TestCase "input void with attrs"    t_input,
+    TestCase "img void"                 t_img,
+    -- Nesting
+    TestCase "ul > li × 2"              t_ul_li,
+    -- OnClick
+    TestCase "OnClick → data-attr"      t_onclick,
+    -- Escape
+    TestCase "Escape in child text"     t_escape_in_child,
+    TestCase "Escape in attr value"     t_escape_in_attr,
+    -- actionButton
+    TestCase "actionButton data attr"   t_action_button,
+    TestCase "actionButton form action" t_action_button_form,
+    TestCase "actionButton disabled"    t_action_button_disabled
+]
+
+runMain "lib/ui/dom" cases

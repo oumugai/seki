@@ -1,0 +1,341 @@
+-- ===========================================================
+-- lib/ui/dom.seki — View ツリーの ADT と HTML renderer
+-- ===========================================================
+--
+-- View は HTML 要素のツリーを表す純粋値。Rust 層には何も増やさず、
+-- View 値そのものを seki の `data` ADT として構築する。
+-- `renderHtml` で String 化し、`httpServe` で配信する。
+--
+-- 集合論的に:
+--   View = Elem(tag : String, attrs : List Attr, children : List View)
+--        ⊔ Text(s : String)
+--
+-- Attr も disjoint union として構成され、それぞれが (key, value) ペアに
+-- 対応する HTML 属性を表す。AOnClick はサーバへ送る action 名を保持する。
+
+-- ----- 属性 ADT -----
+data Attr
+  = AClass       String
+  | AId          String
+  | AStyle       String
+  | AHref        String
+  | AType        String
+  | AValue       String
+  | AName        String
+  | APlaceholder String
+  | AOnClick     String           -- POST /action/<name> として送られる
+  | ADisabled    Bool             -- HTML5 boolean attribute
+  | AAttr        String String    -- 汎用の key=value 属性
+
+-- ----- View ADT -----
+-- RawHtml は既にエスケープ済みの HTML 文字列を直接挿入する.
+-- Markdown レンダラのように外部で組み上げた HTML を埋め込む場合に使う.
+-- セキュリティ注意: RawHtml に外部入力をそのまま渡してはならない.
+data View
+  = Elem String (List Attr) (List View)
+  | Text String
+  | RawHtml String
+
+-- ----- 構築子の短縮形 -----
+def el  := \tag attrs children -> Elem tag attrs children
+def el_ := \tag children       -> Elem tag nil children
+def txt := \s                  -> Text s
+
+-- ----- 頻出タグの短縮形 (引数は attrs + children) -----
+def divE    := \attrs children -> Elem "div"    attrs children
+def spanE   := \attrs children -> Elem "span"   attrs children
+def h1E     := \attrs children -> Elem "h1"     attrs children
+def h2E     := \attrs children -> Elem "h2"     attrs children
+def h3E     := \attrs children -> Elem "h3"     attrs children
+def pE      := \attrs children -> Elem "p"      attrs children
+def buttonE := \attrs children -> Elem "button" attrs children
+def inputE  := \attrs          -> Elem "input"  attrs nil
+def aE      := \attrs children -> Elem "a"      attrs children
+def formE   := \attrs children -> Elem "form"   attrs children
+def ulE     := \attrs children -> Elem "ul"     attrs children
+def liE     := \attrs children -> Elem "li"     attrs children
+def labelE  := \attrs children -> Elem "label"  attrs children
+def brE     := \_              -> Elem "br"     nil nil
+
+-- ----- HTML エスケープ -----
+-- < > & " ' を実体参照に置き換える. `&` 最初を必ず処理.
+def htmlEscape := \s ->
+    let s1 = strReplace "&" "&amp;"  s  in
+    let s2 = strReplace "<" "&lt;"   s1 in
+    let s3 = strReplace ">" "&gt;"   s2 in
+    let s4 = strReplace "\"" "&quot;" s3 in
+    strReplace "'" "&#39;" s4
+
+-- ----- void 要素 (self-closing) -----
+def isVoidTag := \tag ->
+    if tag == "br" then true
+    else if tag == "hr" then true
+    else if tag == "img" then true
+    else if tag == "input" then true
+    else if tag == "meta" then true
+    else if tag == "link" then true
+    else false
+
+-- ----- 1 個の属性を文字列化 -----
+-- 値は htmlEscape 経由で必ず引用。boolean attribute は値なしフラグ。
+def attrToStr := \a ->
+    match a with
+    | AClass c        -> strJoin "" ["class=\"",       htmlEscape c, "\""]
+    | AId i           -> strJoin "" ["id=\"",          htmlEscape i, "\""]
+    | AStyle s        -> strJoin "" ["style=\"",       htmlEscape s, "\""]
+    | AHref h         -> strJoin "" ["href=\"",        htmlEscape h, "\""]
+    | AType t         -> strJoin "" ["type=\"",        htmlEscape t, "\""]
+    | AValue v        -> strJoin "" ["value=\"",       htmlEscape v, "\""]
+    | AName n         -> strJoin "" ["name=\"",        htmlEscape n, "\""]
+    | APlaceholder p  -> strJoin "" ["placeholder=\"", htmlEscape p, "\""]
+    | AOnClick action -> strJoin "" ["data-seki-action=\"", htmlEscape action, "\""]
+    | ADisabled b     -> if b then "disabled" else ""
+    | AAttr k v       -> strJoin "" [htmlEscape k, "=\"", htmlEscape v, "\""]
+
+-- ----- 属性リスト全体を結合 (空文字列は除外) -----
+def attrsToStr := \attrs ->
+    let parts = map attrToStr attrs in
+    let nonEmpty = filter (\s -> strLen s > 0) parts in
+    strJoin " " nonEmpty
+
+-- ===========================================================
+-- renderHtml : View → String
+--
+-- 純関数. テスト可能. theorem の対象としても扱える.
+-- ===========================================================
+def renderHtml := \v ->
+    match v with
+    | Text s    -> htmlEscape s
+    | RawHtml s -> s
+    | Elem tag attrs children ->
+        let attrStr = attrsToStr attrs in
+        let openHead =
+            if strLen attrStr == 0 then strConcat "<" tag
+            else strJoin "" ["<", tag, " ", attrStr]
+        in
+        if isVoidTag tag then
+            strConcat openHead "/>"
+        else
+            let childStrs = map renderHtml children in
+            let inner    = strJoin "" childStrs in
+            strJoin "" [openHead, ">", inner, "</", tag, ">"]
+
+-- ===========================================================
+-- HTML ドキュメント全体を組み立てる
+--
+-- 任意の <style> をインライン埋め込みできる. 空文字列で省略可能.
+-- POST /action/<name> をフォーム送信する小さな JS を必ず同梱する.
+-- ===========================================================
+def sekiClientScript :=
+    strJoin "\n" [
+        "<script>",
+        "document.addEventListener('click', function(e) {",
+        "  var t = e.target;",
+        "  while (t && !t.getAttribute('data-seki-action')) t = t.parentElement;",
+        "  if (!t) return;",
+        "  if (t.hasAttribute('disabled')) return;",
+        "  var act = t.getAttribute('data-seki-action');",
+        "  e.preventDefault();",
+        "  fetch('/action/' + act, {method:'POST'})",
+        "    .then(function(r){ return r.text(); })",
+        "    .then(function(html){ document.open(); document.write(html); document.close(); });",
+        "});",
+        "</script>"
+    ]
+
+-- ----- 拡張版: 追加スクリプトを差し込めるレンダラ -----
+-- extraScript は body 末尾に <script>...</script> として埋め込まれる.
+-- SSE 用の EventSource セットアップ等で利用する.
+def renderPageStyledExt := \title css extraScript bodyView ->
+    let body = renderHtml bodyView in
+    let styleBlock = if strLen css == 0 then ""
+                     else strJoin "" ["  <style>\n", css, "\n  </style>\n"]
+    in
+    let extraBlock = if strLen extraScript == 0 then ""
+                     else strJoin "" ["<script>\n", extraScript, "\n</script>\n"]
+    in
+    strJoin "" [
+        "<!DOCTYPE html>\n",
+        "<html lang=\"ja\">\n",
+        "<head>\n",
+        "  <meta charset=\"UTF-8\">\n",
+        "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n",
+        "  <title>", htmlEscape title, "</title>\n",
+        styleBlock,
+        "</head>\n",
+        "<body>\n",
+        body, "\n",
+        sekiClientScript, "\n",
+        extraBlock,
+        "</body>\n",
+        "</html>\n"
+    ]
+
+def renderPageStyled := \title css bodyView ->
+    renderPageStyledExt title css "" bodyView
+
+def renderPage := \title bodyView -> renderPageStyled title "" bodyView
+
+-- ===========================================================
+-- アクション付きボタン (no-JS でも form submit でフォールバック可能)
+--
+-- AOnClick 属性をクライアント JS が拾い、POST /action/<name> を送る.
+-- 同等のフォームでラップしておけば JS 無効でも動く.
+-- ===========================================================
+def actionButton := \action label ->
+    Elem "form" [
+        AAttr "method" "POST",
+        AAttr "action" (strConcat "/action/" action),
+        AStyle "display:inline"
+    ] [
+        Elem "button" [AType "submit", AOnClick action] [Text label]
+    ]
+
+def actionButtonDisabled := \action label disabled ->
+    Elem "form" [
+        AAttr "method" "POST",
+        AAttr "action" (strConcat "/action/" action),
+        AStyle "display:inline"
+    ] [
+        Elem "button" [AType "submit", AOnClick action, ADisabled disabled] [Text label]
+    ]
+
+-- ===========================================================
+-- フォーム入力ヘルパ
+-- ===========================================================
+--
+-- POST /action/<name> + application/x-www-form-urlencoded ボディで送信される
+-- 入力値を update 側で扱えるようにする. 簡易版で `+` → space のみ復号する.
+-- (`%XX` は seki に chr/ord が無いため未対応; テキスト入力で記号を含めなければ問題ない.)
+--
+-- 1 つの入力欄を持つフォーム. 送信先は POST /action/<name>.
+def actionForm := \action inputName placeholder submitLabel ->
+    Elem "form" [
+        AAttr "method" "POST",
+        AAttr "action" (strConcat "/action/" action),
+        AStyle "display:flex; gap:8px; align-items:center"
+    ] [
+        Elem "input" [
+            AType        "text",
+            AName        inputName,
+            APlaceholder placeholder,
+            AAttr        "autocomplete" "off"
+        ] nil,
+        Elem "button" [AType "submit"] [Text submitLabel]
+    ]
+
+-- ===========================================================
+-- URL-encoded フォーム本文のパース
+-- ===========================================================
+--
+-- `body = "k1=v1&k2=v2&..."`  →  `List (String × String)`.
+-- 値は `+` を space に置換する (簡易 application/x-www-form-urlencoded).
+
+-- ----- %XX デコード (UTF-8 round-trip) -----
+--
+-- 設計: 入力を byte 列 (List Int) として組み立て, 最後に `bytesToStr` で
+-- UTF-8 decode する. これにより `%E6%97%A5` のような multi-byte sequence が
+-- そのまま「日」のような Unicode 文字に戻る.
+--
+-- 入力 char ごとに:
+--   - `%XX` (2 hex chars) → 1 バイト
+--   - リテラル ASCII char → `strBytes` で 1 バイト
+--   - リテラル multi-byte char → `strBytes` で複数バイト (通常は無いが安全側で)
+--
+-- バイト列は逆順で acc に積み, 最後に reverse + bytesToStr.
+-- 末尾再帰なので TCO が効き, 長文 URL でもスタックを消費しない.
+
+def hexCharVal := \c ->
+    if c == "0" then 0
+    else if c == "1" then 1
+    else if c == "2" then 2
+    else if c == "3" then 3
+    else if c == "4" then 4
+    else if c == "5" then 5
+    else if c == "6" then 6
+    else if c == "7" then 7
+    else if c == "8" then 8
+    else if c == "9" then 9
+    else if c == "a" or c == "A" then 10
+    else if c == "b" or c == "B" then 11
+    else if c == "c" or c == "C" then 12
+    else if c == "d" or c == "D" then 13
+    else if c == "e" or c == "E" then 14
+    else if c == "f" or c == "F" then 15
+    else -1
+
+-- 末尾再帰版 reverse (stdlib のは非末尾再帰で長リストでスタック消費).
+def reverseAcc := \acc xs ->
+    if null xs then acc
+    else reverseAcc (cons (head xs) acc) (tail xs)
+
+def reverseFast := \xs -> reverseAcc nil xs
+
+-- 単一 char のバイトを acc 先頭 (reversed) に積む.
+def prependBytesRev := \bs acc ->
+    foldl (\a b -> cons b a) acc bs
+
+-- 末尾再帰: chars を走査し, バイト列を逆順で acc に積む.
+def urlDecodeBytesRev := \chars acc ->
+    if null chars then acc
+    else
+        let c = head chars in
+        let rest1 = tail chars in
+        if c == "%" then
+            if null rest1 then cons 37 acc
+            else
+                let h1 = head rest1 in
+                let rest2 = tail rest1 in
+                if null rest2 then prependBytesRev (strBytes h1) (cons 37 acc)
+                else
+                    let h2 = head rest2 in
+                    let rest3 = tail rest2 in
+                    let v1 = hexCharVal h1 in
+                    let v2 = hexCharVal h2 in
+                    if v1 >= 0 and v2 >= 0 then
+                        urlDecodeBytesRev rest3 (cons (v1 * 16 + v2) acc)
+                    else
+                        urlDecodeBytesRev rest1 (cons 37 acc)
+        else
+            urlDecodeBytesRev rest1 (prependBytesRev (strBytes c) acc)
+
+-- CRLF / CR を LF に正規化.  順序重要: 先に \r\n を潰してから単独 \r.
+def normalizeNewlines := \s ->
+    strReplace "\r" "\n" (strReplace "\r\n" "\n" s)
+
+def urlDecode := \s ->
+    let withSpaces = strReplace "+" " " s in
+    let bytesRev = urlDecodeBytesRev (strChars withSpaces) nil in
+    let bytes = reverseFast bytesRev in
+    match bytesToStr bytes with
+    | Ok t  -> normalizeNewlines t
+    | Err _ -> normalizeNewlines withSpaces
+
+def parseKV := \pair ->
+    let eq = strIndexOf "=" pair in
+    if eq < 0 then (urlDecode pair, "")
+    else
+        let k = substring 0 eq pair in
+        let v = substring (eq + 1) (strLen pair - eq - 1) pair in
+        (urlDecode k, urlDecode v)
+
+def parseFormBody := \body ->
+    if strLen body == 0 then nil
+    else map parseKV (strSplit "&" body)
+
+-- ----- key で値を取り出す (Option) -----
+def formFieldLookup := \name kvs ->
+    if null kvs then None
+    else
+        let p = head kvs in
+        if fst p == name then Some (snd p)
+        else formFieldLookup name (tail kvs)
+
+def formField := \body name ->
+    formFieldLookup name (parseFormBody body)
+
+-- ----- key で値を取り出す (default 付き) -----
+def formFieldOr := \body name default ->
+    match formField body name with
+    | Some v -> v
+    | None   -> default

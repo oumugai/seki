@@ -1,6 +1,6 @@
 # 5. 証明戦術
 
-seki は **9 種類のタクティク + コンビネータ** を持ちます。それぞれの
+seki は **11 種類のタクティク + コンビネータ** を持ちます。それぞれの
 意味論と健全性条件をまとめます。
 
 タクティクは `theorem` の `:=` の後に `by <tactic>` 形式で書きます。
@@ -115,19 +115,52 @@ theorem t : forall n in Nat, n + 0 == n
 
 ## 5.10 `by linarith`
 
-**意味**: 線形不等式の決定手続き。`by algebra` のサブセットだが軽量。
-Phase 5 で **SMT-lite** (single-variable Fourier-Motzkin) が追加された
-(`linarithProve` builtin として exposed)。
+**意味**: `by algebra` の別名 (実装上は同じ `verify_algebra` に dispatch する) —
+「線形不等式を証明したいときの意図を示す」ための名前として使う。
+前提の連言 (`P1 and P2 and ... => Q`) は個別の仮定に分解され、
+そのうち複数を **等重み 1 で加算した結果がゴールの多項式と一致する**
+場合に閉じる (`hyps_sum_proves`) — 例えば `x > 0`, `y > 0` から
+`x + y > 0` を導ける。単一の仮定からの含意は `hypothesis_proves` が別途扱う。
 
-**健全性**: ✅ 線形整数 / 有理数算術に対して健全
-(property test `linarith_never_proves_a_falsehood` で 400 例検証)。
+単変数の Fourier-Motzkin による本格的な SMT-lite ソルバは
+`src/linarith.rs` に別実装があり、`linarithProve` builtin として
+式ベースで呼べる (Phase 5)。ただし `by linarith` **タクティク自体は
+まだこのソルバに接続されていない** — 上記の加算的な仮定結合のみ。
+
+**健全性**: ✅ `by algebra` と同じ多項式判定に加え、加算結合は
+「非負の総和は非負・いずれかが正なら総和も正」という健全な補題のみ使う
+(`hyps_sum_proves`)。`linarithProve` builtin 自体も線形整数 / 有理数算術に
+対して健全 (property test `linarith_never_proves_a_falsehood` で 400 例検証)。
 
 ```seki
 theorem t : forall (x y) in Int, x > 0 and y > 0 => x + y > 0
     := by linarith
 ```
 
-## 5.11 証明項 (Curry-Howard)
+## 5.11 `by auto`
+
+**意味**: ポートフォリオ探索。固定順序のタクティク列
+(`refl` → `by eval` → `by decide` → `by algebra` → `by induction` →
+`by strong_induction` → `by intros then algebra`) と、命題に現れる
+ユーザ定義関数ごとの `unfold f then algebra` / `unfold f then induction`、
+既存 theorem との記号重なりでランク付けした `by simp [lemma]` の組合せを
+順に試し、**最初にゴールを閉じたもの**を採用する。
+
+`theorem t : P` (`:=` を省略した形) は REPL / ファイルの両方でこれに
+desugar される。REPL の `:why` コマンドは補題を優先する変種
+(`try_portfolio_lemma_first`) を使う — どの既存定理を使って閉じたかを
+知りたい場面のため。
+
+**健全性**: ✅ 各候補タクティク自身の健全性に従う (portfolio は
+「どれを最初に試すか」の探索順だけで、証明自体の正しさには関与しない)。
+
+```seki
+def sum := \n -> if n == 0 then 0 else n + sum (n - 1)
+theorem gauss : forall n in Nat, 2 * sum n == n * (n + 1) := by auto
+    -- portfolio が unfold + induction の組合せを発見して閉じる
+```
+
+## 5.12 証明項 (Curry-Howard)
 
 タクティクなしで Curry-Howard 風に書ける場合:
 - `forall x in S, P(x)` は関数として、適用すると証明を返す
@@ -138,7 +171,7 @@ theorem t : forall x in Nat, x == x := \x -> refl
 theorem e : exists x in Nat, x > 5 := (6, refl)  -- 略式
 ```
 
-## 5.12 タクティク合成 (`then`)
+## 5.13 タクティク合成 (`then`)
 
 ```
 proof := tac1 then tac2 then tac3
@@ -152,18 +185,21 @@ theorem mul_add : forall (x y z) in Int, x * (y + z) == x * y + x * z
     := by intros then algebra
 ```
 
-## 5.13 健全性の総まとめ
+## 5.14 健全性の総まとめ
 
 | 戦術 | 種別 | 健全性 |
 |---|---|---|
 | `eval` | closer | ✅ 有限のみ |
 | `refl` | closer / 項 | ✅ |
-| `algebra` | closer | ✅ Int / Rat 上の多項式 |
+| `algebra` | closer | ✅ Int / Rat 上の多項式 + 仮定の加算結合 |
+| `linarith` | closer | ✅ `algebra` の別名 (同じ健全性) |
+| `decide` | closer | ✅ Bool に reduce できる場合のみ |
 | `induction` | closer | ✅ 構造帰納 |
 | `strong_induction` | closer | ✅ Nat 深さ 2 |
 | `simp` | both | ✅ 既存定理の連鎖 |
 | `unfold` | transformer | ✅ 定義展開 |
 | `intros` | transformer | ✅ 全称除去 |
+| `auto` | closer (portfolio) | ✅ 各候補タクティクの健全性に従う |
 | `decide` | closer | ✅ Bool reduce |
 | `linarith` | closer | ✅ 線形 |
 | Curry-Howard 項 | closer | ✅ |

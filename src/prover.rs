@@ -208,7 +208,157 @@ impl<'a> Prover<'a> {
             }
             Proof::Seq(tacs) => self.verify_seq(prop, env, tacs),
             Proof::Term(term) => self.verify_term(prop, term, env),
+            Proof::ByAuto => match self.try_portfolio(prop, env) {
+                Some(_) => Ok(Value::Bool(true)),
+                None => Err(SekiError::Proof(
+                    "by auto: no tactic in the portfolio closed the goal".into(),
+                )),
+            },
         }
+    }
+
+    /// Portfolio search.  Tries a fixed pipeline of closers and combinators
+    /// in increasing cost order; returns the first `Proof` that successfully
+    /// verifies `prop`, or `None` if all candidates fail.
+    ///
+    /// The order is roughly: refl/eval/decide (instant) → algebra/linarith
+    /// (polynomial normalization) → induction/strong_induction (sample-driven
+    /// step verification) → simp on all proven theorems → intros-prefixed
+    /// variants → unfold combinators for each user-defined function appearing
+    /// in `prop` → simp with the top symbol-overlap-ranked lemmas (singletons
+    /// then pairs).
+    ///
+    /// Each candidate is bounded only by its own internal logic — there is
+    /// no per-candidate wall-clock cutoff here, because callers that need a
+    /// timeout (e.g. the REPL's background search) run the whole portfolio
+    /// inside a worker thread that they cancel externally.
+    pub fn try_portfolio(&self, prop: &Expr, env: &Env) -> Option<Proof> {
+        let candidates = self.portfolio_candidates(prop, false);
+        for cand in candidates {
+            if self.verify(prop, &cand, env).is_ok() {
+                return Some(cand);
+            }
+        }
+        None
+    }
+
+    /// Variant of `try_portfolio` that *prefers lemma-based proofs*: the
+    /// top-ranked `by simp [T_i]` and 2-lemma combos are tried first, and
+    /// the cheap closers (refl/eval/algebra/...) only run as a fallback.
+    /// Used by the REPL's `:why` command — the user is explicitly asking
+    /// which earlier lemmas a goal builds on, so a derivation that names
+    /// a relevant theorem is more informative than one that closes via
+    /// `by eval` sampling.
+    pub fn try_portfolio_lemma_first(&self, prop: &Expr, env: &Env) -> Option<Proof> {
+        let candidates = self.portfolio_candidates(prop, true);
+        for cand in candidates {
+            if self.verify(prop, &cand, env).is_ok() {
+                return Some(cand);
+            }
+        }
+        None
+    }
+
+    /// Build the ordered list of `Proof` candidates.  When `prefer_lemmas`
+    /// is true, lemma-based combinators come first (used by `:why`);
+    /// otherwise cheap closers come first (used by `:prove` / `by auto`).
+    fn portfolio_candidates(&self, prop: &Expr, prefer_lemmas: bool) -> Vec<Proof> {
+        // Collect identifiers referenced in the proposition so we can
+        // (a) propose `unfold f then algebra` for user-defined `f`,
+        // (b) rank existing theorems by symbol overlap for `by simp [..]`.
+        let mut idents: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        collect_idents(prop, &mut idents);
+
+        let mut user_funcs: Vec<String> = idents
+            .iter()
+            .filter(|n| {
+                matches!(
+                    self.ctx.globals.defs.get(n.as_str()),
+                    Some(Value::Closure { .. })
+                )
+            })
+            .cloned()
+            .collect();
+        user_funcs.sort();
+
+        let ranked: Vec<String> =
+            rank_lemmas(&idents, &self.ctx.globals.theorem_props, None);
+
+        // Sub-block: cheap closers (refl/eval/decide/algebra/induction).
+        let cheap: Vec<Proof> = vec![
+            Proof::Refl,
+            Proof::ByEval,
+            Proof::ByDecide,
+            Proof::ByAlgebra,
+            Proof::ByInduction,
+            Proof::ByStrongInduction,
+            Proof::Seq(vec![Proof::ByIntros, Proof::ByAlgebra]),
+        ];
+
+        // Sub-block: unfold combinators for each user-defined function.
+        let mut unfolds: Vec<Proof> = Vec::new();
+        for f in &user_funcs {
+            unfolds.push(Proof::Seq(vec![
+                Proof::ByUnfold(f.clone()),
+                Proof::ByAlgebra,
+            ]));
+            unfolds.push(Proof::Seq(vec![
+                Proof::ByIntros,
+                Proof::ByUnfold(f.clone()),
+                Proof::ByAlgebra,
+            ]));
+            unfolds.push(Proof::Seq(vec![
+                Proof::ByUnfold(f.clone()),
+                Proof::ByInduction,
+            ]));
+        }
+
+        // Sub-block: lemma-based combinators.  Singletons (top-5) then
+        // pairs (top-3 → 3 pairs).  Each is wrapped in `by intros then simp
+        // [T] then algebra` to handle quantified goals uniformly.
+        let mut lemma_chains: Vec<Proof> = Vec::new();
+        for name in ranked.iter().take(5) {
+            lemma_chains.push(Proof::Seq(vec![
+                Proof::ByIntros,
+                Proof::BySimp {
+                    lemmas: vec![name.clone()],
+                },
+                Proof::ByAlgebra,
+            ]));
+        }
+        let pool: Vec<&String> = ranked.iter().take(3).collect();
+        for i in 0..pool.len() {
+            for j in i + 1..pool.len() {
+                lemma_chains.push(Proof::Seq(vec![
+                    Proof::ByIntros,
+                    Proof::BySimp {
+                        lemmas: vec![pool[i].clone(), pool[j].clone()],
+                    },
+                    Proof::ByAlgebra,
+                ]));
+            }
+        }
+
+        // Full-pool simp falls last either way — most expensive search.
+        let fallback: Vec<Proof> = vec![
+            Proof::BySimp { lemmas: vec![] },
+            Proof::Seq(vec![Proof::ByIntros, Proof::BySimp { lemmas: vec![] }]),
+        ];
+
+        let mut out: Vec<Proof> = Vec::new();
+        if prefer_lemmas {
+            out.extend(lemma_chains);
+            out.extend(unfolds);
+            out.extend(cheap);
+            out.extend(fallback);
+        } else {
+            out.extend(cheap);
+            out.extend(unfolds);
+            out.extend(lemma_chains);
+            out.extend(fallback);
+        }
+        out
     }
 
     /// Run a sequence of tactics `t1 then t2 then ... then tk`.  Each
@@ -298,6 +448,7 @@ impl<'a> Prover<'a> {
             | Proof::ByDecide
             | Proof::ByInduction
             | Proof::ByStrongInduction
+            | Proof::ByAuto
             | Proof::Term(_)) => {
                 self.verify(prop, closer, env)?;
                 Ok(TacOutcome::Closed)
@@ -443,6 +594,13 @@ impl<'a> Prover<'a> {
             if hypothesis_proves(hcond, *htrue, body) {
                 return Ok(Value::Bool(true));
             }
+        }
+        // Try discharging via a *positive combination* of several
+        // hypotheses at once (e.g. `x > 0`, `y > 0` ⊢ `x + y > 0`) — sound
+        // because a sum of nonnegative quantities is nonnegative, and
+        // strictly positive if any summand is strictly positive.
+        if hyps_sum_proves(hyps, body) {
+            return Ok(Value::Bool(true));
         }
         let (op, lhs, rhs) = match body {
             Expr::BinOp(op, l, r)
@@ -1361,6 +1519,82 @@ fn negate_relation(op: &BinOp) -> BinOp {
     }
 }
 
+/// Normalize a hypothesis `cond` (negated if `htrue` is false) into
+/// `(poly, is_strict)` meaning `poly > 0` (is_strict) or `poly >= 0`
+/// (otherwise).  Returns `None` for relations this combinator can't use
+/// (`==`, `!=`) — those need exact cancellation, not summation.
+fn normalize_nonneg_hyp(cond: &Expr, htrue: bool) -> Option<(crate::algebra::Polynomial, bool)> {
+    let (op, l, r) = match cond {
+        Expr::BinOp(op, l, r) if is_relation(op) => (op.clone(), l.as_ref(), r.as_ref()),
+        _ => return None,
+    };
+    let lp = crate::algebra::expr_to_poly(l)?;
+    let rp = crate::algebra::expr_to_poly(r)?;
+    let diff = lp.sub(rp); // l - r
+    let eff_op = if htrue { op } else { negate_relation(&op) };
+    match eff_op {
+        BinOp::Gt => Some((diff, true)),
+        BinOp::Ge => Some((diff, false)),
+        BinOp::Lt => Some((diff.neg(), true)),
+        BinOp::Le => Some((diff.neg(), false)),
+        _ => None,
+    }
+}
+
+/// Try to discharge a `>` / `>=` goal as a *positive combination* (equal
+/// weight 1, no scaling) of the available inequality hypotheses — e.g.
+/// `x > 0`, `y > 0` ⊢ `x + y > 0`.  Sound: a sum of quantities each known
+/// `>= 0` is `>= 0`, and `> 0` as soon as one summand is strict.  Bounded
+/// to a handful of hypotheses (subset search is exponential) since proof
+/// contexts built by `by algebra`/`by linarith` rarely carry many at once.
+fn hyps_sum_proves(hyps: &[(Expr, bool)], goal: &Expr) -> bool {
+    let (gop, gl, gr) = match goal {
+        Expr::BinOp(op, l, r) if matches!(op, BinOp::Gt | BinOp::Ge) => {
+            (op.clone(), l.as_ref(), r.as_ref())
+        }
+        _ => return false,
+    };
+    let glp = match crate::algebra::expr_to_poly(gl) {
+        Some(p) => p,
+        None => return false,
+    };
+    let grp = match crate::algebra::expr_to_poly(gr) {
+        Some(p) => p,
+        None => return false,
+    };
+    let goal_diff = glp.sub(grp);
+
+    let normalized: Vec<(crate::algebra::Polynomial, bool)> = hyps
+        .iter()
+        .filter_map(|(c, t)| normalize_nonneg_hyp(c, *t))
+        .collect();
+    let n = normalized.len();
+    if n < 2 || n > 12 {
+        // n < 2: a single hypothesis is already covered by
+        // `hypothesis_proves`; n too large: bound the 2^n subset search.
+        return false;
+    }
+    for mask in 1u32..(1u32 << n) {
+        let mut acc = crate::algebra::Polynomial::zero();
+        let mut any_strict = false;
+        let mut count = 0;
+        for (i, (poly, strict)) in normalized.iter().enumerate() {
+            if mask & (1 << i) != 0 {
+                acc = acc.add(poly.clone());
+                any_strict |= *strict;
+                count += 1;
+            }
+        }
+        if count < 2 {
+            continue; // single-hypothesis subsets are `hypothesis_proves`'s job
+        }
+        if acc.sub(goal_diff.clone()).terms.is_empty() && (gop == BinOp::Ge || any_strict) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Sound implication check between two relations expressed as polynomials.
 /// Both relations are written in the form `p rel 0`.  Returns true when
 /// `hyp` proves `goal` for every valuation.
@@ -1556,28 +1790,50 @@ fn collect_nat_hyps(prop: &Expr, out: &mut Vec<(Expr, bool)>) {
 ///
 /// Returns `(conclusion, premises_in_order)`.  Each premise becomes a
 /// `(expr, true)` hypothesis for the algebra prover.
+/// Flatten a top-level conjunction of relations (`a > 0 and b > 0 and ...`)
+/// into its relational leaves.  Returns `None` (instead of a partial list)
+/// if any conjunct isn't itself a relation, so callers never silently drop
+/// a premise they can't represent as a hypothesis.
+fn flatten_relational_and(e: &Expr, out: &mut Vec<Expr>) -> bool {
+    match e {
+        Expr::BinOp(BinOp::And, l, r) => {
+            flatten_relational_and(l, out) && flatten_relational_and(r, out)
+        }
+        Expr::BinOp(op, _, _) if is_relation(op) => {
+            out.push(e.clone());
+            true
+        }
+        _ => false,
+    }
+}
+
 fn peel_implications(body: &Expr) -> (Expr, Vec<Expr>) {
     let mut premises = Vec::new();
     let mut cur = body.clone();
     loop {
         match &cur {
-            // `(not P) or Q` — the `=>` desugaring
+            // `(not P) or Q` — the `=>` desugaring.  `P` may itself be a
+            // conjunction of relations (`a > 0 and b > 0 => ...`), each
+            // conjunct becomes its own hypothesis.
             Expr::BinOp(BinOp::Or, l, r) => {
                 if let Expr::UnOp(UnOp::Not, inner) = l.as_ref() {
-                    if matches!(inner.as_ref(), Expr::BinOp(op, _, _) if is_relation(op)) {
-                        premises.push((**inner).clone());
+                    let mut conjuncts = Vec::new();
+                    if flatten_relational_and(inner, &mut conjuncts) {
+                        premises.extend(conjuncts);
                         cur = (**r).clone();
                         continue;
                     }
                 }
                 break;
             }
-            // `P -> Q` where P is a relational expression — treat as
-            // implication.  The function-arrow interpretation would have
-            // failed type-checking anyway (Bool isn't a Set).
+            // `P -> Q` where P is a (possibly conjoined) relational
+            // expression — treat as implication.  The function-arrow
+            // interpretation would have failed type-checking anyway (Bool
+            // isn't a Set).
             Expr::Arrow(l, r) => {
-                if matches!(l.as_ref(), Expr::BinOp(op, _, _) if is_relation(op)) {
-                    premises.push((**l).clone());
+                let mut conjuncts = Vec::new();
+                if flatten_relational_and(l, &mut conjuncts) {
+                    premises.extend(conjuncts);
                     cur = (**r).clone();
                     continue;
                 }
@@ -1960,6 +2216,120 @@ fn strip_foralls(e: &Expr) -> &Expr {
         cur = body;
     }
     cur
+}
+
+/// Walk `e` and collect every identifier referenced (variable / function /
+/// constructor / set name).  Used by the portfolio search to discover
+/// candidate unfold targets and rank candidate lemmas.
+pub fn collect_idents(e: &Expr, out: &mut std::collections::HashSet<String>) {
+    use Expr::*;
+    match e {
+        Var { name, .. } => {
+            out.insert(name.clone());
+        }
+        App { func, args } => {
+            collect_idents(func, out);
+            for a in args {
+                collect_idents(a, out);
+            }
+        }
+        BinOp(_, l, r) => {
+            collect_idents(l, out);
+            collect_idents(r, out);
+        }
+        UnOp(_, x) => collect_idents(x, out),
+        If { cond, then_branch, else_branch } => {
+            collect_idents(cond, out);
+            collect_idents(then_branch, out);
+            collect_idents(else_branch, out);
+        }
+        Let { value, body, .. } => {
+            collect_idents(value, out);
+            collect_idents(body, out);
+        }
+        Lambda { body, .. } => collect_idents(body, out),
+        SetEnum(xs) | Tuple(xs) | List(xs) => {
+            for x in xs {
+                collect_idents(x, out);
+            }
+        }
+        SetComp { domain, pred, .. } => {
+            collect_idents(domain, out);
+            collect_idents(pred, out);
+        }
+        Arrow(a, b) => {
+            collect_idents(a, out);
+            collect_idents(b, out);
+        }
+        DepArrow { from, to, .. } => {
+            collect_idents(from, out);
+            collect_idents(to, out);
+        }
+        Forall { domain, body, .. } | Exists { domain, body, .. } => {
+            collect_idents(domain, out);
+            collect_idents(body, out);
+        }
+        Int(_) | Real(_) | Bool(_) | Str(_) => {}
+    }
+}
+
+/// Walk a `Proof` AST and collect every theorem name referenced through a
+/// `BySimp { lemmas }`.  Used by `:why` to surface which existing lemmas
+/// the portfolio's discovered proof actually leans on, so the user sees
+/// "this follows from `gauss`" rather than just "by simp [gauss] then
+/// algebra".  Returns names in source order with duplicates preserved.
+pub fn extract_lemmas(p: &Proof) -> Vec<String> {
+    let mut out = Vec::new();
+    fn go(p: &Proof, out: &mut Vec<String>) {
+        match p {
+            Proof::BySimp { lemmas } => {
+                for l in lemmas {
+                    out.push(l.clone());
+                }
+            }
+            Proof::Seq(tacs) => {
+                for t in tacs {
+                    go(t, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    go(p, &mut out);
+    out
+}
+
+/// Rank proven theorems by Jaccard symbol overlap with `goal_syms`.  Returns
+/// names sorted by decreasing overlap, dropping any theorem whose own
+/// proposition has no identifier in common with the goal.  `self_name`
+/// suppresses a theorem from ranking against itself (used when rebuilding
+/// the search for a goal that *is* a theorem statement).
+fn rank_lemmas(
+    goal_syms: &std::collections::HashSet<String>,
+    pool: &std::collections::HashMap<String, Expr>,
+    self_name: Option<&str>,
+) -> Vec<String> {
+    let mut scored: Vec<(f64, String)> = Vec::new();
+    for (name, stmt) in pool {
+        if Some(name.as_str()) == self_name {
+            continue;
+        }
+        let mut syms = std::collections::HashSet::new();
+        collect_idents(stmt, &mut syms);
+        let inter = goal_syms.intersection(&syms).count() as f64;
+        if inter == 0.0 {
+            continue;
+        }
+        let union = goal_syms.union(&syms).count() as f64;
+        let jaccard = inter / union.max(1.0);
+        scored.push((jaccard, name.clone()));
+    }
+    scored.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.cmp(&b.1)) // stable tie-break by name
+    });
+    scored.into_iter().map(|(_, n)| n).collect()
 }
 
 // `subst` lives in `ast.rs` so the evaluator can reuse it for tautology

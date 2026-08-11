@@ -26,6 +26,20 @@ pub struct EvalCtx<'a> {
     pub globals: &'a Globals,
 }
 
+/// Result of evaluating a closure body with tail-call awareness.
+///
+/// `Done(v)`: the body produced a value `v`; the caller's `apply` loop can
+/// either return it (if no args remain) or continue applying.
+///
+/// `TailCall(f, args)`: the body's last action was a function call.  Instead
+/// of evaluating it (which would recurse through `eval`), we hand `f` and
+/// `args` back to `apply` so it can loop without growing the stack.  This is
+/// what makes tail-recursive seki functions run in O(1) stack space.
+enum EvalOutcome {
+    Done(Value),
+    TailCall(Value, Vec<Value>),
+}
+
 impl<'a> EvalCtx<'a> {
     pub fn new(globals: &'a Globals) -> Self {
         EvalCtx { globals }
@@ -292,16 +306,18 @@ impl<'a> EvalCtx<'a> {
 
     /// Apply a function value to a list of arguments.  Supports currying:
     /// extra args are applied to the result; missing args produce a closure.
+    ///
+    /// Tail-call optimization: instead of recursing through `self.eval` for
+    /// a closure body's final call, `eval_tail` returns either a final value
+    /// (`Done`) or a deferred call (`TailCall(f', args')`) that we re-enter
+    /// in this same `apply` loop.  Stack usage stays O(1) regardless of
+    /// recursion depth for tail-recursive functions.
     pub fn apply(&self, mut f: Value, mut args: Vec<Value>) -> SekiResult<Value> {
         while !args.is_empty() {
             match f {
                 Value::Closure { params, body, env, rec_name } => {
                     let take = args.len().min(params.len());
                     let mut env2 = env.clone();
-                    // For `let rec`-style bindings, expose the name inside
-                    // the body so it can refer to itself.  We re-build the
-                    // self value with rec_name preserved so deeper recursive
-                    // calls keep the link.
                     if let Some(n) = &rec_name {
                         let self_val = Value::Closure {
                             params: params.clone(),
@@ -315,12 +331,26 @@ impl<'a> EvalCtx<'a> {
                         env2 = env2.extend(params[i].clone(), args[i].clone());
                     }
                     if take == params.len() {
-                        // fully applied this layer
-                        let result = self.eval(&body, &env2)?;
-                        f = result;
-                        args.drain(0..take);
+                        // Fully applied: evaluate the body with tail-call awareness.
+                        match self.eval_tail(&body, &env2)? {
+                            EvalOutcome::Done(v) => {
+                                args.drain(0..take);
+                                f = v;
+                            }
+                            EvalOutcome::TailCall(new_f, new_args) => {
+                                // Discard consumed args; prepend the tail-call args
+                                // ahead of any over-application remaining.  Loop
+                                // continues with the new function instead of
+                                // recursing through eval — the key TCO step.
+                                args.drain(0..take);
+                                let mut combined = new_args;
+                                combined.append(&mut args);
+                                args = combined;
+                                f = new_f;
+                            }
+                        }
                     } else {
-                        // partially applied — return a closure binding remaining params
+                        // Partially applied — return a closure binding remaining params.
                         let rest = params[take..].to_vec();
                         return Ok(Value::Closure {
                             params: rest,
@@ -340,9 +370,6 @@ impl<'a> EvalCtx<'a> {
                         )));
                     }
                     let take: Vec<Value> = args.drain(0..b.arity).collect();
-                    // Special-case builtins that need access to the evaluator
-                    // context (because they call closures or compile-time
-                    // values back to runtime).
                     let res = match b.name {
                         "spawn" => spawn_dispatch(self.globals, &take)
                             .map_err(SekiError::Runtime)?,
@@ -361,6 +388,101 @@ impl<'a> EvalCtx<'a> {
             }
         }
         Ok(f)
+    }
+
+    /// Evaluate `expr` in tail position: walk through tail-position-preserving
+    /// constructs (`let`, `if`) iteratively, and when we hit an `App`, return
+    /// it as a deferred `TailCall` so the enclosing `apply` loop can dispatch
+    /// without growing the call stack.
+    ///
+    /// All non-tail-position sub-expressions (e.g. `value` of a `let`,
+    /// `cond` of an `if`, function/arguments of an `App`) are evaluated
+    /// eagerly via `self.eval`.  The optimization only collapses tail calls;
+    /// deeply-nested non-tail computations still recurse.
+    fn eval_tail(&self, expr: &Expr, env: &Env) -> SekiResult<EvalOutcome> {
+        let mut expr_ptr: &Expr = expr;
+        let mut env_local: Env = env.clone();
+        loop {
+            match expr_ptr {
+                Expr::Let { name, ty: _, value, body, rec } => {
+                    let v = self.eval(value, &env_local)?;
+                    let v = if *rec {
+                        match v {
+                            Value::Closure { params, body: cbody, env: cenv, .. } =>
+                                Value::Closure {
+                                    params,
+                                    body: cbody,
+                                    env: cenv,
+                                    rec_name: Some(name.clone()),
+                                },
+                            other => return Err(SekiError::Runtime(format!(
+                                "let rec {}: value must be a lambda, got {}",
+                                name, other.type_name()
+                            ))),
+                        }
+                    } else {
+                        v
+                    };
+                    env_local = env_local.extend(name.clone(), v);
+                    expr_ptr = body;
+                }
+                Expr::If { cond, then_branch, else_branch } => {
+                    let c = self.eval(cond, &env_local)?;
+                    match c {
+                        Value::Bool(true) => { expr_ptr = then_branch; }
+                        Value::Bool(false) => { expr_ptr = else_branch; }
+                        other => return Err(SekiError::Runtime(format!(
+                            "if condition must be Bool, got {}",
+                            other.type_name()
+                        ))),
+                    }
+                }
+                Expr::App { func, args } => {
+                    // Evaluate arguments and function in current env, then
+                    // return a TailCall thunk for `apply` to dispatch.
+                    let mut argv = Vec::with_capacity(args.len());
+                    for a in args {
+                        argv.push(self.eval(a, &env_local)?);
+                    }
+                    // Class-method dispatch (mirrors eval's App case).
+                    if let Expr::Var { name: method_name, .. } = func.as_ref() {
+                        if let Some(class_name) =
+                            self.globals.class_methods.get(method_name).cloned()
+                        {
+                            if !argv.is_empty() {
+                                let already_dict = is_dict_value(
+                                    &argv[0],
+                                    &class_name,
+                                    &self.globals,
+                                );
+                                if !already_dict {
+                                    let type_key = argv[0].type_name();
+                                    let key =
+                                        (class_name.clone(), type_key.to_string());
+                                    if let Some(inst) =
+                                        self.globals.instances.get(&key).cloned()
+                                    {
+                                        let dict = self.globals.defs.get(&inst)
+                                            .cloned()
+                                            .ok_or_else(|| SekiError::Runtime(
+                                                format!(
+                                                    "instance `{}` registered but not defined",
+                                                    inst
+                                                ),
+                                            ))?;
+                                        argv.insert(0, dict);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let fv = self.eval(func, &env_local)?;
+                    return Ok(EvalOutcome::TailCall(fv, argv));
+                }
+                // Non-tail-position expressions: evaluate normally.
+                _ => return Ok(EvalOutcome::Done(self.eval(expr_ptr, &env_local)?)),
+            }
+        }
     }
 
     fn eval_binop(&self, op: &BinOp, l: &Expr, r: &Expr, env: &Env) -> SekiResult<Value> {
@@ -1594,6 +1716,80 @@ pub fn make_builtin_prelude() -> Globals {
     }
     fn b_to_str(args: &[Value]) -> Result<Value, String> {
         Ok(Value::Str(format!("{}", args[0])))
+    }
+
+    // --- byte ⇄ string (UTF-8) --------------------------------------------
+    //
+    // `strBytes : String -> List Int` — get UTF-8 bytes of a string.  Each
+    // element is in 0..=255.
+    //
+    // `bytesToStr : List Int -> Result String String` — UTF-8-decode a list
+    // of bytes into a String.  Returns `Err` for out-of-range bytes
+    // (negative or > 255) or invalid UTF-8 sequences.  Pairs with strBytes:
+    // `bytesToStr (strBytes s) == Ok s` for any well-formed s.
+    //
+    // Use case: round-tripping percent-encoded bytes (e.g. `%E6%97%A5` →
+    // `日`).  Without these, URL decoding can only handle ASCII.
+
+    /// Convert a pair-encoded `List Int` to `Vec<i64>`.
+    fn list_to_int_vec(v: &Value) -> Result<Vec<i64>, String> {
+        let mut out = Vec::new();
+        let mut cur = v;
+        loop {
+            let xs = match cur {
+                Value::Tuple(xs) if xs.len() == 2 => xs,
+                _ => return Err("expected a List Int".into()),
+            };
+            match (&xs[0], &xs[1]) {
+                (Value::Int(0), _) => return Ok(out),
+                (Value::Int(1), Value::Tuple(inner)) if inner.len() == 2 => {
+                    match &inner[0] {
+                        Value::Int(n) => out.push(*n),
+                        v => return Err(format!(
+                            "expected Int element, got {}",
+                            v.type_name()
+                        )),
+                    }
+                    cur = &inner[1];
+                }
+                _ => return Err("malformed list".into()),
+            }
+        }
+    }
+
+    fn b_str_bytes(args: &[Value]) -> Result<Value, String> {
+        match &args[0] {
+            Value::Str(s) => {
+                let parts: Vec<Value> =
+                    s.bytes().map(|b| Value::Int(b as i64)).collect();
+                Ok(make_list(parts))
+            }
+            v => Err(format!("strBytes: expected String, got {}", v.type_name())),
+        }
+    }
+
+    fn b_bytes_to_str(args: &[Value]) -> Result<Value, String> {
+        let ints = match list_to_int_vec(&args[0]) {
+            Ok(v) => v,
+            Err(e) => return Ok(make_err(format!("bytesToStr: {}", e))),
+        };
+        let mut bytes = Vec::with_capacity(ints.len());
+        for n in ints {
+            if !(0..=255).contains(&n) {
+                return Ok(make_err(format!(
+                    "bytesToStr: byte out of range 0..=255: {}",
+                    n
+                )));
+            }
+            bytes.push(n as u8);
+        }
+        match String::from_utf8(bytes) {
+            Ok(s) => Ok(make_ok(Value::Str(s))),
+            Err(e) => Ok(make_err(format!(
+                "bytesToStr: invalid UTF-8 ({})",
+                e.utf8_error()
+            ))),
+        }
     }
 
     // --- file I/O ----------------------------------------------------------
@@ -3126,6 +3322,8 @@ pub fn make_builtin_prelude() -> Globals {
     g.defs.insert("strToLower".into(),     bi("strToLower", 1, b_str_to_lower));
     g.defs.insert("strTrim".into(),        bi("strTrim", 1, b_str_trim));
     g.defs.insert("strChars".into(),       bi("strChars", 1, b_str_chars));
+    g.defs.insert("strBytes".into(),       bi("strBytes", 1, b_str_bytes));
+    g.defs.insert("bytesToStr".into(),     bi("bytesToStr", 1, b_bytes_to_str));
     g.defs.insert("intToStr".into(),       bi("intToStr", 1, b_int_to_str));
     g.defs.insert("realToStr".into(),      bi("realToStr", 1, b_real_to_str));
     g.defs.insert("strToInt".into(),       bi("strToInt", 1, b_str_to_int));

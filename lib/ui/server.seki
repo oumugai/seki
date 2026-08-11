@@ -1,0 +1,84 @@
+-- ===========================================================
+-- lib/ui/server.seki — httpServe 上の MVU イベントループ
+-- ===========================================================
+--
+-- ルーティング:
+--   GET  /              → 現在の model を render して HTML を返す
+--   GET  /index.html    → 同上
+--   POST /action/<name> → action を update に渡し、新 model の HTML を返す
+--   GET  /healthz       → "ok" (liveness probe)
+--   その他              → 404
+--
+-- POST 後は新 model の HTML をそのまま返すので、クライアント JS が
+-- document.write で差し替えることでページ全体が更新される.
+-- (Post/Redirect/Get でも良いが、ここでは fetch + replace の方が単純.)
+--
+-- model は Ref<Model> で保持される. 純粋な update 関数を毎回呼んで
+-- 新 model を作り、Ref に書き戻す.
+
+import "dom.seki"
+import "app.seki"
+
+-- ----- "/action/inc" から "inc" を取り出す -----
+def parseActionPath := \path ->
+    let prefix = "/action/" in
+    if strStartsWith prefix path then
+        let plen = strLen prefix in
+        let action = substring plen (strLen path - plen) path in
+        if strLen action > 0 then Some action else None
+    else None
+
+-- ----- HTTP リクエストハンドラを作る (model Ref をクロージャで保持) -----
+-- 引数:
+--   app       — mkApp で作った 3-tuple
+--   title     — HTML <title>
+--   css       — オプションの inline CSS ("" なら省略)
+--   modelRef  — Ref<Model> (mkRef で作る)
+def mkHandler := \app title css modelRef ->
+    \req ->
+        let m = reqMethod req in
+        let p = reqPath req in
+        if m == "GET" and p == "/healthz" then
+            httpOk "ok"
+        else if m == "POST" and strStartsWith "/action/" p then
+            match parseActionPath p with
+            | None -> httpNotFound ()
+            | Some action ->
+                let current = readRef modelRef in
+                let next    = stepIO app action (reqBody req) current in
+                let _       = writeRef modelRef next in
+                httpHtml (renderAppStyled app title css next)
+        else if m == "GET" and (p == "/" or p == "/index.html") then
+            let current = readRef modelRef in
+            httpHtml (renderAppStyled app title css current)
+        else
+            httpNotFound ()
+
+-- ----- アプリを起動する (ブロッキング) -----
+-- 戻り値: Result Unit String  — httpServe からの伝播.
+def serveAppStyled := \app title css port ->
+    let modelRef = mkRef (appInit app) in
+    let handler  = mkHandler app title css modelRef in
+    let banner = strJoin "" [
+        "seki UI app '", title, "' listening on http://127.0.0.1:",
+        intToStr port, "  (Ctrl-C to stop)"
+    ] in
+    let _ = println banner in
+    httpServe port handler
+
+def serveApp := \app title port ->
+    serveAppStyled app title "" port
+
+-- ===========================================================
+-- テスト / dry-run 用ヘルパ
+-- ===========================================================
+--
+-- 実サーバを立てずに、初期 model からアクション列を適用した結果の
+-- HTML を返す純粋関数. CI 上でレンダリング結果を検査できる.
+def dryRun := \app title actions ->
+    let final = runFromInit app actions in
+    renderApp app title final
+
+def dryRunStyled := \app title css actions ->
+    let final = runFromInit app actions in
+    renderAppStyled app title css final

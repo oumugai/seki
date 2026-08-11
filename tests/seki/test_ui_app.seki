@@ -1,0 +1,170 @@
+-- ===========================================================
+-- tests/seki/test_ui_app.seki — lib/ui/{app,server}.seki の検証
+-- ===========================================================
+--
+-- MVU framework の純関数部分を検証する.
+-- - mkApp / アクセサの round-trip
+-- - step / runActions / runFromInit の正しさ
+-- - dryRun の HTML 出力に期待文字列が含まれること
+-- - parseActionPath のパース正しさ
+--
+-- 加えて, counter の update 関数に対して by algebra で不変条件を証明する.
+
+import "ui/server.seki"
+import "test/runner.seki"
+
+-- ===========================================================
+-- テスト用 counter アプリ
+-- ===========================================================
+
+data Msg = MInc | MDec | MReset
+
+def updateMsg := \msg n ->
+    match msg with
+    | MInc   -> n + 1
+    | MDec   -> if n > 0 then n - 1 else n
+    | MReset -> 0
+
+def update_ := \action n ->
+    if action == "inc"   then updateMsg MInc n
+    else if action == "dec"   then updateMsg MDec n
+    else if action == "reset" then updateMsg MReset n
+    else n
+
+def view_ := \n ->
+    divE nil [
+        h1E nil [Text "Counter"],
+        pE  nil [Text (intToStr n)],
+        actionButton "inc" "+",
+        actionButton "dec" "-"
+    ]
+
+def counterApp := mkApp 0 update_ view_
+
+-- ===========================================================
+-- 階層 1 (静的): 不変条件の theorem 証明
+-- ===========================================================
+
+-- Model = Nat なので n >= 0 が常に成り立つ.
+theorem inc_grows  : forall n in Nat, updateMsg MInc   n == n + 1 := by eval
+theorem reset_zero : forall n in Nat, updateMsg MReset n == 0     := by eval
+
+-- dec しても 0 未満にならない (if-場合分け + Nat 仮説 を by algebra で閉じる)
+theorem dec_nn : forall n in Nat, updateMsg MDec n >= 0
+  := by unfold updateMsg then algebra
+
+-- ===========================================================
+-- 階層 2 (動的): assert ベースの単体テスト
+-- ===========================================================
+
+-- ----- App アクセサの round-trip -----
+def t_init   := assertEq 0 (appInit counterApp)
+def t_step_inc := assertEq 1 (step counterApp "inc" 0)
+def t_step_dec_clamp := assertEq 0 (step counterApp "dec" 0)
+def t_step_unknown   := assertEq 5 (step counterApp "unknown" 5)
+def t_step_reset := assertEq 0 (step counterApp "reset" 42)
+
+-- ----- runActions: 順次適用 -----
+def t_run_seq :=
+    assertEq 3 (runActions counterApp ["inc", "inc", "inc"] 0)
+
+def t_run_with_clamp :=
+    assertEq 0 (runActions counterApp ["dec", "dec", "dec"] 0)
+
+def t_run_mixed :=
+    assertEq 2 (runActions counterApp ["inc", "inc", "inc", "dec"] 0)
+
+-- ----- runFromInit: init からの fold -----
+def t_run_from_init :=
+    assertEq 4 (runFromInit counterApp ["inc", "inc", "inc", "inc"])
+
+def t_run_reset_in_middle :=
+    assertEq 1 (runFromInit counterApp ["inc", "inc", "inc", "reset", "inc"])
+
+-- ----- dryRun: HTML 出力に状態が反映される -----
+def html_after_3_inc := dryRun counterApp "demo" ["inc", "inc", "inc"]
+
+def t_dryrun_count_3 :=
+    assertContains "<p>3</p>" html_after_3_inc
+
+def t_dryrun_title :=
+    assertContains "<title>demo</title>" html_after_3_inc
+
+def t_dryrun_action_inc :=
+    assertContains "data-seki-action=\"inc\"" html_after_3_inc
+
+-- 注: data-seki-action は client script のセットアップにも含まれるため、
+-- form の <action="/action/dec"> 部分で検出する.
+def t_dryrun_dec_button :=
+    assertContains "action=\"/action/dec\"" html_after_3_inc
+
+-- ----- parseActionPath -----
+def t_parse_inc :=
+    match parseActionPath "/action/inc" with
+    | Some s -> assertEq "inc" s
+    | None   -> FailMsg "expected Some \"inc\""
+
+def t_parse_complex :=
+    match parseActionPath "/action/save-draft" with
+    | Some s -> assertEq "save-draft" s
+    | None   -> FailMsg "expected Some \"save-draft\""
+
+def t_parse_empty := assertEq None (parseActionPath "/action/")
+def t_parse_other := assertEq None (parseActionPath "/healthz")
+
+-- ===========================================================
+-- 階層 3 (set-theoretic): モデル空間の不変性
+-- ===========================================================
+--
+-- counterApp の到達可能状態は ℕ に含まれる. 任意のアクション列を
+-- runFromInit で適用しても model >= 0.  ここでは代表標本でチェック.
+def reachable_after := \acts -> runFromInit counterApp acts
+
+def actionSeqs := [
+    [],
+    ["inc"],
+    ["dec"],
+    ["inc", "dec"],
+    ["inc", "inc", "dec"],
+    ["dec", "dec", "dec"],
+    ["inc", "inc", "inc", "reset"],
+    ["reset", "inc", "dec"]
+]
+
+def t_all_reachable_nn :=
+    forAllInList actionSeqs (\acts ->
+        let n = reachable_after acts in
+        if n >= 0 then Pass
+        else FailMsg (strJoin "" ["reachable model ", intToStr n, " is negative"]))
+
+-- ===========================================================
+def cases := [
+    -- アクセサ
+    TestCase "appInit"                   t_init,
+    -- step
+    TestCase "step inc 0 → 1"            t_step_inc,
+    TestCase "step dec 0 → 0 (clamp)"    t_step_dec_clamp,
+    TestCase "step unknown action no-op" t_step_unknown,
+    TestCase "step reset n → 0"          t_step_reset,
+    -- runActions
+    TestCase "runActions 3 × inc"        t_run_seq,
+    TestCase "runActions dec clamp"      t_run_with_clamp,
+    TestCase "runActions inc inc inc dec" t_run_mixed,
+    -- runFromInit
+    TestCase "runFromInit 4 × inc"       t_run_from_init,
+    TestCase "runFromInit with reset"    t_run_reset_in_middle,
+    -- dryRun
+    TestCase "dryRun: count = 3 in HTML" t_dryrun_count_3,
+    TestCase "dryRun: title in <title>"  t_dryrun_title,
+    TestCase "dryRun: inc data-attr"     t_dryrun_action_inc,
+    TestCase "dryRun: dec form action"   t_dryrun_dec_button,
+    -- parseActionPath
+    TestCase "parseActionPath /action/inc"        t_parse_inc,
+    TestCase "parseActionPath /action/save-draft" t_parse_complex,
+    TestCase "parseActionPath /action/ → None"    t_parse_empty,
+    TestCase "parseActionPath /healthz → None"    t_parse_other,
+    -- Set-theoretic property
+    TestCase "[Property] reachable models ⊂ Nat"  t_all_reachable_nn
+]
+
+runMain "lib/ui/app + server" cases

@@ -285,8 +285,9 @@ theorem t : forall y in Int, (y * 1) + 0 == y := by simp
 
 #### 限界
 
-- **対称的な規則** (`add_comm : a + b == b + a` など) は書換えが両側で発火して oscillation を起こす。`simp` 内では不動点が見つからないため、対称規則だけで通せる目標は限定的。
-- **条件付き等式** (forall の述語に追加の仮定 — 例: "a > 0 ⇒ ...") は未対応。
+- **条件付き等式** (書換え規則そのものに `a > 0 ⇒ lhs == rhs` のような追加の仮定があるもの) は未対応 — `rule_from_prop` は `forall ... , lhs == rhs` の直接形のみ受理する。
+
+対称的な規則 (`add_comm : a + b == b + a` など) は AC-canonicalization により oscillation なく扱えるようになった ([05-tactics.md §5.6](spec/05-tactics.md#56-by-simp--by-simp-theorem1-theorem2))。
 - マッチングは **alpha-renaming なし**: `Lambda { params, body }` は引数名が完全一致する必要あり。
 
 #### いつ使うか

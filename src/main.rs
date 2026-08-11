@@ -6,7 +6,7 @@
 //!     seki --check FILE check a file without printing the value of each expr
 //!     seki -e <expr>    evaluate one expression and print its value
 
-use seki::ast::Decl;
+use seki::ast::{Decl, Expr, LocatedDecl, Proof};
 use seki::eval::{make_prelude, set_program_args, EvalCtx};
 use seki::prover::Prover;
 use seki::typecheck::{check_shape, prelude_shapes, ShapeEnv};
@@ -16,9 +16,28 @@ use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
+use std::thread;
+use std::time::Instant;
+
+/// Non-tail-recursive seki evaluation (e.g. a user-defined recursive
+/// function sampled up to `SAMPLE_BOUND` for a `forall n in Nat` proof) can
+/// use several hundred native stack frames. The OS-provided main-thread
+/// stack (commonly 8 MiB on Linux, controlled by `ulimit -s`) is too small
+/// for that, so the real entry point runs on a spawned thread with an
+/// explicit larger stack instead.
+const MAIN_STACK_SIZE: usize = 256 * 1024 * 1024;
 
 fn main() -> ExitCode {
+    thread::Builder::new()
+        .stack_size(MAIN_STACK_SIZE)
+        .spawn(real_main)
+        .expect("failed to spawn main worker thread")
+        .join()
+        .expect("main worker thread panicked")
+}
+
+fn real_main() -> ExitCode {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     // Strip out `-I <path>` flags (library search-path additions) before
     // dispatching to the subcommand handler.  A bare `--` token is treated
@@ -532,6 +551,9 @@ impl ProgramState {
                 self.globals
                     .theorem_props
                     .insert(name.clone(), prop.clone());
+                self.globals
+                    .theorem_proofs
+                    .insert(name.clone(), proof.clone());
                 self.shapes = self
                     .shapes
                     .extend(name.clone(), seki::typecheck::Shape::Bool);
@@ -810,6 +832,264 @@ fn refined_identifier_len(e: &SekiError) -> Option<usize> {
     extract_failing_ident(e).map(|s| s.chars().count())
 }
 
+// -- Background search engine ----------------------------------------------
+//
+// The REPL offers two real-time inference features:
+//
+//   * `:prove <prop>`             — try to prove the proposition; report
+//                                   which tactic closes it.
+//   * `theorem t : P` (no `:=`)   — auto-search, register if found.
+//
+// Both run on a *worker thread* against a `clone_for_thread()` snapshot of
+// globals.  The main loop pushes a `SearchTask` and continues; the worker
+// posts a `SearchResult` back via channel.  Before painting the next prompt
+// (and after every submitted line) the main loop drains the result channel
+// and prints completed search outcomes.
+//
+// State transfer is safe because `Value` is `Send + Sync` (Phase 4 Rc→Arc
+// migration), so cloning globals across thread boundaries is cheap.  On
+// `SearchKind::AutoTheorem` success we re-verify on the *live* globals
+// before committing the theorem, which keeps registration sound even if
+// the user redefined a dependency mid-search.
+
+#[derive(Clone)]
+enum SearchKind {
+    /// `:prove <expr>` — no registration; just report.
+    Prove,
+    /// `:why <expr>` — like `Prove` but the result is presented in terms
+    /// of which existing lemmas the proof uses ("derivable using `gauss`")
+    /// rather than just the raw tactic script.  No registration.
+    Why,
+    /// `theorem name : prop` submitted without `:=`; register on success.
+    AutoTheorem { name: String, prop: Expr },
+    /// Silent re-verification of a previously-proven theorem, triggered
+    /// when the user redefines a function the theorem statement references.
+    /// On success we say nothing (registration stays); on failure we warn
+    /// the user that their redefinition has invalidated `name`.  Carries
+    /// the stored proof AST so the worker can replay it directly without
+    /// re-running portfolio search.
+    ReCheck { name: String, proof: Proof, trigger: String },
+}
+
+enum SearchTask {
+    Search {
+        id: u64,
+        prop: Expr,
+        kind: SearchKind,
+        snapshot: Globals,
+    },
+    Shutdown,
+}
+
+enum SearchOutcome {
+    Found { proof: Proof },
+    NotFound,
+    Error { msg: String },
+}
+
+struct SearchResult {
+    #[allow(dead_code)]
+    id: u64,
+    kind: SearchKind,
+    outcome: SearchOutcome,
+    elapsed_ms: u128,
+}
+
+fn spawn_search_worker(
+    rx_task: mpsc::Receiver<SearchTask>,
+    tx_result: mpsc::Sender<SearchResult>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        while let Ok(task) = rx_task.recv() {
+            match task {
+                SearchTask::Shutdown => break,
+                SearchTask::Search { id, prop, kind, snapshot } => {
+                    let started = Instant::now();
+                    let ctx = EvalCtx::new(&snapshot);
+                    let env = Env::new();
+                    let prover = Prover::new(&ctx);
+                    // Dispatch by kind:
+                    //   ReCheck — replay the stored proof directly (no
+                    //             portfolio search).
+                    //   Why     — lemma-preferring portfolio.
+                    //   else    — cost-ordered portfolio.
+                    let outcome = match std::panic::catch_unwind(
+                        std::panic::AssertUnwindSafe(|| match &kind {
+                            SearchKind::ReCheck { proof, .. } => {
+                                match prover.verify(&prop, proof, &env) {
+                                    Ok(_) => Some(proof.clone()),
+                                    Err(_) => None,
+                                }
+                            }
+                            SearchKind::Why => {
+                                prover.try_portfolio_lemma_first(&prop, &env)
+                            }
+                            _ => prover.try_portfolio(&prop, &env),
+                        }),
+                    ) {
+                        Ok(Some(p)) => SearchOutcome::Found { proof: p },
+                        Ok(None) => SearchOutcome::NotFound,
+                        Err(_) => SearchOutcome::Error {
+                            msg: "search panicked (likely a malformed expression)".into(),
+                        },
+                    };
+                    let elapsed_ms = started.elapsed().as_millis();
+                    let _ = tx_result.send(SearchResult { id, kind, outcome, elapsed_ms });
+                }
+            }
+        }
+    })
+}
+
+/// Drain every completed search result from the channel and report it to
+/// the user.  For `AutoTheorem` results we re-verify on the *current*
+/// globals before committing the theorem, since the user may have changed
+/// a dependency since the snapshot.
+fn drain_search_results(
+    rx: &mpsc::Receiver<SearchResult>,
+    state: &mut ProgramState,
+) {
+    while let Ok(r) = rx.try_recv() {
+        match (r.kind, r.outcome) {
+            (SearchKind::Prove, SearchOutcome::Found { proof }) => {
+                println!("  ✓ provable by `{}`  ({}ms)", proof, r.elapsed_ms);
+            }
+            (SearchKind::Prove, SearchOutcome::NotFound) => {
+                println!(
+                    "  ✗ no tactic in the portfolio closed the goal  ({}ms)",
+                    r.elapsed_ms
+                );
+            }
+            (SearchKind::Prove, SearchOutcome::Error { msg }) => {
+                eprintln!("  ! search error: {}", msg);
+            }
+            (SearchKind::Why, SearchOutcome::Found { proof }) => {
+                // Surface the *lemma chain* the proof leans on, so the
+                // user sees which earlier theorems make this one derivable.
+                let lemmas = seki::prover::extract_lemmas(&proof);
+                if lemmas.is_empty() {
+                    println!(
+                        "  ✓ derivable without any earlier lemma\n    via `{}`  ({}ms)",
+                        proof, r.elapsed_ms
+                    );
+                } else {
+                    let chain = lemmas.join(", ");
+                    println!(
+                        "  ✓ derivable using lemma{}: {}\n    via `{}`  ({}ms)",
+                        if lemmas.len() == 1 { "" } else { "s" },
+                        chain,
+                        proof,
+                        r.elapsed_ms
+                    );
+                }
+            }
+            (SearchKind::Why, SearchOutcome::NotFound) => {
+                println!(
+                    "  ✗ no portfolio combination (including up to 2-lemma simp chains) closed the goal  ({}ms)",
+                    r.elapsed_ms
+                );
+            }
+            (SearchKind::Why, SearchOutcome::Error { msg }) => {
+                eprintln!("  ! search error: {}", msg);
+            }
+            (
+                SearchKind::AutoTheorem { name, prop },
+                SearchOutcome::Found { proof },
+            ) => {
+                // Re-verify on live globals — the snapshot might be stale
+                // if the user redefined something since submission.
+                let ctx = EvalCtx::new(&state.globals);
+                let env = Env::new();
+                let prover = Prover::new(&ctx);
+                match prover.verify(&prop, &proof, &env) {
+                    Ok(v) => {
+                        state.globals.theorems.insert(name.clone(), v);
+                        state
+                            .globals
+                            .theorem_props
+                            .insert(name.clone(), prop.clone());
+                        state
+                            .globals
+                            .theorem_proofs
+                            .insert(name.clone(), proof.clone());
+                        state.shapes = state
+                            .shapes
+                            .extend(name.clone(), seki::typecheck::Shape::Bool);
+                        println!(
+                            "  theorem {} ✓ proved by `{}`  ({}ms)",
+                            name, proof, r.elapsed_ms
+                        );
+                    }
+                    Err(e) => {
+                        println!(
+                            "  ⚠ theorem {} found `{}` on snapshot but stale on current state ({}); not registered",
+                            name, proof, e
+                        );
+                    }
+                }
+            }
+            (
+                SearchKind::AutoTheorem { name, .. },
+                SearchOutcome::NotFound,
+            ) => {
+                println!(
+                    "  ✗ theorem {} — no tactic in the portfolio closed the goal  ({}ms)",
+                    name, r.elapsed_ms
+                );
+            }
+            (
+                SearchKind::AutoTheorem { name, .. },
+                SearchOutcome::Error { msg },
+            ) => {
+                eprintln!("  ! theorem {} search error: {}", name, msg);
+            }
+            // ReCheck success is silent — the theorem still holds after the
+            // user's redefinition, so there's nothing to report.  Failure
+            // means the redefinition broke the proof; warn loudly with the
+            // proof AST so the user knows what to revisit.
+            (SearchKind::ReCheck { .. }, SearchOutcome::Found { .. }) => {}
+            (
+                SearchKind::ReCheck { name, proof, trigger },
+                SearchOutcome::NotFound,
+            ) => {
+                eprintln!(
+                    "  ⚠ redefinition of `{}` invalidated theorem `{}` (was: `{}`)",
+                    trigger, name, proof
+                );
+            }
+            (
+                SearchKind::ReCheck { name, trigger, .. },
+                SearchOutcome::Error { msg },
+            ) => {
+                eprintln!(
+                    "  ! re-check of theorem `{}` (triggered by `{}`) errored: {}",
+                    name, trigger, msg
+                );
+            }
+        }
+    }
+}
+
+/// Split a parsed decl list into (synchronous, async).  Theorems with proof
+/// `by auto` are routed to the background worker instead of being run
+/// inline (which would block the REPL on portfolio search).  All other
+/// decls go through the normal path so definitions take effect immediately.
+fn partition_async_theorems(
+    decls: Vec<LocatedDecl>,
+) -> (Vec<LocatedDecl>, Vec<(String, Expr)>) {
+    let mut sync = Vec::new();
+    let mut async_thms = Vec::new();
+    for ld in decls {
+        match ld.decl {
+            Decl::Theorem { ref name, ref prop, proof: Proof::ByAuto } => {
+                async_thms.push((name.clone(), prop.clone()));
+            }
+            _ => sync.push(ld),
+        }
+    }
+    (sync, async_thms)
+}
+
 // -- REPL -------------------------------------------------------------------
 
 fn repl_with(extra_libs: Vec<PathBuf>) -> ExitCode {
@@ -819,6 +1099,16 @@ fn repl_with(extra_libs: Vec<PathBuf>) -> ExitCode {
     for p in extra_libs {
         state.lib_paths.insert(0, p);
     }
+
+    // Background search engine: a worker thread that consumes `SearchTask`s
+    // (sent for `:prove <expr>` and for `theorem t : P` submitted without
+    // a proof body) and posts results back through `rx_result`.  We drain
+    // the result channel at every prompt boundary so the user sees
+    // completed searches between commands.
+    let (tx_task, rx_task) = mpsc::channel::<SearchTask>();
+    let (tx_result, rx_result) = mpsc::channel::<SearchResult>();
+    let worker = spawn_search_worker(rx_task, tx_result);
+    let mut next_search_id: u64 = 0;
 
     // Persistent command history.  We append every non-meta line the user
     // submits to ~/.seki_history.  This isn't readline-style arrow recall
@@ -839,6 +1129,10 @@ fn repl_with(extra_libs: Vec<PathBuf>) -> ExitCode {
     println!("type :q to exit, :help for commands");
     let mut buf = String::new();
     loop {
+        // Drain any completed background search results before painting the
+        // next prompt.  Anything found, missed, or errored since the last
+        // iteration is printed above the prompt line.
+        drain_search_results(&rx_result, &mut state);
         // primary prompt
         print!("seki> ");
         stdout.lock().flush().ok();
@@ -881,6 +1175,8 @@ fn repl_with(extra_libs: Vec<PathBuf>) -> ExitCode {
                      :builtins <prefix>    list builtins starting with <prefix>\n\
                      :load <file>          load a .seki file\n\
                      :type <expr>          show the inferred type of an expression\n\
+                     :prove <prop>         try to prove <prop> via portfolio search (async)\n\
+                     :why <prop>           like :prove, but report which earlier lemmas the proof uses\n\
                      :member <v> <set>     check membership (alias of `v in set`)\n\
                      :libpath              show library search paths\n\
                      :libpath add <dir>    prepend a directory to the library search path\n\
@@ -986,6 +1282,48 @@ fn repl_with(extra_libs: Vec<PathBuf>) -> ExitCode {
                 }
                 continue;
             }
+            cmd if cmd.starts_with(":prove ") => {
+                let expr_src = &cmd[7..];
+                match parser::parse_expr_str(expr_src) {
+                    Ok(e) => {
+                        let id = next_search_id;
+                        next_search_id += 1;
+                        let snapshot = state.globals.clone_for_thread();
+                        let _ = tx_task.send(SearchTask::Search {
+                            id,
+                            prop: e,
+                            kind: SearchKind::Prove,
+                            snapshot,
+                        });
+                        println!(
+                            "  searching... (result will appear before the next prompt)"
+                        );
+                    }
+                    Err(err) => eprintln!("{}", err),
+                }
+                continue;
+            }
+            cmd if cmd.starts_with(":why ") => {
+                let expr_src = &cmd[5..];
+                match parser::parse_expr_str(expr_src) {
+                    Ok(e) => {
+                        let id = next_search_id;
+                        next_search_id += 1;
+                        let snapshot = state.globals.clone_for_thread();
+                        let _ = tx_task.send(SearchTask::Search {
+                            id,
+                            prop: e,
+                            kind: SearchKind::Why,
+                            snapshot,
+                        });
+                        println!(
+                            "  searching for a derivation... (result will appear before the next prompt)"
+                        );
+                    }
+                    Err(err) => eprintln!("{}", err),
+                }
+                continue;
+            }
             _ => {}
         }
 
@@ -996,8 +1334,89 @@ fn repl_with(extra_libs: Vec<PathBuf>) -> ExitCode {
         loop {
             match parse_program(&buf2) {
                 Ok(decls) => {
-                    if let Err(e) = state.run_decls(&decls, false) {
+                    // Split out `theorem ... := by auto` (and `theorem t : P`
+                    // with no proof body, which the parser desugars to the
+                    // same form) — dispatch those asynchronously so the
+                    // REPL stays responsive while the portfolio runs.
+                    let (sync_decls, async_thms) = partition_async_theorems(decls);
+                    // Snapshot which names are about to be *redefined* (the
+                    // name already exists in defs).  After running, every
+                    // proven theorem whose statement mentions one of these
+                    // names is silently re-verified — a stale proof against
+                    // the new definition will surface as a warning, not as
+                    // a corrupted theorem registry.
+                    let redef_names: Vec<String> = sync_decls
+                        .iter()
+                        .filter_map(|ld| match &ld.decl {
+                            Decl::Def { name, .. }
+                                if state.globals.defs.contains_key(name) =>
+                            {
+                                Some(name.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    if let Err(e) = state.run_decls(&sync_decls, false) {
                         eprintln!("{}", e);
+                    }
+                    // Enqueue re-checks for any theorem whose statement
+                    // references a redefined name.  Skip names whose new
+                    // value is identical to the old (no observable change).
+                    for changed in &redef_names {
+                        let dependents: Vec<(String, Expr, Proof)> = state
+                            .globals
+                            .theorem_props
+                            .iter()
+                            .filter_map(|(thm_name, stmt)| {
+                                let mut syms = std::collections::HashSet::new();
+                                seki::prover::collect_idents(stmt, &mut syms);
+                                if syms.contains(changed) {
+                                    state
+                                        .globals
+                                        .theorem_proofs
+                                        .get(thm_name)
+                                        .map(|p| {
+                                            (thm_name.clone(), stmt.clone(), p.clone())
+                                        })
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        for (thm_name, prop, proof) in dependents {
+                            let id = next_search_id;
+                            next_search_id += 1;
+                            let snapshot = state.globals.clone_for_thread();
+                            let _ = tx_task.send(SearchTask::Search {
+                                id,
+                                prop,
+                                kind: SearchKind::ReCheck {
+                                    name: thm_name,
+                                    proof,
+                                    trigger: changed.clone(),
+                                },
+                                snapshot,
+                            });
+                        }
+                    }
+                    for (name, prop) in async_thms {
+                        // Pre-flight a shape check so trivially malformed
+                        // propositions fail synchronously with a clear
+                        // message rather than being silently queued.
+                        if let Err(e) = check_shape(&prop, &state.shapes) {
+                            eprintln!("{}", e);
+                            continue;
+                        }
+                        let id = next_search_id;
+                        next_search_id += 1;
+                        let snapshot = state.globals.clone_for_thread();
+                        let _ = tx_task.send(SearchTask::Search {
+                            id,
+                            prop: prop.clone(),
+                            kind: SearchKind::AutoTheorem { name: name.clone(), prop },
+                            snapshot,
+                        });
+                        println!("  theorem {} searching...", name);
                     }
                     break;
                 }
@@ -1027,6 +1446,13 @@ fn repl_with(extra_libs: Vec<PathBuf>) -> ExitCode {
             }
         }
     }
+    // Drain any straggler results posted between the last prompt and the
+    // exit signal, then ask the worker to stop and wait for it.  If a
+    // search is in flight we don't kill it — `try_portfolio` is not
+    // cancellable; the worker just finishes whatever was running.
+    drain_search_results(&rx_result, &mut state);
+    let _ = tx_task.send(SearchTask::Shutdown);
+    let _ = worker.join();
     ExitCode::SUCCESS
 }
 

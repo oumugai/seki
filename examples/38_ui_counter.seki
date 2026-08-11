@@ -1,0 +1,116 @@
+-- ===========================================================
+-- 38: UI コンポーネント (MVU on httpServe) — seki Counter
+--
+-- lib/ui/{dom,app,server}.seki だけで動く. Rust 側の変更ゼロ.
+--
+-- 実行モード:
+--   dry-run  : 初期状態と 3 回 inc した状態の HTML を標準出力に
+--   サーバ   : `cargo run -- examples/38_ui_counter.seki --serve [port]`
+-- ===========================================================
+
+import "ui/server.seki"
+import "ui/sse.seki"
+
+-- ----- Model: ただの Nat (集合論的に {n in Int | n >= 0} の元) -----
+def initModel := 0
+
+-- ----- Action ADT (アクション空間) -----
+data Msg = MInc | MDec | MReset
+
+-- アクション名 → Msg (HTTP 経由の境界変換)
+def parseMsg := \s ->
+    if s == "inc"   then Some MInc
+    else if s == "dec"   then Some MDec
+    else if s == "reset" then Some MReset
+    else None
+
+-- ----- 純関数 update (Msg ベース) -----
+-- Model = Nat なので "n >= 0 を常に保つ" のが不変条件.
+def updateMsg := \msg n ->
+    match msg with
+    | MInc   -> n + 1
+    | MDec   -> if n > 0 then n - 1 else n
+    | MReset -> 0
+
+-- HTTP 境界の薄いアダプタ: String -> Model -> Model
+def update_ := \action n ->
+    match parseMsg action with
+    | Some m -> updateMsg m n
+    | None   -> n
+
+-- ----- View: Model -> View -----
+def view_ := \n ->
+    divE [AClass "container"] [
+        h1E nil [Text "seki Counter"],
+        pE  [AClass "value"] [Text (intToStr n)],
+        divE [AClass "row"] [
+            actionButtonDisabled "dec" "−" (n == 0),
+            actionButton         "inc" "+"
+        ],
+        divE [AClass "row"] [
+            actionButton "reset" "reset"
+        ]
+    ]
+
+def app := mkApp initModel update_ view_
+
+-- ----- CSS (集合論的に純関数: そのまま文字列) -----
+def css := strJoin "\n" [
+    "    body { font-family: system-ui, sans-serif; background: #f7f7f9; }",
+    "    .container { max-width: 360px; margin: 4rem auto; padding: 2rem;",
+    "                 background: white; border-radius: 12px;",
+    "                 box-shadow: 0 2px 10px rgba(0,0,0,0.07); text-align: center; }",
+    "    .value { font-size: 3.5rem; margin: 1rem 0; font-weight: 700; color: #2563eb; }",
+    "    .row { display: flex; gap: 8px; justify-content: center; margin-top: 1rem; }",
+    "    button { padding: 8px 16px; font-size: 1rem; border-radius: 6px;",
+    "             border: 1px solid #d1d5db; background: white; cursor: pointer; }",
+    "    button:hover:not([disabled]) { background: #eef2ff; border-color: #6366f1; }",
+    "    button[disabled] { opacity: 0.4; cursor: not-allowed; }"
+]
+
+-- ===========================================================
+-- 不変条件の証明 — Model = Nat を update が保つ
+--
+-- seki ならではの利点: UI コンポーネントの「状態の正しさ」を
+-- 型 (集合) と theorem で保証できる.
+-- ===========================================================
+theorem inc_grows : forall n in Nat, updateMsg MInc n == n + 1
+  := by eval
+
+theorem reset_zero : forall n in Nat, updateMsg MReset n == 0
+  := by eval
+
+-- Nat 上で「dec しても 0 未満にならない」
+-- by algebra の if-場合分け拡張 + Nat 仮説で閉じる
+theorem dec_keeps_nn : forall n in Nat, updateMsg MDec n >= 0
+  := by unfold updateMsg then algebra
+
+-- ===========================================================
+-- 起動モード切替
+-- ===========================================================
+def isServerMode := contains "--serve" args
+def isSSEMode    := contains "--sse" args
+def port_arg := filter (\a -> not ((a == "--serve") or (a == "--sse"))) args
+def port := if null port_arg then 8090
+            else match strToInt (head port_arg) with
+                | Some p -> p
+                | None   -> 8090
+
+if isSSEMode then
+    match serveAppSSEStyled app "seki Counter" css port with
+    | Err e -> let _ = eprintln (strConcat "server error: " e) in exit 1
+    | Ok _ -> ()
+else if isServerMode then
+    match serveAppStyled app "seki Counter" css port with
+    | Err e ->
+        let _ = eprintln (strConcat "server error: " e) in
+        exit 1
+    | Ok _ -> ()
+else
+    let _ = println "seki UI counter (dry-run, pass --serve to start the HTTP server)" in
+    let _ = println "" in
+    let _ = println "=== initial render (count = 0) ===" in
+    let _ = println (dryRunStyled app "seki Counter" css []) in
+    let _ = println "" in
+    let _ = println "=== after 3 'inc' then 1 'dec' (count = 2) ===" in
+    println (dryRunStyled app "seki Counter" css ["inc", "inc", "inc", "dec"])

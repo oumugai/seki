@@ -165,9 +165,11 @@ seki/
 | `examples/35_call_syntax.seki` | **関数呼出 (Phase 11)**: `f(a, b, c)` C 流と `f a b c` curried の共存 (16 個) |
 | `examples/36_for_loops.seki` | Python の `for` 文の seki での書き方 11 通り |
 | `examples/37_python_for.seki` | **for 構文 (Phase 12)**: `for x in xs do body` の Python 風 syntax |
+| `examples/38_ui_counter.seki` | **サーバ駆動 UI**: `lib/ui/` で MVU カウンタアプリ (dry-run + SSE/実サーバ起動) (3 個) |
+| `examples/39_ui_todo.seki` | **サーバ駆動 UI**: 同上、Todo リストアプリ (追加/完了/削除/クリア) (4 個) |
 | `examples/helpers_mod.seki` | (支援ファイル) 19 のモジュール例から `import` される補助関数 |
 
-合計で **429 件** の theorem と 1 件の axiom が `examples/` に含まれている。
+合計で **482 件** の theorem と 1 件の axiom が `examples/` に含まれている。
 
 ## sample/ — 実サービス志向ミニアプリ
 
@@ -236,14 +238,16 @@ seki/
 - 依存型の完全検査 (現状はサンプリングのみ — 任意の引数で必ず正しい保証はない)
 - 依存パラメトリック ADT の専用構文 (`data Vec : Nat -> Set where ...`) — refinement + 既存 ADT で代用可
 - 依存ペア型 `Σ (x : A), B(x)` の専用構文 (refinement で代用可)
-- 3 次以上の不等式・可変除数の div/mod
-- パターンマッチの網羅性検査
-- 任意深さの強帰納法・整列性原理
+- 3 次以上の不等式判定・可変除数の div/mod
+- パターンマッチ網羅性の**エラー化** (現状は warning のみ、実行時は非網羅ケースで runtime error)
+- 任意深さの強帰納法・整列性原理 (`by strong_induction` は深さ 2 固定)
 - 相互再帰関数の unfold
 - 真のスコープ分離されたモジュール (現状はフラットな名前空間に prefix 追加)
-- `by simp` の対称規則 (`add_comm` 等) — oscillation で 1-step ぶんしか効かない
+- 複数変数の線形不等式決定 (`by linarith` は単変数のみ; 多変数 Fourier-Motzkin は未対応)
 - AST span (Expr 単位の位置情報) — エラーは decl 単位の `[line:col]` まで
-- LSP / インタラクティブなタクティクモード (goal-stack)
+- LSP の hover / completion / インタラクティブなタクティクモード (goal-stack) — diagnostics 配信は実装済み
+
+※ `by simp` の対称規則 (`add_comm` 等) は AC-canonicalization により解消済み ([docs/spec/05-tactics.md](docs/spec/05-tactics.md))。`by decide` は型クラス無しの直接評価版として実装済み (`Decidable` 型クラスへの一般化は未対応)。
 
 詳細は [docs/internals.md](docs/internals.md) の「今後の拡張」を参照。
 

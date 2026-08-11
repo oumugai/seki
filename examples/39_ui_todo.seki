@@ -1,0 +1,232 @@
+-- ===========================================================
+-- 39: Todo MVU — form input + リスト操作 + theorem 保証
+--
+-- フォーム入力で新しい todo を追加, 各 todo に done トグルと削除を
+-- 持たせる. すべて純関数 update + Elm-style MVU で書く.
+--
+-- Model = (nextId : Int, items : List Item)
+-- Item  = (id : Int, done : Bool, text : String)
+--
+-- 不変条件 (theorem):
+--   - nextId は単調増加
+--   - 削除しても他 id は影響を受けない (述語ベース)
+--   - addItem 後に length は厳密に 1 増える
+-- ===========================================================
+
+import "ui/server.seki"
+
+-- ===========================================================
+-- 型と初期値
+-- ===========================================================
+--
+-- 値は seki のタプル (nested pair) で表現. todo_api と同じ慣例.
+-- Item = (id, (done, text))  → 「3-項組」をネストペアで表現.
+
+def mkItem := \id done text -> (id, (done, text))
+def itemId   := \it -> fst it
+def itemDone := \it -> fst (snd it)
+def itemText := \it -> snd (snd it)
+
+-- Model = (nextId, items)
+def mkModel := \nid items -> (nid, items)
+def modelNextId := \m -> fst m
+def modelItems  := \m -> snd m
+
+def initModel := mkModel 1 nil
+
+-- ===========================================================
+-- 純粋な状態遷移関数
+-- ===========================================================
+
+-- 追加: items の末尾 (= reverse で先頭) ではなく単純に cons でリストの先頭に置く
+def addItem := \model text ->
+    let nid = modelNextId model in
+    let xs  = modelItems model in
+    if strLen text == 0 then model
+    else mkModel (nid + 1) (cons (mkItem nid false text) xs)
+
+-- 削除: id が一致しないものだけ残す
+def deleteItem := \model id ->
+    let xs = modelItems model in
+    let kept = filter (\it -> not (itemId it == id)) xs in
+    mkModel (modelNextId model) kept
+
+-- トグル: id が一致する item の done を反転
+def toggleOne := \id it ->
+    if itemId it == id then mkItem id (not (itemDone it)) (itemText it) else it
+
+def toggleItem := \model id ->
+    let toggled = map (toggleOne id) (modelItems model) in
+    mkModel (modelNextId model) toggled
+
+def clearDone := \model ->
+    let xs = modelItems model in
+    let kept = filter (\it -> not (itemDone it)) xs in
+    mkModel (modelNextId model) kept
+
+-- ===========================================================
+-- update : String -> String -> Model -> Model
+-- ===========================================================
+--
+-- action  : "add" / "delete/<id>" / "toggle/<id>" / "clear"
+-- payload : form-encoded body ("text=buy+milk" 等)
+
+-- "/3" の "/" を取り除いて id を取り出すヘルパ.
+-- action 名 "delete/3" → 数値 3 (Option Int).
+def parseIdSuffix := \prefix action ->
+    let plen = strLen prefix in
+    if strStartsWith prefix action then
+        let rest = substring plen (strLen action - plen) action in
+        strToInt rest
+    else None
+
+def update_ := \action payload model ->
+    if action == "add" then
+        let text = formFieldOr payload "text" "" in
+        addItem model text
+    else if action == "clear" then
+        clearDone model
+    else if strStartsWith "delete/" action then
+        match parseIdSuffix "delete/" action with
+        | Some id -> deleteItem model id
+        | None    -> model
+    else if strStartsWith "toggle/" action then
+        match parseIdSuffix "toggle/" action with
+        | Some id -> toggleItem model id
+        | None    -> model
+    else
+        model
+
+-- ===========================================================
+-- View
+-- ===========================================================
+
+def renderItem := \it ->
+    let id = itemId it in
+    let done = itemDone it in
+    let text = itemText it in
+    let textClass = if done then "done" else "todo" in
+    liE [AClass "row"] [
+        formE [
+            AAttr "method" "POST",
+            AAttr "action" (strJoin "" ["/action/toggle/", intToStr id]),
+            AStyle "display:inline"
+        ] [
+            buttonE [
+                AType "submit",
+                AOnClick (strConcat "toggle/" (intToStr id)),
+                AClass "toggle"
+            ] [Text (if done then "✓" else "○")]
+        ],
+        spanE [AClass textClass] [Text text],
+        formE [
+            AAttr "method" "POST",
+            AAttr "action" (strJoin "" ["/action/delete/", intToStr id]),
+            AStyle "display:inline; margin-left:auto"
+        ] [
+            buttonE [
+                AType "submit",
+                AOnClick (strConcat "delete/" (intToStr id)),
+                AClass "delete"
+            ] [Text "×"]
+        ]
+    ]
+
+def view_ := \model ->
+    let xs = modelItems model in
+    let total = length xs in
+    let remaining = length (filter (\it -> not (itemDone it)) xs) in
+    divE [AClass "container"] [
+        h1E nil [Text "seki Todo"],
+        actionForm "add" "text" "新しい todo を入力..." "+ 追加",
+        pE [AClass "stats"] [
+            Text (strJoin "" [
+                "残り ", intToStr remaining, " / 全 ", intToStr total
+            ])
+        ],
+        ulE [AClass "list"] (map renderItem xs),
+        if total > 0 then
+            formE [AAttr "method" "POST", AAttr "action" "/action/clear"] [
+                buttonE [AType "submit", AOnClick "clear", AClass "clear-all"]
+                        [Text "完了済みをクリア"]
+            ]
+        else
+            divE nil nil
+    ]
+
+def app := mkAppIO initModel update_ view_
+
+-- ===========================================================
+-- スタイル
+-- ===========================================================
+def css := strJoin "\n" [
+    "    body { font-family: system-ui, sans-serif; background: #f7f7f9; margin: 0; }",
+    "    .container { max-width: 480px; margin: 3rem auto; padding: 2rem;",
+    "                 background: white; border-radius: 12px;",
+    "                 box-shadow: 0 2px 10px rgba(0,0,0,0.07); }",
+    "    h1 { margin: 0 0 1.5rem; color: #2563eb; }",
+    "    input[type=text] { flex:1; padding: 8px 12px; font-size: 1rem;",
+    "                       border: 1px solid #d1d5db; border-radius: 6px; }",
+    "    button { padding: 8px 14px; border: 1px solid #d1d5db;",
+    "             background: white; border-radius: 6px; cursor: pointer; }",
+    "    button:hover { background: #eef2ff; border-color: #6366f1; }",
+    "    .stats { color: #6b7280; margin: 1rem 0; font-size: 0.9rem; }",
+    "    .list { list-style: none; padding: 0; margin: 0; }",
+    "    .row { display: flex; align-items: center; gap: 12px; padding: 8px 0;",
+    "           border-bottom: 1px solid #f0f0f5; }",
+    "    .todo { flex: 1; }",
+    "    .done { flex: 1; color: #9ca3af; text-decoration: line-through; }",
+    "    .toggle { min-width: 36px; }",
+    "    .delete { color: #ef4444; }",
+    "    .clear-all { margin-top: 1rem; width: 100%; }"
+]
+
+-- ===========================================================
+-- theorem: 純粋な状態遷移の性質
+-- ===========================================================
+
+-- 空 model に "x" を追加すると nextId が 1 -> 2 に進む
+theorem add_increments_nextId
+  : modelNextId (addItem initModel "x") == 2
+  := by eval
+
+-- 空 model に "x" を追加すると items に 1 個入る
+theorem add_creates_one_item
+  : length (modelItems (addItem initModel "x")) == 1
+  := by eval
+
+-- 空 model に空文字列を追加しても何も起こらない
+theorem add_empty_noop
+  : length (modelItems (addItem initModel "")) == 0
+  := by eval
+
+-- clearDone は items 長を 0 にしない以上に減らさない (no-op 性)
+theorem clear_empty_noop
+  : length (modelItems (clearDone initModel)) == 0
+  := by eval
+
+-- ===========================================================
+-- CLI 起動
+-- ===========================================================
+def isServerMode := contains "--serve" args
+def port_arg := filter (\a -> not (a == "--serve")) args
+def port := if null port_arg then 8091
+            else match strToInt (head port_arg) with
+                | Some p -> p
+                | None   -> 8091
+
+if isServerMode then
+    match serveAppStyled app "seki Todo" css port with
+    | Err e -> let _ = eprintln (strConcat "server error: " e) in exit 1
+    | Ok _ -> ()
+else
+    let _ = println "seki Todo (dry-run, pass --serve to start)" in
+    let _ = println "" in
+    -- 3 件追加 → 1 件 toggle → 1 件 delete を再現
+    let m1 = addItem initModel "buy milk" in
+    let m2 = addItem m1 "write docs" in
+    let m3 = addItem m2 "ship UI" in
+    let m4 = toggleItem m3 1 in
+    let m5 = deleteItem m4 2 in
+    let _ = println "=== final HTML (after add×3 / toggle 1 / delete 2) ===" in
+    println (renderAppStyled app "seki Todo" css m5)

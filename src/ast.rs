@@ -202,6 +202,13 @@ pub enum Proof {
     /// goal, leaving `x` as a free variable.  Transformer-only: must be
     /// followed by a closing tactic (e.g. `by intros then algebra`).
     ByIntros,
+    /// `:= by auto` — portfolio search.  Tries a fixed pipeline of closers
+    /// (refl, eval, decide, algebra, linarith, induction, strong_induction,
+    /// simp) and a few combinators (intros + unfold f + algebra, simp with
+    /// dependent theorems), returning the first that closes the goal.  Used
+    /// directly by the REPL when the user submits `theorem t : P` without a
+    /// proof, and available as a regular tactic for file-based use.
+    ByAuto,
     /// `:= by t1 then t2 then ... then tk` — sequential composition.
     /// Each tactic transforms (or closes) the goal, and the last one must
     /// close it.  Transformers (unfold/intros/simp) pass a rewritten goal
@@ -285,6 +292,44 @@ pub struct LocatedDecl {
 }
 
 // -- Pretty-printing for debugging / REPL output ----------------------------
+
+impl fmt::Display for Proof {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Proof::ByEval => f.write_str("by eval"),
+            Proof::Refl => f.write_str("refl"),
+            Proof::ByAlgebra => f.write_str("by algebra"),
+            Proof::ByLinarith => f.write_str("by linarith"),
+            Proof::ByDecide => f.write_str("by decide"),
+            Proof::ByInduction => f.write_str("by induction"),
+            Proof::ByStrongInduction => f.write_str("by strong_induction"),
+            Proof::ByAuto => f.write_str("by auto"),
+            Proof::ByIntros => f.write_str("by intros"),
+            Proof::ByUnfold(name) => write!(f, "by unfold {}", name),
+            Proof::BySimp { lemmas } => {
+                if lemmas.is_empty() {
+                    f.write_str("by simp")
+                } else {
+                    write!(f, "by simp [{}]", lemmas.join(", "))
+                }
+            }
+            Proof::Seq(tacs) => {
+                // Render `by t1 then t2 then ...` flattened — every inner
+                // tactic in a Seq is itself a single tactic, so we strip the
+                // leading `by ` from each piece after the first.
+                let parts: Vec<String> = tacs
+                    .iter()
+                    .map(|t| {
+                        let s = format!("{}", t);
+                        s.strip_prefix("by ").map(|x| x.to_string()).unwrap_or(s)
+                    })
+                    .collect();
+                write!(f, "by {}", parts.join(" then "))
+            }
+            Proof::Term(e) => write!(f, "{}", e),
+        }
+    }
+}
 
 impl fmt::Display for BinOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

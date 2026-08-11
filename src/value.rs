@@ -639,6 +639,12 @@ pub struct Globals {
     /// Verified theorem propositions, in AST form.  `by simp` reads these
     /// as candidate rewrite rules (LHS == RHS becomes LHS → RHS).
     pub theorem_props: HashMap<String, Expr>,
+    /// Proof AST that originally verified each theorem.  Retained so that
+    /// the REPL's dependency re-checker can replay the proof against
+    /// updated globals when the user redefines a function referenced by
+    /// the theorem statement.  Without this, re-checking would have to
+    /// re-search via portfolio every time.
+    pub theorem_proofs: HashMap<String, crate::ast::Proof>,
     /// Axiom propositions, in AST form.  Axioms can be used by `by simp` as
     /// trusted rewrite rules.
     pub axiom_props: HashMap<String, Expr>,
@@ -668,6 +674,7 @@ impl Globals {
             axioms: HashMap::new(),
             inferred_types: HashMap::new(),
             theorem_props: HashMap::new(),
+            theorem_proofs: HashMap::new(),
             axiom_props: HashMap::new(),
             class_methods: HashMap::new(),
             class_ctor: HashMap::new(),
@@ -694,6 +701,7 @@ impl Globals {
             axioms: self.axioms.clone(),
             inferred_types: self.inferred_types.clone(),
             theorem_props: self.theorem_props.clone(),
+            theorem_proofs: self.theorem_proofs.clone(),
             axiom_props: self.axiom_props.clone(),
             class_methods: self.class_methods.clone(),
             class_ctor: self.class_ctor.clone(),
