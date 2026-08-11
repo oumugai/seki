@@ -22,7 +22,9 @@ seki は `theorem name : <命題> := <証明>` の形で命題を機械検証す
 
 1. **完全証明 (階層1、✅ 無限域で健全)**
    - 多項式の恒等式・不等式 (Int/Nat/**Real**) → `by algebra`
-     (`by linarith` は完全に同じ実装への別名 — 名前で意図を示すだけ)
+     (`by linarith` は完全に同じ実装への別名 — 名前で意図を示すだけ)。
+     複数変数の線形不等式 (仮定のスケーリングや変数消去が必要なもの) も
+     多変数 Fourier-Motzkin 消去で通る
    - 再帰関数の構造帰納で閉じる → `by induction` (Nat: 0→k+1 / List: nil→cons /
      Tree / `data` ADT)
    - 2段以上先まで参照する再帰 (Fibonacci は `by strong_induction`、tribonacci 型など3段以上は `by strong_induction 3` のように depth を指定)
@@ -52,7 +54,7 @@ seki は `theorem name : <命題> := <証明>` の形で命題を機械検証す
 | `refl` | ✅ | 構文的に完全一致する場合のみ。alpha-renaming なし |
 | `by eval` | ✅ 有限ドメインのみ / 🟡 `Nat`・`Int` は `SAMPLE_BOUND`=200 まで | 無限ドメインで「通った」は健全性の証明ではない |
 | `by algebra` | ✅ Int/Rat/**Real** (Real は `f64_to_rat` で厳密な有理数化) | `if` の場合分け対応済み。仮定の連言 (`a>0 and b>0 => ...`) は個別の仮定に分解され、**複数仮定の等重み1の和** がゴールと一致すれば閉じる (`hyps_sum_proves`) — 例: `x>0, y>0 ⊢ x+y>0` は通るが `x>0, y>0 ⊢ x-y>0` は通らない (健全)。可変除数は `==` かつ単項キャンセルで閉じる場合のみ (`(a*n)/n == a`、`(a*n) mod n == 0`) — 可変除数の不等式や剰余非零の一般ケースは未対応 |
-| `by linarith` | ✅ `by algebra` と全く同じ実装への別名 | **専用の単変数 Fourier-Motzkin ソルバ (`linarithProve` builtin, `src/linarith.rs`) にはタクティクとして未接続**。多変数の線形不等式が欲しい場合、`by algebra`/`by linarith` が通らなければ現状これ以上強い一般解はない |
+| `by linarith` | ✅ `by algebra` と全く同じ実装への別名 | 仮定の加算結合 (`hyps_sum_proves`、等重み1の和) に加え、**多変数 Fourier-Motzkin 消去** (`fm_is_unsat`) も内蔵 — スケーリングが必要な仮定 (`x<=3 ⊢ 2x<=6`) やゴールに現れない変数の消去 (`x<=y and y<=10 ⊢ x<=10`) にも対応。FM は「証明できる」方向のみ健全 (有理数 unsat⟹整数 unsat だが逆は不成立なので反証には使わない)。専用の単変数ソルバ (`linarithProve` builtin, `src/linarith.rs`) は別実装でタクティクには未接続 |
 | `by induction` | ✅ 構造帰納 (Nat/List/Tree/data) | 真の**相互帰納法** (2つの関数の性質を互いを IH として同時に証明) は未対応 |
 | `by strong_induction <N>` | ✅ well-founded on Nat (`N` 省略時2) | `N` は「関数が実際に何段前を参照するか」であり探索深さではない — 小さすぎる `N` は証明失敗になる (基底境界を跨ぐ未解決の `if` を検出するガードあり。2026-08、これが無いと偽の命題が通ってしまうバグがあった)。大きすぎる `N` は余分な基底を検査するだけで安全 |
 | `by simp` | ✅ 各書換えステップが健全 | 対称規則 (`add_comm` 等) も AC-canonicalization で oscillation せず扱える。**条件付き等式** (`a > 0 => lhs == rhs` のような、規則自体に前提があるもの) は未対応 — `forall ..., lhs == rhs` の直接形のみ登録できる |

@@ -665,6 +665,19 @@ impl<'a> Prover<'a> {
                 return Ok(Value::Bool(true));
             }
         }
+        // Multi-variable linear inequality fallback: full Fourier-Motzkin
+        // elimination over the hypotheses + negated goal (sound only in
+        // the "provable" direction — see `algebra::fm_is_unsat`'s module
+        // docs). Reaches goals that need *scaling* a hypothesis (e.g.
+        // `2x <= y, y <= z ⊢ 2x <= z`), which the weight-1-sum shortcut in
+        // `hyps_sum_proves` above can't. Only attempted for the inequality
+        // ops it can natively negate into another inequality (`==`/`!=`
+        // goals are handled by the mechanisms above instead).
+        if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+            && try_fm_prove(hyps, &diff, &op)
+        {
+            return Ok(Value::Bool(true));
+        }
         Err(SekiError::Proof(format!(
             "by algebra: cannot prove {} {} {} over {:?}",
             lhs, op, rhs, dom
@@ -1639,6 +1652,41 @@ fn hyps_sum_proves(hyps: &[(Expr, bool)], goal: &Expr) -> bool {
         }
     }
     false
+}
+
+/// Try to prove `diff <op> 0` (an inequality goal) from `hyps` via full
+/// multi-variable Fourier-Motzkin elimination: negate the goal, add it to
+/// the hypotheses converted to linear constraints, and check the combined
+/// system for unsatisfiability (see `algebra::fm_is_unsat`). Bails (returns
+/// `false`, never a false positive) if the goal or any hypothesis carries
+/// a nonlinear term, or if a hypothesis's relation can't be represented as
+/// linear constraints (`!=`) — such hypotheses are simply skipped, which
+/// only loses precision, never soundness.
+fn try_fm_prove(hyps: &[(Expr, bool)], diff: &crate::algebra::Polynomial, op: &BinOp) -> bool {
+    if !crate::algebra::poly_is_affine(diff) {
+        return false;
+    }
+    let neg_op = negate_relation(op);
+    let Some(mut constraints) = crate::algebra::relation_to_constraints(&neg_op, diff.clone())
+    else {
+        return false;
+    };
+    for (hcond, htrue) in hyps {
+        let Expr::BinOp(hop, hl, hr) = hcond else { continue };
+        if !is_relation(hop) {
+            continue;
+        }
+        let (Some(hlp), Some(hrp)) = (expr_to_poly(hl), expr_to_poly(hr)) else { continue };
+        let hdiff = hlp.sub(hrp);
+        if !crate::algebra::poly_is_affine(&hdiff) {
+            continue; // nonlinear hypothesis — skip it, don't abort the whole attempt
+        }
+        let eff_op = if *htrue { hop.clone() } else { negate_relation(hop) };
+        if let Some(cs) = crate::algebra::relation_to_constraints(&eff_op, hdiff) {
+            constraints.extend(cs);
+        }
+    }
+    crate::algebra::fm_is_unsat(&constraints)
 }
 
 /// True if `mod_expr` is `<numerator> mod v` for a bare variable `v`,

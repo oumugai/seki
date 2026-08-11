@@ -162,24 +162,41 @@ theorem t : forall n in Nat, n + 0 == n
 
 **意味**: `by algebra` の別名 (実装上は同じ `verify_algebra` に dispatch する) —
 「線形不等式を証明したいときの意図を示す」ための名前として使う。
-前提の連言 (`P1 and P2 and ... => Q`) は個別の仮定に分解され、
-そのうち複数を **等重み 1 で加算した結果がゴールの多項式と一致する**
-場合に閉じる (`hyps_sum_proves`) — 例えば `x > 0`, `y > 0` から
-`x + y > 0` を導ける。単一の仮定からの含意は `hypothesis_proves` が別途扱う。
+前提の連言 (`P1 and P2 and ... => Q`) は個別の仮定に分解され、以下の順で
+ゴールを閉じる:
 
-単変数の Fourier-Motzkin による本格的な SMT-lite ソルバは
-`src/linarith.rs` に別実装があり、`linarithProve` builtin として
-式ベースで呼べる (Phase 5)。ただし `by linarith` **タクティク自体は
-まだこのソルバに接続されていない** — 上記の加算的な仮定結合のみ。
+1. 単一の仮定からの直接含意 (`hypothesis_proves`)
+2. 複数仮定を **等重み 1 で加算した結果がゴールの多項式と一致する** 場合
+   (`hyps_sum_proves`) — 例えば `x > 0`, `y > 0` から `x + y > 0` を導ける
+3. **多変数 Fourier-Motzkin 消去** (`algebra::fm_is_unsat`, 2026-08 追加):
+   仮定と否定したゴールを線形制約 (`poly <=/< 0` の集合) に変換し、
+   変数を1つずつ「下界と上界のペアから新しい制約を作る」ことで消去、
+   最終的に矛盾する定数制約が出れば「証明できる」と判定する。
+   2 の等重み1の和では届かない **スケーリングが必要なケース**
+   (`x <= 3 ⊢ 2x <= 6`) や **ゴールに現れない変数の消去**
+   (`x <= y and y <= 10 ⊢ x <= 10`) もこれで通る。
 
-**健全性**: ✅ `by algebra` と同じ多項式判定に加え、加算結合は
-「非負の総和は非負・いずれかが正なら総和も正」という健全な補題のみ使う
-(`hyps_sum_proves`)。`linarithProve` builtin 自体も線形整数 / 有理数算術に
-対して健全 (property test `linarith_never_proves_a_falsehood` で 400 例検証)。
+単変数専用の Fourier-Motzkin ソルバ (整数区間による厳密決定) は
+`src/linarith.rs` に**別実装**として存在し、`linarithProve` builtin として
+式ベースで呼べる (Phase 5)。`by linarith` タクティクは (3) の多変数版を
+使うが、これは `src/linarith.rs` とは別のコード (`src/algebra.rs` /
+`src/prover.rs`) — 2つのソルバの統合は今後の課題。
+
+**健全性**: ✅ 1・2 は前述の通り健全。3 (多変数 FM) は
+**「証明できる」方向のみ健全** — 仮定+否定ゴールの有理数緩和が
+充足不能なら元の (整数/Nat の) 系も充足不能なので健全だが、逆に
+有理数として充足可能でも整数解が存在しない場合があるため、
+3 を「反証」(偽の判定) には使わない設計。`linarithProve` builtin 自体も
+線形整数 / 有理数算術に対して健全 (property test
+`linarith_never_proves_a_falsehood` で 400 例検証)。
 
 ```seki
 theorem t : forall (x y) in Int, x > 0 and y > 0 => x + y > 0
     := by linarith
+
+-- 多変数消去が必要な例 (等重み1の和では届かない)
+theorem t2 : forall x in Int, x <= 3 -> 2 * x <= 6 := by linarith
+theorem t3 : forall (x y) in Int, x <= y and y <= 10 -> x <= 10 := by linarith
 ```
 
 ## 5.11 `by auto`
@@ -234,21 +251,19 @@ theorem mul_add : forall (x y z) in Int, x * (y + z) == x * y + x * z
 
 | 戦術 | 種別 | 健全性 |
 |---|---|---|
-| `eval` | closer | ✅ 有限のみ |
+| `eval` | closer | ✅ 有限のみ / 🟡 無限ドメインはサンプル |
 | `refl` | closer / 項 | ✅ |
-| `algebra` | closer | ✅ Int / Rat 上の多項式 + 仮定の加算結合 |
+| `algebra` | closer | ✅ Int / Rat / Real 上の多項式 + 仮定の加算結合・多変数 Fourier-Motzkin |
 | `linarith` | closer | ✅ `algebra` の別名 (同じ健全性) |
 | `decide` | closer | ✅ Bool に reduce できる場合のみ |
 | `induction` | closer | ✅ 構造帰納 |
-| `strong_induction` | closer | ✅ Nat 深さ 2 |
+| `strong_induction <N>` | closer | ✅ Nat、深さ可変 (`N` 省略時2) |
 | `simp` | both | ✅ 既存定理の連鎖 |
-| `unfold` | transformer | ✅ 定義展開 |
+| `unfold` | transformer | ✅ 定義展開、相互再帰も1段で正しく止まる |
 | `intros` | transformer | ✅ 全称除去 |
 | `auto` | closer (portfolio) | ✅ 各候補タクティクの健全性に従う |
-| `decide` | closer | ✅ Bool reduce |
-| `linarith` | closer | ✅ 線形 |
 | Curry-Howard 項 | closer | ✅ |
 
-タクティク 9 種 (decide を含む 10 種) すべて、想定範囲内では健全。
+タクティク 11 種 (auto を含む) すべて、想定範囲内では健全。
 **全体としての健全性の弱点** は型システムの sample-based dep type check
 であり、タクティクではない。`06-soundness.md` 参照。

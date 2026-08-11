@@ -41,6 +41,14 @@ seki は **pre-1.0** です。これは次を意味します:
   `a in A and b in B[x:=a]` で、`DepArrow` と異なりサンプリング不要 (候補の
   pair を直接持っている) — 完全に健全。`B` が `x` を参照しなければ
   `A times B` と同義。
+- `by algebra`/`by linarith` に**多変数 Fourier-Motzkin 消去**を追加
+  (`algebra::fm_is_unsat` / `LinConstraint` / `relation_to_constraints`、
+  `prover::try_fm_prove`)。仮定+否定ゴールを線形制約に変換し変数を1つずつ
+  消去。既存の `hyps_sum_proves` (等重み1の和のみ) では届かない、
+  ヒポthesis のスケーリングが必要なケース (`x <= 3 ⊢ 2x <= 6`) やゴールに
+  現れない変数の消去 (`x <= y and y <= 10 ⊢ x <= 10`) に対応。健全性は
+  「証明できる」方向のみ (有理数緩和が unsat なら整数系も unsat だが、
+  逆は成り立たないので反証には使わない)。
 
 ### Changed
 

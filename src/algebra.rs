@@ -825,6 +825,145 @@ pub fn ratpoly_equal(lhs: &Expr, rhs: &Expr) -> Option<bool> {
     Some(cross_l == cross_r)
 }
 
+// ===========================================================================
+// Multi-variable Fourier-Motzkin elimination
+// ===========================================================================
+//
+// Decides whether a system of *linear* (affine, degree <= 1) inequality
+// constraints is unsatisfiable over the rationals. Used by the prover to
+// discharge a linear-inequality goal from linear hypotheses by refutation:
+// negate the goal, add it to the hypothesis constraints, and check the
+// combined system for unsatisfiability. If the rational relaxation is
+// UNSAT, the (more restrictive) integer/Nat system is certainly UNSAT too
+// — so this is sound as a *positive* ("provable") result. It must never be
+// used to claim a *negative* ("refutable") result: a rational witness for
+// SAT need not correspond to any actual integer point, so `fm_is_unsat`
+// returning `false` only ever means "not provably unsat this way", not
+// "satisfiable, hence the goal is false" — callers must not confuse the two.
+
+/// True iff every monomial in `p` has total degree <= 1 (i.e. `p` is an
+/// affine — plain linear — expression, no products of variables and no
+/// squared/higher terms).  Required before handing `p` to Fourier-Motzkin:
+/// the elimination algorithm below is only meaningful for linear systems.
+pub fn poly_is_affine(p: &Polynomial) -> bool {
+    p.terms
+        .iter()
+        .all(|m| m.vars.values().copied().sum::<u32>() <= 1)
+}
+
+/// One linear constraint `poly <= 0` (or `poly < 0` when `strict`).
+#[derive(Clone, Debug)]
+pub struct LinConstraint {
+    pub poly: Polynomial,
+    pub strict: bool,
+}
+
+/// Turn a relation `diff <op> 0` (`diff` already `lhs - rhs`) into an
+/// equivalent conjunction of `<=`/`<` constraints. `Neq` has no such
+/// representation (its solution set isn't a single convex region) and
+/// returns `None` — callers should simply skip a hypothesis they can't
+/// convert (safe: it just loses precision) or decline to attempt FM at all
+/// when it's the *goal* that can't convert.
+pub fn relation_to_constraints(op: &BinOp, diff: Polynomial) -> Option<Vec<LinConstraint>> {
+    match op {
+        BinOp::Lt => Some(vec![LinConstraint { poly: diff, strict: true }]),
+        BinOp::Le => Some(vec![LinConstraint { poly: diff, strict: false }]),
+        BinOp::Gt => Some(vec![LinConstraint { poly: diff.neg(), strict: true }]),
+        BinOp::Ge => Some(vec![LinConstraint { poly: diff.neg(), strict: false }]),
+        BinOp::Eq => Some(vec![
+            LinConstraint { poly: diff.clone(), strict: false },
+            LinConstraint { poly: diff.neg(), strict: false },
+        ]),
+        _ => None,
+    }
+}
+
+/// Split an affine polynomial into `(coefficient of var, rest)` such that
+/// `poly == rest + coefficient * var`. `poly` must be affine (checked by
+/// the caller via `poly_is_affine`) so `var` appears in at most one
+/// monomial, at exponent exactly 1.
+fn split_var_term(poly: &Polynomial, var: &str) -> (Rat, Polynomial) {
+    let mut coeff = Rat::ZERO;
+    let mut rest = Vec::with_capacity(poly.terms.len());
+    for m in &poly.terms {
+        if m.vars.get(var).copied() == Some(1) {
+            coeff = m.coeff;
+        } else {
+            rest.push(m.clone());
+        }
+    }
+    (coeff, normalize(rest))
+}
+
+/// Safety cap on the constraint count during elimination — each variable
+/// eliminated can multiply the constraint count (classic FM blow-up).
+/// Real proof goals involve a handful of hypotheses/variables; this is
+/// generous headroom while still bounding pathological inputs.
+const FM_MAX_CONSTRAINTS: usize = 2000;
+
+/// Decide (soundly, for the "yes" answer only — see module docs above)
+/// whether `constraints` has no rational solution.
+pub fn fm_is_unsat(constraints: &[LinConstraint]) -> bool {
+    let mut cs: Vec<LinConstraint> = constraints.to_vec();
+    loop {
+        // A purely-constant constraint that's violated proves UNSAT outright.
+        for c in &cs {
+            if let Some(k) = c.poly.as_constant() {
+                let violated = if c.strict { k.sign() >= 0 } else { k.sign() > 0 };
+                if violated {
+                    return true;
+                }
+            }
+        }
+        let mut vars: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for c in &cs {
+            for m in &c.poly.terms {
+                for v in m.vars.keys() {
+                    vars.insert(v.as_str());
+                }
+            }
+        }
+        let Some(v) = vars.into_iter().next().map(str::to_string) else {
+            // No variables left anywhere, and no violated constant found
+            // above: every remaining constraint is a satisfied constant.
+            return false;
+        };
+        let (with_v, without_v): (Vec<LinConstraint>, Vec<LinConstraint>) = cs
+            .into_iter()
+            .partition(|c| c.poly.terms.iter().any(|m| m.vars.contains_key(&v)));
+        let mut lowers: Vec<(Polynomial, bool)> = Vec::new(); // v >= bound
+        let mut uppers: Vec<(Polynomial, bool)> = Vec::new(); // v <= bound
+        for c in with_v {
+            let (coeff, rest) = split_var_term(&c.poly, &v);
+            debug_assert!(!coeff.is_zero(), "partitioned as mentioning `v`");
+            // coeff*v + rest <=/< 0  =>  v <=/>= (-rest)/coeff (direction
+            // flips when dividing by a negative coefficient).
+            let bound = rest.neg().div_const(coeff).expect("nonzero coeff");
+            if coeff.sign() > 0 {
+                uppers.push((bound, c.strict));
+            } else {
+                lowers.push((bound, c.strict));
+            }
+        }
+        let mut next = without_v;
+        for (u, u_strict) in &uppers {
+            for (l, l_strict) in &lowers {
+                // L <=/< v <=/< U  implies  L <=/< U.
+                next.push(LinConstraint {
+                    poly: l.clone().sub(u.clone()),
+                    strict: *u_strict || *l_strict,
+                });
+            }
+        }
+        if next.len() > FM_MAX_CONSTRAINTS {
+            // Bail conservatively: "not provably unsat this way" — sound,
+            // just gives up on very large systems rather than blowing up.
+            return false;
+        }
+        cs = next;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -923,5 +1062,63 @@ mod tests {
         assert_eq!(f64_to_rat(0.5), Some(Rat::new(1, 2)));
         assert_eq!(f64_to_rat(0.25), Some(Rat::new(1, 4)));
         assert_eq!(f64_to_rat(-1.5), Some(Rat::new(-3, 2)));
+    }
+
+    // ---- Fourier-Motzkin ---------------------------------------------
+
+    fn diff_of(src: &str) -> (BinOp, Polynomial) {
+        let e = parse(src);
+        match e {
+            Expr::BinOp(op, l, r) => (op, expr_to_poly(&l).unwrap().sub(expr_to_poly(&r).unwrap())),
+            _ => panic!("not a relation: {}", src),
+        }
+    }
+
+    fn constraints_of(sources: &[&str]) -> Vec<LinConstraint> {
+        let mut out = Vec::new();
+        for s in sources {
+            let (op, diff) = diff_of(s);
+            out.extend(relation_to_constraints(&op, diff).unwrap());
+        }
+        out
+    }
+
+    #[test]
+    fn fm_detects_direct_contradiction() {
+        // x > 0 and x < 0 — unsat regardless of any other variable.
+        let cs = constraints_of(&["x > 0", "x < 0"]);
+        assert!(fm_is_unsat(&cs));
+    }
+
+    #[test]
+    fn fm_transitivity_via_elimination_with_scaling() {
+        // 2x <= y, y <= z, and (negated goal) 2x > z  — unsat, i.e. the
+        // system proves 2x <= z. This needs *scaling* (coefficient 2 on
+        // x), not just weight-1 summation — a case `hyps_sum_proves`
+        // can't reach but full FM elimination can.
+        let cs = constraints_of(&["2 * x - y <= 0", "y - z <= 0", "2 * x - z > 0"]);
+        assert!(fm_is_unsat(&cs));
+    }
+
+    #[test]
+    fn fm_does_not_falsely_claim_unsat() {
+        // x >= 0, y >= 0, and (negated goal) x + y < 0 — the hypotheses do
+        // NOT actually force x + y >= 0 to be unreachable... wait, they DO:
+        // x>=0 and y>=0 implies x+y>=0, so negating (x+y<0) IS unsat. Use a
+        // genuinely satisfiable system instead: x >= 0, y >= 5, negated
+        // goal x < y (i.e. asserting NOT(x < y), so x >= y) — satisfiable
+        // (e.g. x=10, y=5), so must NOT be reported unsat.
+        let cs = constraints_of(&["x >= 0", "y >= 5", "x - y >= 0"]);
+        assert!(!fm_is_unsat(&cs));
+    }
+
+    #[test]
+    fn fm_rejects_nonlinear_terms_upstream() {
+        // Sanity: poly_is_affine correctly flags a quadratic term so
+        // callers know not to hand it to FM.
+        let (_, diff) = diff_of("x * x > 0");
+        assert!(!poly_is_affine(&diff));
+        let (_, diff) = diff_of("x > 0");
+        assert!(poly_is_affine(&diff));
     }
 }

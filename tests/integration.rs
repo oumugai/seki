@@ -455,6 +455,72 @@ fn algebra_rejects_unsound_hypothesis_combination() {
 }
 
 #[test]
+fn algebra_multivar_fourier_motzkin_scaling_and_elimination() {
+    // Cases requiring genuine multi-variable Fourier-Motzkin elimination
+    // (scaling a hypothesis, or eliminating a variable absent from the
+    // goal) — beyond `hyps_sum_proves`'s weight-1-sum shortcut, and beyond
+    // what a hypothesis-blind polynomial sign check could ever show.
+    let g = run(r"
+        theorem scale_single
+          : forall x in Int, x <= 3 -> 2 * x <= 6
+          := by algebra
+        theorem elim_y
+          : forall (x y) in Int, x <= y and y <= 10 -> x <= 10
+          := by linarith
+        theorem diet_style
+          : forall (x y) in Int, 2 * x + y <= 10 and x - y <= 3 -> 3 * x <= 13
+          := by algebra
+        theorem nat_case
+          : forall (x y) in Nat, x <= y -> 0 - 1 < y
+          := by algebra
+    ");
+    for t in &["scale_single", "elim_y", "diet_style", "nat_case"] {
+        assert!(g.theorems.contains_key(*t), "{} not proven", t);
+    }
+}
+
+#[test]
+fn algebra_fourier_motzkin_strictness_combination() {
+    // Combining a strict and a non-strict bound must yield a strict
+    // conclusion; combining two non-strict bounds must NOT.
+    let g = run(r"
+        theorem strict_trans
+          : forall (x y z) in Int, x < y and y < z -> x < z := by algebra
+        theorem mixed_strict
+          : forall (x y z) in Int, x <= y and y < z -> x < z := by algebra
+        theorem mixed_strict2
+          : forall (x y z) in Int, x < y and y <= z -> x < z := by algebra
+    ");
+    for t in &["strict_trans", "mixed_strict", "mixed_strict2"] {
+        assert!(g.theorems.contains_key(*t), "{} not proven", t);
+    }
+
+    let res = std::panic::catch_unwind(|| {
+        run(r"
+            theorem bad
+              : forall (x y z) in Int, x <= y and y <= z -> x < z
+              := by algebra
+        ");
+    });
+    assert!(
+        res.is_err(),
+        "two non-strict bounds must not combine into a strict conclusion"
+    );
+}
+
+#[test]
+fn algebra_fourier_motzkin_rejects_off_by_one() {
+    let res = std::panic::catch_unwind(|| {
+        run(r"
+            theorem bad
+              : forall x in Int, x <= 3 -> 2 * x <= 5
+              := by algebra
+        ");
+    });
+    assert!(res.is_err(), "2*3 == 6 > 5, so this must not be proved");
+}
+
+#[test]
 fn algebra_clears_real_denominators() {
     // B3: rational-function fallback handles variable denominators
     let g = run(r"

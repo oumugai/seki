@@ -780,6 +780,15 @@ depth が実際の参照深さより小さいときに未解決の `if` を握�
 (候補の pair `(a, b)` を直接持っているため)。`tests/integration.rs` に
 `sigma_dependent_pair_membership_check` / `sigma_non_dependent_case_behaves_like_times`
 を追加。
+**P3.8** 多変数 Fourier-Motzkin 消去 (`algebra::fm_is_unsat` / `LinConstraint` /
+`relation_to_constraints` / `prover::try_fm_prove`): `by algebra`/`by linarith`
+の仮定+否定ゴールを線形制約に変換し、変数を1つずつ消去して充足不能性を判定。
+ヒポthesis のスケーリング (`x <= 3 ⊢ 2x <= 6`) やゴールに現れない変数の消去
+(`x <= y and y <= 10 ⊢ x <= 10`) など、既存の `hyps_sum_proves` (等重み1の和
+のみ) より一般的なケースを健全にカバー。**証明できる方向のみ健全** — 有理数
+緩和が unsat なら整数/Nat 系も unsat (健全) だが、逆に SAT でも整数解が
+無い場合があるため反証 (`Refuted`) には使わない設計。単体テスト4件
+(`fm_detects_direct_contradiction` 等) + 統合テスト3件を追加。
 **既に対応済み (旧「実装が比較的容易なもの」からの卒業)**:
 `forall (x y) in S, P` の複数変数糖衣、パターンマッチ網羅性の**警告 →
 オプトインのエラー化**、`by simp` の対称規則
@@ -800,7 +809,7 @@ depth が実際の参照深さより小さいときに未解決の `if` を握�
 - **より強い型推論**: 現状 `infer_type` はラムダ・算術・if など主要な構成子に限定されており、`match` パターン束縛・`forall`/`exists` の domain・依存型では `Set` (任意) で諦めている。単方向 (intro 型) と双方向 (check 型) を混ぜた本格的な bidirectional checking で改善余地あり。
 - **3次以上の不等式判定**: 現在 PSD 判定は 2 次形式まで。3 次は一般に難しいが、奇数次の単項式正値性 (`x³ ≥ 0` 失敗、`x²y² ≥ 0` 成功) などの限定パターンは扱える。
 - **可変除数の div / mod**: `==` かつ剰余0のケースは対応済み — `/` は `ratpoly_equal` の交差乗算 (Div をオペーク項に潰さず有理関数として比較、`(a*n)/n == a` 等)、`mod` は `Polynomial::exact_div_by_var` (`(a*n) mod n == 0` — 分子の全項が変数 `v` を factor として持てば健全。符号無関係、2026-08 追加)。未対応のまま残るのは **不等式** (`<`,`<=`,`>`,`>=`) の可変除数 (符号での場合分けが必要) と、剰余が非零 (`mod v == R`, `R != 0`) の一般ケース。
-- **線形不等式の決定 (`by linarith`)**: 既に単変数版は実装済み (`src/linarith.rs`)。複数変数の Fourier-Motzkin 消去は未対応 — `forall n in Nat, forall m in Nat, n + m >= 0` のような多変数の定数境界はまだ一発で通らない。
+- **線形不等式の決定 (`by linarith`)**: 単変数版は `src/linarith.rs` (整数区間による厳密決定、`linarithProve` builtin 経由)。多変数の Fourier-Motzkin 消去は `by algebra`/`by linarith` タクティク側 (`algebra::fm_is_unsat` + `prover::try_fm_prove`) に実装済み (2026-08) — 仮定+否定ゴールを線形制約に変換し変数を1つずつ消去。健全性は「証明できる」方向のみ (有理数 unsat ⟹ 整数 unsat は健全だが、逆に有理数 SAT は整数 SAT を含意しないので反証には使わない)。`src/linarith.rs` の単変数ソルバとは別実装のまま (統合は今後の課題)。
 - **依存パラメトリック ADT の専用構文**: `data Vec : Nat -> Set where ...` 構文を加え、`{xs | length xs == n}` を自動生成。
 - **LSP サーバ**: `src/lsp_main.rs` に手書き JSON-RPC framing + diagnostics 配信 (`textDocument/publishDiagnostics`) + 簡易 `textDocument/hover` /
   `textDocument/definition` (2026-08 追加) は実装済み。両方ともカーソル位置の識別子をテキストベースで抜き出し (`word_at`)、

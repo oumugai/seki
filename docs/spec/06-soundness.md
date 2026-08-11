@@ -15,7 +15,7 @@ production 採用や数学的厳密性を求める場合の参考にしてくだ
 | `by induction` (Nat/List/Tree/data) | 構造帰納法、ADT の有限構築可能性 |
 | `by strong_induction` / `by strong_induction <N>` (Nat, 深さ可変) | well-founded relation on ℕ。展開後に基底境界を跨ぐ未解決の `if` が残る場合は証明を失敗させる (`contains_var_conditioned_if` ガード, 2026-08 追加 — §6.6 参照) |
 | `by simp` chain | 各 step が健全な書換え、対称規則 (`add_comm` 等) も AC-canonicalization で oscillation なく扱える |
-| `by linarith` | `by algebra` の別名 (同じ多項式判定 + 仮定の加算結合 `hyps_sum_proves`)。単変数 Fourier-Motzkin の専用ソルバ (`linarithProve` builtin, Phase 5, property test 検証済) は別実装で、タクティクにはまだ接続されていない |
+| `by linarith` | `by algebra` の別名 (同じ多項式判定 + 仮定の加算結合 `hyps_sum_proves` + 多変数 Fourier-Motzkin 消去 `fm_is_unsat`)。**FM は「証明できる」方向のみ健全** — 有理数緩和が unsat なら整数/Nat 系も unsat だが、逆に有理数 SAT が整数解の存在を保証しないので反証には使わない。単変数専用の Fourier-Motzkin ソルバ (`linarithProve` builtin, Phase 5, property test 検証済) は別実装で、タクティクにはまだ接続されていない |
 | 列挙集合 / 直積 / ADT membership | 完全に構造的 |
 | 型クラス辞書化 | 静的に解決、実行時に明示渡し可能 |
 

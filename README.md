@@ -238,6 +238,7 @@ seki/
 - **`--strict-match` / `SEKI_STRICT_MATCH`**: パターンマッチ網羅性チェックを警告からコンパイル時エラーへオプトインで昇格 (既存コードへの影響ゼロを確認済み — `lib/`/`examples/`/`tests/`/`sample/` 全体で非網羅 match は現状0件) (2026-08)
 - **LSP `textDocument/hover` / `textDocument/definition`**: 組込関数はメタデータ (シグネチャ/副作用/性質/doc) を、トップレベル `def`/`theorem`/`axiom` はその定義/命題を表示 (hover)、または宣言位置へジャンプ (definition、組込関数はジャンプ先の seki ソースが無いので null)。カーソル位置の識別子をテキストベースで抽出する簡易実装 (スコープ解決はしない — 詳細は `src/lsp_main.rs`) (2026-08)
 - **依存ペア型 (Σ) `sigma (x : A), B(x)`**: `DepArrow` (Π) と対をなす新しい `Expr`/`SetVal` variant。`(a, b)` のメンバーシップは `a in A and b in B[x:=a]` で判定 — 候補の pair を直接持っているので `DepArrow` のようなサンプリング近似は不要で完全に健全。`B` が `x` を参照しなければ `A times B` と同義 (2026-08)
+- **多変数 Fourier-Motzkin 消去 (`by algebra`/`by linarith`)**: 仮定 (連言) + 否定したゴールを線形制約に変換し、変数を1つずつ消去して充足不能性を判定 (`algebra::fm_is_unsat`)。ヒポthesis のスケーリング (`x <= 3 ⊢ 2x <= 6`) やゴールに出てこない変数の消去 (`x <= y and y <= 10 ⊢ x <= 10`) など、単純な等重み1の和 (`hyps_sum_proves`) では届かないケースに対応。健全性は「証明できる」方向のみに限定 (有理数緩和が unsat なら整数系も unsat — 逆に SAT でも整数解が無い場合があるため反証には使わない) (2026-08)
 
 主要な未対応:
 
@@ -248,7 +249,6 @@ seki/
 - 整列性原理 (well-ordering) の一般形
 - **相互帰納法** (2つの関数の性質を互いを IH として同時に証明する戦術) — `by unfold f then ...` は相互再帰の呼び出しグラフを検出して1段先をオペーク項として扱う程度で、それより先は未対応 (2026-08、以前あった「相互再帰を非再帰と誤判定して展開が暴走する」バグは修正済み)
 - 真のスコープ分離されたモジュール (現状はフラットな名前空間に prefix 追加)
-- 複数変数の線形不等式決定 (`by linarith` は単変数のみ; 多変数 Fourier-Motzkin は未対応)
 - AST span (Expr 単位の位置情報) — エラーは decl 単位の `[line:col]` まで
 - LSP の completion / インタラクティブなタクティクモード (goal-stack) — diagnostics 配信・簡易 hover・goto-definition (組込関数のメタデータ + トップレベル `def`/`theorem`/`axiom` 名、テキストベースでスコープ非対応) は実装済み (2026-08)
 
