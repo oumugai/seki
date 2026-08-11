@@ -236,7 +236,7 @@ seki/
 - **相互再帰関数の unfold 境界検出**: `by unfold f then ...` の推移展開が呼び出しグラフを辿って相互再帰サイクルを認識するようになり、`isEven`/`isOdd` のような組を「非再帰」と誤判定して展開が暴走する (32回上限まで交互展開) 問題を修正 (2026-08)
 - **可変除数の mod 単項キャンセル**: `<expr> mod v == 0` (`v` が変数) を、`v` が分子の全項に literal factor として現れる場合に健全に証明 (`Polynomial::exact_div_by_var`)。符号に関係なく成立 (2026-08)
 - **`--strict-match` / `SEKI_STRICT_MATCH`**: パターンマッチ網羅性チェックを警告からコンパイル時エラーへオプトインで昇格 (既存コードへの影響ゼロを確認済み — `lib/`/`examples/`/`tests/`/`sample/` 全体で非網羅 match は現状0件) (2026-08)
-- **LSP `textDocument/hover`**: 組込関数はメタデータ (シグネチャ/副作用/性質/doc) を、トップレベル `def`/`theorem`/`axiom` はその定義/命題を表示。カーソル位置の識別子をテキストベースで抽出する簡易実装 (スコープ解決はしない — 詳細は `src/lsp_main.rs`) (2026-08)
+- **LSP `textDocument/hover` / `textDocument/definition`**: 組込関数はメタデータ (シグネチャ/副作用/性質/doc) を、トップレベル `def`/`theorem`/`axiom` はその定義/命題を表示 (hover)、または宣言位置へジャンプ (definition、組込関数はジャンプ先の seki ソースが無いので null)。カーソル位置の識別子をテキストベースで抽出する簡易実装 (スコープ解決はしない — 詳細は `src/lsp_main.rs`) (2026-08)
 
 主要な未対応:
 
@@ -250,7 +250,7 @@ seki/
 - 真のスコープ分離されたモジュール (現状はフラットな名前空間に prefix 追加)
 - 複数変数の線形不等式決定 (`by linarith` は単変数のみ; 多変数 Fourier-Motzkin は未対応)
 - AST span (Expr 単位の位置情報) — エラーは decl 単位の `[line:col]` まで
-- LSP の completion / goto-definition / インタラクティブなタクティクモード (goal-stack) — diagnostics 配信・簡易 hover (組込関数のメタデータ + トップレベル `def`/`theorem`/`axiom` 名、テキストベースでスコープ非対応) は実装済み (2026-08)
+- LSP の completion / インタラクティブなタクティクモード (goal-stack) — diagnostics 配信・簡易 hover・goto-definition (組込関数のメタデータ + トップレベル `def`/`theorem`/`axiom` 名、テキストベースでスコープ非対応) は実装済み (2026-08)
 
 ※ `by simp` の対称規則 (`add_comm` 等) は AC-canonicalization により解消済み ([docs/spec/05-tactics.md](docs/spec/05-tactics.md))。`by decide` は型クラス無しの直接評価版として実装済み (`Decidable` 型クラスへの一般化は未対応)。
 

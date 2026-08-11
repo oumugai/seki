@@ -57,6 +57,7 @@ impl Lsp {
         self.send(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
         let resp = self.recv();
         assert!(resp.contains("\"hoverProvider\":true"), "got: {}", resp);
+        assert!(resp.contains("\"definitionProvider\":true"), "got: {}", resp);
     }
 
     fn did_open(&mut self, uri: &str, text: &str) {
@@ -72,6 +73,15 @@ impl Lsp {
     fn hover(&mut self, uri: &str, line: usize, character: usize) -> String {
         let msg = format!(
             r#"{{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{{"textDocument":{{"uri":"{}"}},"position":{{"line":{},"character":{}}}}}}}"#,
+            uri, line, character
+        );
+        self.send(&msg);
+        self.recv()
+    }
+
+    fn goto_definition(&mut self, uri: &str, line: usize, character: usize) -> String {
+        let msg = format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"textDocument/definition","params":{{"textDocument":{{"uri":"{}"}},"position":{{"line":{},"character":{}}}}}}}"#,
             uri, line, character
         );
         self.send(&msg);
@@ -168,5 +178,49 @@ fn diagnostics_still_work_alongside_hover() {
         "got: {}",
         diag
     );
+    lsp.finish();
+}
+
+#[test]
+fn goto_definition_jumps_to_the_def_declaration() {
+    let mut lsp = Lsp::start();
+    lsp.initialize();
+    let uri = "file:///t_gd_def.seki";
+    lsp.did_open(
+        uri,
+        "def square := \\x -> x * x\ntheorem t : square 3 == 9 := by unfold square then eval\n",
+    );
+    // Jump from the *usage* of `square` on line 1 (column 12) back to its
+    // `def` on line 0.
+    let resp = lsp.goto_definition(uri, 1, 14);
+    assert!(resp.contains("\"line\":0"), "got: {}", resp);
+    // The name `square` on line 0 starts right after `def `, at column 4.
+    assert!(resp.contains("\"character\":4"), "got: {}", resp);
+    lsp.finish();
+}
+
+#[test]
+fn goto_definition_jumps_to_the_theorem_declaration() {
+    let mut lsp = Lsp::start();
+    lsp.initialize();
+    let uri = "file:///t_gd_thm.seki";
+    lsp.did_open(
+        uri,
+        "theorem myTheorem : 1 + 1 == 2 := by eval\ntheorem other : myTheorem == myTheorem := refl\n",
+    );
+    let resp = lsp.goto_definition(uri, 1, 17);
+    assert!(resp.contains("\"line\":0"), "got: {}", resp);
+    lsp.finish();
+}
+
+#[test]
+fn goto_definition_returns_null_for_builtins_and_unknowns() {
+    let mut lsp = Lsp::start();
+    lsp.initialize();
+    let uri = "file:///t_gd_none.seki";
+    lsp.did_open(uri, "theorem t : strLen \"abc\" == 3 := by eval\n");
+    // `strLen` is a Rust builtin — no seki source location to jump to.
+    let resp = lsp.goto_definition(uri, 0, 14);
+    assert!(resp.contains("\"result\":null"), "got: {}", resp);
     lsp.finish();
 }

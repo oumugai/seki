@@ -31,10 +31,11 @@ seki は **pre-1.0** です。これは次を意味します:
   網羅性チェックを警告からコンパイル時エラーへオプトインで昇格。既存の
   `lib/`/`examples/`/`tests/`/`sample/` は非網羅 match が0件なため
   デフォルト動作は変更なし。
-- `seki-lsp` に `textDocument/hover` を追加: カーソル位置の識別子を
-  テキストベースで抜き出し、組込関数カタログかドキュメントのトップレベル
-  `def`/`theorem`/`axiom` 名と照合して表示する (非スコープ対応の最小実装)。
-  `tests/lsp.rs` に実プロセスを JSON-RPC で駆動する統合テストを追加。
+- `seki-lsp` に `textDocument/hover` / `textDocument/definition` を追加:
+  カーソル位置の識別子をテキストベースで抜き出し、組込関数カタログか
+  ドキュメントのトップレベル `def`/`theorem`/`axiom` 名と照合して表示/ジャンプ
+  する (非スコープ対応の最小実装)。`tests/lsp.rs` に実プロセスを JSON-RPC で
+  駆動する統合テストを8件追加。
 
 ### Changed
 

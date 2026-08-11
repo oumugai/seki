@@ -14,8 +14,13 @@
 //!     against the Rust builtin catalog and the document's own top-level
 //!     `def`/`theorem`/`axiom` names.
 //!
+//!   * On `textDocument/definition`, jumps to the top-level `def`/
+//!     `theorem`/`axiom` whose name matches the identifier under the
+//!     cursor (builtins have no seki source location, so they resolve to
+//!     nothing). Same textual, non-scope-aware lookup as hover.
+//!
 //! Out of scope (Phase 6+ goals):
-//!   * completion, goto-definition, code actions
+//!   * completion, code actions
 //!   * scope-aware hover (a lambda param that shadows a same-named
 //!     top-level `def` currently shows the top-level one — see below)
 //!   * incremental parsing
@@ -86,6 +91,7 @@ impl Server {
             "textDocument/didSave" => self.handle_did_save(msg),
             "textDocument/didClose" => self.handle_did_close(msg),
             "textDocument/hover" => self.handle_hover(msg, id),
+            "textDocument/definition" => self.handle_definition(msg, id),
             other => {
                 // Unknown request: reply with a minimal error so the client
                 // doesn't hang waiting for a response.
@@ -105,7 +111,8 @@ impl Server {
         let result = "{\
 \"capabilities\":{\
 \"textDocumentSync\":1,\
-\"hoverProvider\":true\
+\"hoverProvider\":true,\
+\"definitionProvider\":true\
 },\
 \"serverInfo\":{\"name\":\"seki-lsp\",\"version\":\"0.1.0\"}\
 }";
@@ -195,6 +202,39 @@ impl Server {
               \"end\":{{\"line\":{},\"character\":{}}}}}}}",
             encode_string(&markdown),
             line0, start, line0, end
+        );
+        send_response(id, &result);
+    }
+
+    /// `textDocument/definition`: jump to the top-level `def`/`theorem`/
+    /// `axiom` whose name matches the identifier under the cursor. Same
+    /// textual, non-scope-aware lookup as `handle_hover` — a builtin (no
+    /// seki source to jump to) or an unresolved name replies with `null`.
+    fn handle_definition(&self, msg: &str, id: Option<i64>) {
+        let respond_none = || send_response(id, "null");
+        let Some(uri) = extract_nested_string(msg, "textDocument", "uri") else {
+            return respond_none();
+        };
+        let Some(doc) = self.documents.get(&uri) else {
+            return respond_none();
+        };
+        let Some(line0) = extract_nested_int(msg, "position", "line") else {
+            return respond_none();
+        };
+        let Some(char0) = extract_nested_int(msg, "position", "character") else {
+            return respond_none();
+        };
+        let Some((word, _, _)) = word_at(&doc.text, line0 as usize, char0 as usize) else {
+            return respond_none();
+        };
+        let Some((def_line0, start, end)) = find_top_level_definition(&word, &doc.text) else {
+            return respond_none();
+        };
+        let result = format!(
+            "{{\"uri\":{},\"range\":{{\"start\":{{\"line\":{},\"character\":{}}},\
+              \"end\":{{\"line\":{},\"character\":{}}}}}}}",
+            encode_string(&uri),
+            def_line0, start, def_line0, end
         );
         send_response(id, &result);
     }
@@ -339,6 +379,52 @@ fn hover_markdown(word: &str, source: &str) -> Option<String> {
             }
             _ => {}
         }
+    }
+    None
+}
+
+/// Find where `word` is *declared* as a top-level `def`/`theorem`/`axiom`
+/// in `source`. `LocatedDecl` only records the position of the introducing
+/// keyword (`def`/`theorem`/`axiom`), not the name token itself, so once we
+/// know *which line* declares `word` we re-scan just that line for the
+/// exact identifier occurrence to get a precise jump target. Returns
+/// `(line0, start_char, end_char)`, all 0-based for LSP.
+fn find_top_level_definition(word: &str, source: &str) -> Option<(usize, usize, usize)> {
+    let decls = seki::parse_program(source).ok()?;
+    let decl_line_1based = decls.iter().find_map(|d| {
+        let matches = match &d.decl {
+            seki::ast::Decl::Def { name, .. } => name == word,
+            seki::ast::Decl::Theorem { name, .. } => name == word,
+            seki::ast::Decl::Axiom { name, .. } => name == word,
+            _ => false,
+        };
+        matches.then_some(d.line)
+    })?;
+    let line0 = decl_line_1based.checked_sub(1)?;
+    let line_text = source.split('\n').nth(line0)?;
+    let (start, end) = find_ident_on_line(line_text, word)?;
+    Some((line0, start, end))
+}
+
+/// First exact identifier-token occurrence of `word` in `line` (a
+/// substring match alone would wrongly hit `square` inside `square2`).
+fn find_ident_on_line(line: &str, word: &str) -> Option<(usize, usize)> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if !is_ident_continue(chars[i]) || chars[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut end = i;
+        while end < chars.len() && is_ident_continue(chars[end]) {
+            end += 1;
+        }
+        if chars[start..end].iter().collect::<String>() == word {
+            return Some((start, end));
+        }
+        i = end;
     }
     None
 }
