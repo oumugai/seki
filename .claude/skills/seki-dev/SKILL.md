@@ -88,6 +88,24 @@ cargo test                       # unit + tests/integration.rs + tests/property_
   他の利用者と共有するため git 管理下にある。ローカル限定の設定は
   `.claude/settings.local.json` に置く。
 
+## グローバルインストール (このマシン限定、git 管理外)
+
+seki を任意のディレクトリ/プロジェクトから使えるように、このマシンでは:
+
+- `~/.local/bin/seki` — このリポジトリの release ビルドをコピーした
+  グローバルバイナリ (PATH 上)。
+- `~/.seki/lib` — このリポジトリの `lib/` への symlink。`seki` の
+  import 解決の第4候補 (`SEKI_LIB_PATH` → cwd/`lib` → バイナリ相対 →
+  `~/.seki/lib`) がここを見るので、どこからでも stdlib が引ける。
+- `~/.claude/commands/{seki-run,seki-check,seki-new-theorem,seki-install}.md`
+  と `~/.claude/skills/{seki-tactics,seki-reference}/` — グローバル版の
+  コマンド/skill (このリポジトリの `.claude/` とは別物、こちらは
+  git 管理されない個人環境)。
+
+ソースを変更したら **`/seki-install`** でグローバル版に反映する
+(release ビルド → テスト → `~/.local/bin/seki` へコピー)。反映を忘れると
+グローバル版のコマンドが古い動作のままになる。
+
 ## 関連
 
 - `seki-tactics` skill — 証明戦術の選び方 (利用者向け)
