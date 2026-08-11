@@ -1,0 +1,3 @@
+# Personal, machine-specific Claude Code permissions — not shared.
+# (.claude/commands/ and .claude/skills/ ARE shared and tracked.)
+.claude/settings.local.json

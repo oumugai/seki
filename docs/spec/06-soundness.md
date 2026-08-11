@@ -11,11 +11,11 @@ production 採用や数学的厳密性を求める場合の参考にしてくだ
 |---|---|
 | `refl`、構造的等価 | 純粋な構文的判定 |
 | `by eval` (有限ドメイン) | 全列挙の閉じた決定 |
-| `by algebra` (Int/Rat) | 多項式正規化 + Sylvester 基準 |
+| `by algebra` (Int/Rat/**Real**) | 多項式正規化 + Sylvester 基準。Real は `f64_to_rat` で厳密な有理数に変換して判定 (浮動小数の丸め誤差はそのまま — `0.1 + 0.2 == 0.3` は正しく false と出る) |
 | `by induction` (Nat/List/Tree/data) | 構造帰納法、ADT の有限構築可能性 |
 | `by strong_induction` (Nat, 深さ 2) | well-founded relation on ℕ |
-| `by simp` chain | 各 step が健全な書換え |
-| `by linarith` (Phase 5 SMT-lite) | Fourier-Motzkin、整数領域で property test 検証済 |
+| `by simp` chain | 各 step が健全な書換え、対称規則 (`add_comm` 等) も AC-canonicalization で oscillation なく扱える |
+| `by linarith` | `by algebra` の別名 (同じ多項式判定 + 仮定の加算結合 `hyps_sum_proves`)。単変数 Fourier-Motzkin の専用ソルバ (`linarithProve` builtin, Phase 5, property test 検証済) は別実装で、タクティクにはまだ接続されていない |
 | 列挙集合 / 直積 / ADT membership | 完全に構造的 |
 | 型クラス辞書化 | 静的に解決、実行時に明示渡し可能 |
 
@@ -50,7 +50,6 @@ def g : Int -> Pos := \x -> if x == 1000000001 then 0 - 1 else x + 1
 | 終了性 (termination) | warning のみ、無限ループ証明が通る可能性 |
 | メモリ安全性 | Rust が保証する範囲内 (FFI で逸脱可能) |
 | 例外的でない振る舞い | Int overflow は wrapping、Real は NaN/Inf あり |
-| `Real` 上の証明 | `by algebra` は Real を扱わない (f64 の不正確さ) |
 | パターンマッチの網羅性 | warning のみ |
 | データ競合 | `Arc<Mutex>` で sync 化されているが、deadlock 検出はない |
 | FFI 経由のコード | 完全 unsafe (`SECURITY.md` 参照) |
@@ -134,8 +133,11 @@ theorem fake : forall n in Nat, loop n == 0 := by eval
 ### Pattern C: 浮動小数点の不正確性
 
 ```seki
-theorem t : 0.1 + 0.2 == 0.3 := by eval  -- 失敗する
--- Real 上では `by algebra` が使えない
+theorem t : 0.1 + 0.2 == 0.3 := by eval     -- 失敗する (f64 の丸め誤差)
+theorem t2 : 0.1 + 0.2 == 0.3 := by algebra -- こちらも失敗する
+-- どちらも正しい挙動: 0.1/0.2/0.3 は f64 として厳密に表現できず、
+-- `by algebra` は各リテラルを厳密な有理数に変換した上で判定するので
+-- 「本当に等しくない」ことを健全に検出している (誤って通すことはない)。
 ```
 
 ## 6.5 production 利用に当たって
@@ -147,7 +149,9 @@ sample-based でしか証明されていない命題は invariant 維持に頼�
 監査の指針:
 1. `by eval` を使った theorem は **有限ドメイン上のみ** に限る
 2. 依存型注釈は **ドキュメント** 扱いし、unsafe な前提条件には頼らない
-3. `Real` 上の証明は使わない (`Rat = Int × Pos` を使う)
+3. `Real` 上の証明は `by algebra` (厳密な有理数変換) では健全。ただし
+   `f64` リテラル自体の丸め誤差は解消されない — 厳密性が必須なら
+   `Rat = Int × Pos` を使う
 4. FFI と `execShell` は信頼できる入力に対してのみ使う
 
 ## 6.6 まとめ
