@@ -470,6 +470,41 @@ fn algebra_clears_real_denominators() {
 }
 
 #[test]
+fn algebra_cancels_mod_by_a_variable_divisor() {
+    // Variable-divisor `mod`: `<expr> mod v == 0` when `v` is a literal
+    // factor of every term (exact division, sound regardless of sign).
+    let g = run(r"
+        theorem mod_cancel
+          : forall a in Int, forall n in Int, n != 0 -> (a * n) mod n == 0
+          := by algebra
+        theorem mod_cancel_symmetric
+          : forall a in Int, forall n in Int, n != 0 -> 0 == (a * n) mod n
+          := by algebra
+        theorem mod_cancel_multi_factor
+          : forall a in Int, forall b in Int, forall n in Int,
+            n != 0 -> (a * n * b) mod n == 0
+          := by algebra
+    ");
+    for t in &["mod_cancel", "mod_cancel_symmetric", "mod_cancel_multi_factor"] {
+        assert!(g.theorems.contains_key(*t), "{} not proven", t);
+    }
+}
+
+#[test]
+fn algebra_rejects_inexact_mod_by_variable_divisor() {
+    // Adversarial: `(a*n + 1) mod n` is NOT unconditionally 0 (it's 1 for
+    // most n) — the exact-division shortcut must not overreach.
+    let res = std::panic::catch_unwind(|| {
+        run(r"
+            theorem bad
+              : forall a in Int, forall n in Int, n != 0 -> (a * n + 1) mod n == 0
+              := by algebra
+        ");
+    });
+    assert!(res.is_err(), "inexact mod claim must not be proved");
+}
+
+#[test]
 fn algebra_folds_real_constants() {
     // B4: constant-folding through Mul/Add: `2.0 * 16.0` reduces to `32.0`.
     let g = run(r"
@@ -491,6 +526,39 @@ fn algebra_transitive_unfold() {
           := by unfold g then algebra
     ");
     assert!(g.theorems.contains_key("g_unfolds"));
+}
+
+#[test]
+fn unfold_stops_cleanly_at_a_mutual_recursion_boundary() {
+    // `closure_is_recursive` used to only check *direct* self-reference, so
+    // a mutually-recursive pair (f calls g, g calls f) was misclassified as
+    // "non-recursive" and `unfold_nonrec_transitive` kept ping-ponging
+    // between the two until its 32-iteration cap. It should instead detect
+    // the cycle and stop after exactly one level, leaving a clean opaque
+    // `g (n - 1)` atom — provable here only because the goal is scoped to
+    // the recursive (`n > 0`) branch, so it can't be a base-case fluke.
+    let g = run(r"
+        def f := \n -> if n == 0 then 0 else g (n - 1) + 1
+        def g := \n -> if n == 0 then 0 else f (n - 1) + 1
+        theorem f_step_is_atomic
+          : forall n in Nat, n > 0 -> f n == g (n - 1) + 1
+          := by unfold f then algebra
+    ");
+    assert!(g.theorems.contains_key("f_step_is_atomic"));
+}
+
+#[test]
+fn unfold_still_rejects_false_claims_through_mutual_recursion() {
+    let res = std::panic::catch_unwind(|| {
+        run(r"
+            def f := \n -> if n == 0 then 0 else g (n - 1) + 1
+            def g := \n -> if n == 0 then 0 else f (n - 1) + 1
+            theorem bad
+              : forall n in Nat, n > 0 -> f n == 999
+              := by unfold f then algebra
+        ");
+    });
+    assert!(res.is_err(), "false claim must not be proved through mutual recursion");
 }
 
 #[test]
@@ -529,6 +597,76 @@ fn strong_induction_for_fibonacci() {
         theorem fib_nn : forall n in Nat, fib n >= 0 := by strong_induction
     ");
     assert!(g.theorems.contains_key("fib_nn"));
+}
+
+#[test]
+fn strong_induction_accepts_configurable_depth() {
+    // A tribonacci-style recurrence reaches back 3 steps, so it needs
+    // `by strong_induction 3` (depth 2, the old hardcoded default, is not
+    // enough to cover its 3 special-cased bases 0/1/2).
+    let g = run(r"
+        def trib := \n ->
+            if n == 0 then 0
+            else if n == 1 then 1
+            else if n == 2 then 1
+            else trib (n - 1) + trib (n - 2) + trib (n - 3)
+        theorem trib_nn : forall n in Nat, trib n >= 0 := by strong_induction 3
+    ");
+    assert!(g.theorems.contains_key("trib_nn"));
+}
+
+#[test]
+fn strong_induction_rejects_insufficient_depth_instead_of_a_false_proof() {
+    // Regression for a real soundness gap: a recursive function whose
+    // if-chain has a *negative* literal at the boundary the chosen depth
+    // doesn't reach (here `f 2 == -1`, but only depth 2 — bases P(0)/P(1)
+    // — is requested, one short of the 3 the definition actually needs).
+    // Before the `contains_var_conditioned_if` guard, the unresolved
+    // `if (k+2) == 2 then -1 else ...` collapsed into an "assumed ≥ 0"
+    // opaque atom and this false theorem was incorrectly proved.
+    let f_def = r"
+        def f := \n ->
+            if n == 0 then 0
+            else if n == 1 then 0
+            else if n == 2 then 0 - 1
+            else f (n - 1) + f (n - 2) + f (n - 3)
+    ";
+    // f 2 == -1 is a direct counterexample to `forall n in Nat, f n >= 0`.
+    let g = run(&format!("{f_def}\n theorem f2_neg : f 2 == 0 - 1 := by eval"));
+    assert!(g.theorems.contains_key("f2_neg"));
+
+    let res = std::panic::catch_unwind(|| {
+        run(&format!(
+            "{f_def}\n theorem bad : forall n in Nat, f n >= 0 := by strong_induction 2"
+        ));
+    });
+    assert!(
+        res.is_err(),
+        "false proposition must not be proved by strong_induction with insufficient depth"
+    );
+
+    // At the *correct* depth (3), the same false claim is still rejected —
+    // now caught cleanly at the base case P(2) instead of the guard.
+    let res2 = std::panic::catch_unwind(|| {
+        run(&format!(
+            "{f_def}\n theorem bad2 : forall n in Nat, f n >= 0 := by strong_induction 3"
+        ));
+    });
+    assert!(
+        res2.is_err(),
+        "false proposition must not be proved by strong_induction at any depth"
+    );
+}
+
+#[test]
+fn strong_induction_rejects_zero_depth() {
+    let res = std::panic::catch_unwind(|| {
+        run(r"
+            def fib := \n -> if n < 2 then n else fib (n - 1) + fib (n - 2)
+            theorem t : forall n in Nat, fib n >= 0 := by strong_induction 0
+        ");
+    });
+    assert!(res.is_err(), "depth 0 must be rejected");
 }
 
 #[test]
@@ -1893,6 +2031,86 @@ fn theorem_without_assign_defaults_to_auto() {
                 a * (b + c) == a * b + a * c
     ");
     assert!(g.theorems.contains_key("distrib"));
+}
+
+#[test]
+fn nonexhaustive_match_is_a_warning_by_default() {
+    // Baseline: without SEKI_STRICT_MATCH, a non-exhaustive `match` still
+    // compiles and runs — only a warning goes to stderr.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("-e")
+        .arg("data Color = Red | Green | Blue\n(\\c -> match c with | Red -> 1 | Green -> 2) Red")
+        .env_remove("SEKI_STRICT_MATCH")
+        .output()
+        .expect("run seki");
+    assert!(
+        output.status.success(),
+        "non-exhaustive match must not fail by default.\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("warning: non-exhaustive match"),
+        "expected a warning, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn strict_match_env_var_rejects_nonexhaustive_match() {
+    // Isolated via subprocess env (never `std::env::set_var` in-process —
+    // tests share one process and run concurrently).
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("-e")
+        .arg("data Color = Red | Green | Blue\n(\\c -> match c with | Red -> 1 | Green -> 2) Red")
+        .env("SEKI_STRICT_MATCH", "1")
+        .output()
+        .expect("run seki");
+    assert!(
+        !output.status.success(),
+        "SEKI_STRICT_MATCH must reject a non-exhaustive match"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("non-exhaustive match"),
+        "expected a non-exhaustive-match error, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn strict_match_cli_flag_rejects_nonexhaustive_match() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--strict-match")
+        .arg("-e")
+        .arg("data Color = Red | Green | Blue\n(\\c -> match c with | Red -> 1 | Green -> 2) Red")
+        .env_remove("SEKI_STRICT_MATCH")
+        .output()
+        .expect("run seki");
+    assert!(
+        !output.status.success(),
+        "--strict-match must reject a non-exhaustive match"
+    );
+}
+
+#[test]
+fn strict_match_accepts_a_genuinely_exhaustive_match() {
+    // No false positives: strict mode must not reject a match that covers
+    // every constructor.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--strict-match")
+        .arg("-e")
+        .arg(
+            "data Color = Red | Green | Blue\n\
+             (\\c -> match c with | Red -> 1 | Green -> 2 | Blue -> 3) Red",
+        )
+        .output()
+        .expect("run seki");
+    assert!(
+        output.status.success(),
+        "an exhaustive match must not be rejected under --strict-match.\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

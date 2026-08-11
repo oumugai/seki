@@ -512,12 +512,14 @@ theorem t : forall a in Int, sq a + 0 == a*a := by intros then unfold sq then al
 
 これらにより、構造帰納法のステップで `length (cons x ys) → 1 + length ys` のような unfold 後の自然な簡約が成立する。
 
-### `by strong_induction` — 深さ 2 強帰納法 (Nat)
+### `by strong_induction` / `by strong_induction <N>` — 深さ可変の強帰納法 (Nat)
 
-Fibonacci 等の多段階漸化式向け。
+Fibonacci (`N=2`) やそれ以上の多段階漸化式 (tribonacci 型は `N=3`) 向け。
+`N` 省略時は 2 (後方互換)。
 
-1. **基底**: `P(0)`, `P(1)` を `by eval` で確認
-2. **ステップ**: `n := k+2` を unfold。`f k`、`f (k+1)` は不透明な原子として現れるため、`PolyDomain::Nat` 上の符号判定 (Nat 域で原子 ≥ 0 とみなす) で直接 `lhs(k+2) op rhs(k+2)` を判定
+1. **基底**: `P(0), ..., P(N-1)` を `by eval` で確認
+2. **ステップ**: `n := k+N` を unfold。再帰呼出し (`f k`, `f (k+1)`, ...) は不透明な原子として現れるため、`PolyDomain::Nat` 上の符号判定 (Nat 域で原子 ≥ 0 とみなす) で直接 `lhs(k+N) op rhs(k+N)` を判定
+3. **健全性ガード** (`contains_var_conditioned_if`, 2026-08 追加): unfold 後に **`k` に依存する未解決の `if`** が残っていないか検査する。`N` が関数の実際の参照深さより小さいと、基底境界を跨ぐ場合分け (`if (k+N) == N then ... else ...` のような、k=0 のときだけ真になる条件) が解決できずに残る。これを検出せず `expr_to_poly` の「不透明項は非負」フォールバックに委ねると、境界のすぐ内側の負のリテラルを一度も検査しないまま偽の命題を証明してしまう実バグがあった (`docs/spec/06-soundness.md` Pattern D 参照)。ガードに引っかかった場合は証明を失敗させ、ユーザに depth を大きくするよう促すエラーを返す。
 
 健全性: 不等式の方向と一致する形で原子を扱うので、`>= 0` 系の不等式が中心。
 
@@ -750,27 +752,38 @@ unfold・lemma-simp の組合せを順に試し、最初に閉じたものを返
 これに desugar される。REPL の `:why` はレンマ優先版 (`try_portfolio_lemma_first`) を使う。
 **P3.2** サーバ駆動 UI ライブラリ (`lib/ui/`: dom/app/server/sse) — MVU パターンで純粋な
 `update`/`render` を書き、`httpServe` 上のイベントループか SSE で配線する (examples 38-39)。
+**P3.3** `by strong_induction <N>`: 深さ可変の強帰納法 (旧: 深さ 2 固定)。加えて、
+depth が実際の参照深さより小さいときに未解決の `if` を握り込んで偽の命題を
+証明してしまう既存バグ (`contains_var_conditioned_if` ガードで修正 — 詳細は
+[soundness.md Pattern D](spec/06-soundness.md) と [tactics.md §5.5](spec/05-tactics.md)) を発見・修正。
+**P3.4** 可変除数の `mod` 単項キャンセル: `<expr> mod v == 0` (`v` は変数) を
+`Polynomial::exact_div_by_var` で健全に判定 (符号無関係)。`/` は既存の
+`ratpoly_equal` (交差乗算) が既に可変除数の `==` を扱えていた
+(ドキュメント上「未対応」と誤記されていたのを訂正)。
+**P3.5** パターンマッチ網羅性のエラー化: `--strict-match` CLI フラグ /
+`SEKI_STRICT_MATCH` 環境変数でオプトイン (既存コードは `lib/`/`examples/`/
+`tests/`/`sample/` 全体で非網羅 match が0件だったため、デフォルト動作
+(警告のみ) を壊さずに追加できた)。
 **既に対応済み (旧「実装が比較的容易なもの」からの卒業)**:
-`forall (x y) in S, P` の複数変数糖衣、パターンマッチ網羅性の**警告**
-(エラー化は Phase 6+ で検討のまま)、`by simp` の対称規則
+`forall (x y) in S, P` の複数変数糖衣、パターンマッチ網羅性の**警告 →
+オプトインのエラー化**、`by simp` の対称規則
 (AC-canonicalization で oscillation を解消 — [tactics.md](spec/05-tactics.md) 参照)、
-`by decide` (型クラス無しの直接評価版; `Decidable` 型クラスへの一般化は未対応のまま)。
+`by decide` (型クラス無しの直接評価版; `Decidable` 型クラスへの一般化は未対応のまま)、
+`by strong_induction` の深さ可変化、可変除数の `mod` 単項キャンセル。
 
 ### 実装が比較的容易なもの
 
 - **Expr 単位の位置情報 (span)**: 現状は Decl 単位の `[line:col]` のみ。Expr 全 variant に Span を持たせれば proof error が forall や式の正確な位置を指せる。LSP の前提 (`by algebra` の失敗が常にゴール全体の decl 先頭を指す — 深くネストした式で不便)。
 - **`forall n in Nat, n >= k` の境界推論**: 現在 `by algebra` で扱える符号は polynomial-domain ベースだが、定数境界 (例: `forall n in Nat, n + 5 > 4`) は `polynomial_pos` の細粒度化で扱える余地あり。
-- **任意深さの強帰納法**: 現在 `by strong_induction` は深さ 2 固定。`by strong_induction 3` 等で参照前段数を指定できるよう拡張。
 - **`?` 演算子の拡張**: 現在は let-value 専用。任意の式コンテキストで使えるようにすると `f (g x?)` 等が書きやすくなる。
 - **Option 用 `?o` 演算子**: 現在 `?` は Result 専用。Option 用も加えると一貫性が高まる。
-- **パターンマッチ網羅性のエラー化**: 現状は警告 (`check_exhaustiveness`, `parser.rs`) のみで実行は `error "non-exhaustive match"` のランタイムエラーに fallback する。コンパイル時エラーに昇格すれば安全性が上がる (ただし既存コードを壊す可能性があるため要検討)。
 
 ### 中程度の労力
 
 - **真にスコープ分離されたモジュール**: 現在の `import "x" as M` は名前空間を flat にしたまま prefix を付けるだけ (bare 名も leak)。完全に分離するには `Globals` を木構造にする必要がある。
 - **より強い型推論**: 現状 `infer_type` はラムダ・算術・if など主要な構成子に限定されており、`match` パターン束縛・`forall`/`exists` の domain・依存型では `Set` (任意) で諦めている。単方向 (intro 型) と双方向 (check 型) を混ぜた本格的な bidirectional checking で改善余地あり。
 - **3次以上の不等式判定**: 現在 PSD 判定は 2 次形式まで。3 次は一般に難しいが、奇数次の単項式正値性 (`x³ ≥ 0` 失敗、`x²y² ≥ 0` 成功) などの限定パターンは扱える。
-- **可変除数の div / mod**: 現状定数除数のみ。`(a*n) / n` のような単項キャンセルは検出可能。
+- **可変除数の div / mod**: `==` かつ剰余0のケースは対応済み — `/` は `ratpoly_equal` の交差乗算 (Div をオペーク項に潰さず有理関数として比較、`(a*n)/n == a` 等)、`mod` は `Polynomial::exact_div_by_var` (`(a*n) mod n == 0` — 分子の全項が変数 `v` を factor として持てば健全。符号無関係、2026-08 追加)。未対応のまま残るのは **不等式** (`<`,`<=`,`>`,`>=`) の可変除数 (符号での場合分けが必要) と、剰余が非零 (`mod v == R`, `R != 0`) の一般ケース。
 - **線形不等式の決定 (`by linarith`)**: 既に単変数版は実装済み (`src/linarith.rs`)。複数変数の Fourier-Motzkin 消去は未対応 — `forall n in Nat, forall m in Nat, n + m >= 0` のような多変数の定数境界はまだ一発で通らない。
 - **依存パラメトリック ADT の専用構文**: `data Vec : Nat -> Set where ...` 構文を加え、`{xs | length xs == n}` を自動生成。
 - **依存ペア型 `Σ (x : A), B(x)`**: refinement で書ける現状を first-class 構文に。
@@ -781,7 +794,11 @@ unfold・lemma-simp の組合せを順に試し、最初に閉じたものを返
 
 - **依存型の完全検査**: 現状はサンプリングのみ。任意の `n` で member を保証するには別の証明手続きが要る (帰納法と組み合わせる等)。
 - **本物の Curry-Howard**: `Proof : Prop` を first-class に。証明項自体に型を付け、検証は型検査として行う。これは現在の seki の「集合論で検証」哲学とは別の道。
-- **相互再帰の unfold**: 現在の `unfold_one` は単一関数の 1 段展開のみ。相互再帰関数 (例: `even` / `odd`) はサポートしない。
+- **相互再帰関数への本格対応**: `by unfold f then ...` の推移的展開 (`unfold_nonrec_transitive`) は 2026-08 に呼び出しグラフを辿って
+  相互再帰サイクルを検出するよう修正済み (以前は `isEven`/`isOdd` のような組を「非再帰」と誤判定し、
+  32 回の反復上限まで交互に展開し続けていた — 詳細は [tactics.md §5.7](spec/05-tactics.md))。
+  残っている本格的な課題は **相互帰納法** そのもの: 2つの関数の性質を同時に (互いを IH として) 証明する
+  戦術は無い。現状は `by unfold f then algebra` で一方をオペークな1段先の項として扱うだけ。
 - **タクティクモード**: ゴールスタックを持って対話的に証明を組み立てる UI。`then` 合成の上位互換で、`<;>` (all goals) や `;` (sequential) を持つ。Lean / Coq の主要機能。
 - **ADT に対する構造帰納法**: 現在は組込 List/Tree のみ。`data` で定義された任意 ADT に対しても induction を効かせる。
 - **WASM コンパイル**: ブラウザで seki を動かす。教育向け playground が可能。

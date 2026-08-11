@@ -22,14 +22,33 @@ seki は **pre-1.0** です。これは次を意味します:
   正の重み 1 での和がゴールと一致すれば閉じる (`hyps_sum_proves`)。
 - `tests/seki/test_ui_{dom,app,models}.seki` を `cargo test` に接続
   (`lib/ui/` — サーバ駆動 UI ライブラリの自動テスト)。
+- `by strong_induction <N>`: 深さ可変の強帰納法 (`N` 省略時は 2、後方互換)。
+  Fibonacci (`N=2`) 以外の多段階漸化式 (tribonacci 型は `N=3`) にも対応。
+- `by algebra`/`by linarith` が可変除数の **mod 単項キャンセル**に対応:
+  `<expr> mod v == 0` (`v` は変数) を、`v` が分子の全項の factor であれば
+  健全に証明する (`Polynomial::exact_div_by_var`)。符号に関係なく成立。
+- `--strict-match` CLI フラグ / `SEKI_STRICT_MATCH` 環境変数: パターンマッチ
+  網羅性チェックを警告からコンパイル時エラーへオプトインで昇格。既存の
+  `lib/`/`examples/`/`tests/`/`sample/` は非網羅 match が0件なため
+  デフォルト動作は変更なし。
 
 ### Changed
+
+- `closure_is_recursive` を直接自己参照のみのチェックから、呼び出しグラフを
+  辿る**推移的**なサイクル検出に変更。相互再帰の組 (`isEven`/`isOdd` 等) が
+  「非再帰」と誤判定され `by unfold f then ...` の推移展開で32回の反復上限
+  まで交互に展開し続けていた問題を修正 (不健全ではなかったが、無駄に深く
+  展開されて `by unfold` の「1段展開して先はオペーク項」という意図した
+  挙動から外れていた)。
 
 - `docs/internals.md` / `docs/proofs.md` / `docs/spec/05-tactics.md` / `README.md`
   の「未対応」リストを実装状況に合わせて更新
   (`forall (x y) in S` 糖衣・match 網羅性警告・`by simp` の対称規則 oscillation
   解消・`by decide` は既に実装済みだった一方、`by linarith` タクティクが実際には
-  `by algebra` の別名にすぎず専用ソルバ `linarith.rs` に未接続だった点を明記)。
+  `by algebra` の別名にすぎず専用ソルバ `linarith.rs` に未接続だった点を明記、
+  `by strong_induction` の深さ可変化・相互再帰 unfold 境界検出を追記)。
+  `docs/spec/05-tactics.md` §5.3 (`by algebra`) にも同じ「Real は扱わない」
+  という古い記述が残っていたのを発見・修正 (他の箇所は既に修正済みだった)。
 - `by auto` (ポートフォリオ探索タクティク) と `lib/ui/` を仕様書に追記。
 
 ### Deprecated
@@ -45,6 +64,14 @@ seki は **pre-1.0** です。これは次を意味します:
   256 MiB スタックの専用スレッドで実行するよう変更 (`src/main.rs`)。
   テスト実行時の同種のクラッシュも `.cargo/config.toml` の
   `RUST_MIN_STACK` で解消。
+- **健全性バグ修正**: `by strong_induction` に depth パラメータを追加する
+  過程で、指定した depth が実際の再帰参照深さより小さいと**偽の命題を
+  証明できてしまう**バグを発見。基底境界を跨ぐ場合分けが未解決の `if` の
+  まま「非負と仮定した不透明項」に丸め込まれていたことが原因
+  (`docs/spec/06-soundness.md` Pattern D 参照)。展開後に `k` に依存する
+  未解決の `if` が残っていないかを検査するガード (`contains_var_conditioned_if`)
+  を追加し、該当する場合は証明を失敗させるよう修正。回帰テスト
+  `strong_induction_rejects_insufficient_depth_instead_of_a_false_proof` を追加。
 
 ### Security
 

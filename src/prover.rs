@@ -176,7 +176,7 @@ impl<'a> Prover<'a> {
                 }
             }
             Proof::ByInduction => self.verify_induction(prop, env),
-            Proof::ByStrongInduction => self.verify_strong_induction(prop, env),
+            Proof::ByStrongInduction { depth } => self.verify_strong_induction(prop, env, *depth),
             Proof::BySimp { lemmas } => self.verify_simp(prop, env, lemmas),
             Proof::ByUnfold(name) => {
                 // Standalone unfold: transform and then require the result
@@ -292,7 +292,8 @@ impl<'a> Prover<'a> {
             Proof::ByDecide,
             Proof::ByAlgebra,
             Proof::ByInduction,
-            Proof::ByStrongInduction,
+            Proof::ByStrongInduction { depth: 2 },
+            Proof::ByStrongInduction { depth: 3 },
             Proof::Seq(vec![Proof::ByIntros, Proof::ByAlgebra]),
         ];
 
@@ -447,7 +448,7 @@ impl<'a> Prover<'a> {
             | Proof::ByLinarith
             | Proof::ByDecide
             | Proof::ByInduction
-            | Proof::ByStrongInduction
+            | Proof::ByStrongInduction { .. }
             | Proof::ByAuto
             | Proof::Term(_)) => {
                 self.verify(prop, closer, env)?;
@@ -648,6 +649,14 @@ impl<'a> Prover<'a> {
         // the open set where divisions are defined — see `RatPoly`).
         if op == BinOp::Eq {
             if let Some(true) = ratpoly_equal(lhs, rhs) {
+                return Ok(Value::Bool(true));
+            }
+            // Variable-divisor `mod` cancellation: `<expr> mod v == 0`
+            // where `v` is a bare variable. Sound unconditionally (given
+            // `v != 0`, an implicit side-condition already accepted for
+            // division elsewhere in this fragment) — an exact multiple of
+            // `v` has zero remainder regardless of anyone's sign.
+            if mod_by_var_is_exactly_zero(lhs, rhs) || mod_by_var_is_exactly_zero(rhs, lhs) {
                 return Ok(Value::Bool(true));
             }
         }
@@ -891,12 +900,22 @@ impl<'a> Prover<'a> {
         self.discharge_step(&op, &lhs_diff, &rhs_diff, PolyDomain::Int)
     }
 
-    /// `by strong_induction` (depth 2):  prove `forall n in Nat, P(n)` by
-    /// verifying P(0) and P(1) as bases, and P(k+2) by polynomial sign analysis
-    /// over Nat, where recursive calls `f k` and `f (k+1)` are treated as
-    /// nonneg atoms (the inductive hypotheses).  Useful when the spec recurses
-    /// on more than one immediate predecessor (Fibonacci-style).
-    fn verify_strong_induction(&self, prop: &Expr, env: &Env) -> SekiResult<Value> {
+    /// `by strong_induction` (default depth 2, or `by strong_induction <N>`):
+    /// prove `forall n in Nat, P(n)` by verifying `P(0), ..., P(N-1)` as
+    /// bases, and `P(k+N)` by polynomial sign analysis over Nat, where the
+    /// recursive calls exposed by unfolding at `k+N` are treated as nonneg
+    /// atoms (the inductive hypotheses).  Useful when the spec recurses on
+    /// more than one immediate predecessor (Fibonacci needs depth 2, a
+    /// tribonacci-style recurrence needs depth 3, etc.) — `N` is the number
+    /// of prior terms the recursive definition itself reaches back to, not
+    /// an arbitrary search budget.
+    fn verify_strong_induction(&self, prop: &Expr, env: &Env, depth: u32) -> SekiResult<Value> {
+        if depth == 0 {
+            return Err(SekiError::Proof(
+                "by strong_induction: depth must be >= 1".into(),
+            ));
+        }
+        let depth = depth as i64;
         let (var, domain, body) = match prop {
             Expr::Forall { var, domain, body } => (var.clone(), domain.as_ref(), body.as_ref()),
             other => {
@@ -922,8 +941,8 @@ impl<'a> Prover<'a> {
                 )))
             }
         };
-        // ---- bases: P(0), P(1) ----
-        for n in 0..2i64 {
+        // ---- bases: P(0), ..., P(depth - 1) ----
+        for n in 0..depth {
             let p_n = subst(body, &var, &Expr::Int(n));
             let v = self.ctx.eval(&p_n, env)?;
             if !matches!(v, Value::Bool(true)) {
@@ -933,23 +952,45 @@ impl<'a> Prover<'a> {
                 )));
             }
         }
-        // ---- step: P(k+2) directly, with `f k`, `f (k+1)` as nonneg atoms ----
+        // ---- step: P(k+depth) directly, with the recursive calls it
+        // exposes (e.g. `f k`, `f (k+1)`, ..., for depth 2) as nonneg atoms
         let kvar = format!("__k_{}", var);
-        let k_expr = Expr::Var { name: kvar, line: 0, col: 0 };
-        let kp2 = Expr::BinOp(BinOp::Add, Box::new(k_expr.clone()), Box::new(Expr::Int(2)));
-        let lhs_kp2 = unfold_one(&subst(&lhs, &var, &kp2), self.ctx, env);
-        let rhs_kp2 = unfold_one(&subst(&rhs, &var, &kp2), self.ctx, env);
-        // Discharge `lhs_kp2 op rhs_kp2` directly.  Over Nat, opaque atoms
-        // (which include the IH instances `f k`, `f (k+1)`) are treated as
-        // ≥ 0 — sound for the bounded-below kind of claims this tactic
-        // typically targets.
-        let lp = expr_to_poly(&lhs_kp2).ok_or_else(|| {
+        let k_expr = Expr::Var { name: kvar.clone(), line: 0, col: 0 };
+        let kpd = Expr::BinOp(BinOp::Add, Box::new(k_expr.clone()), Box::new(Expr::Int(depth)));
+        let lhs_kpd = unfold_one(&subst(&lhs, &var, &kpd), self.ctx, env);
+        let rhs_kpd = unfold_one(&subst(&rhs, &var, &kpd), self.ctx, env);
+        // Soundness guard: if unfolding at `k+depth` left an `if` whose
+        // *condition* still mentions `k` (e.g. `if (k + depth) == 2 then
+        // ... else ...`), that boundary couldn't be resolved to a single
+        // definite branch for every `k` — typically because `depth` is
+        // smaller than how far back the recursive definition actually
+        // reaches, so the base cases just below the general recursive
+        // branch weren't all covered by `P(0)..P(depth-1)`.  Without this
+        // guard, `expr_to_poly`'s opaque-atom fallback would silently treat
+        // that whole unresolved `if` as an unconstrained "≥ 0" atom, which
+        // can validate a **false** proposition (a literal negative branch
+        // hiding inside the unresolved `if` never gets checked). Fail loudly
+        // instead of proving something unsound.
+        if contains_var_conditioned_if(&lhs_kpd, &kvar) || contains_var_conditioned_if(&rhs_kpd, &kvar)
+        {
+            return Err(SekiError::Proof(format!(
+                "by strong_induction {}: could not resolve every base-case boundary after \
+                 unfolding at k+{} — the recursive definition likely reaches back further \
+                 than depth {} (try a larger depth), or a guard condition isn't decidable by \
+                 polynomial sign analysis",
+                depth, depth, depth
+            )));
+        }
+        // Discharge `lhs_kpd op rhs_kpd` directly.  Over Nat, opaque atoms
+        // (which include the IH instances) are treated as ≥ 0 — sound for
+        // the bounded-below kind of claims this tactic typically targets.
+        let lp = expr_to_poly(&lhs_kpd).ok_or_else(|| {
             SekiError::Proof(
                 "by strong_induction: lhs is outside the polynomial fragment after unfolding"
                     .into(),
             )
         })?;
-        let rp = expr_to_poly(&rhs_kp2).ok_or_else(|| {
+        let rp = expr_to_poly(&rhs_kpd).ok_or_else(|| {
             SekiError::Proof(
                 "by strong_induction: rhs is outside the polynomial fragment after unfolding"
                     .into(),
@@ -967,8 +1008,8 @@ impl<'a> Prover<'a> {
             Ok(Value::Bool(true))
         } else {
             Err(SekiError::Proof(format!(
-                "by strong_induction: step P(k+2) failed for {} {} {}",
-                lhs_kp2, op, rhs_kp2
+                "by strong_induction: step P(k+{}) failed for {} {} {}",
+                depth, lhs_kpd, op, rhs_kpd
             )))
         }
     }
@@ -1595,6 +1636,22 @@ fn hyps_sum_proves(hyps: &[(Expr, bool)], goal: &Expr) -> bool {
     false
 }
 
+/// True if `mod_expr` is `<numerator> mod v` for a bare variable `v`,
+/// `zero_expr` is (polynomially) zero, and `v` exactly divides the
+/// numerator — i.e. the goal is `<numerator> mod v == 0` and that's a sound
+/// consequence of `v` being a literal factor of every term of the
+/// numerator (see `Polynomial::exact_div_by_var`).
+fn mod_by_var_is_exactly_zero(mod_expr: &Expr, zero_expr: &Expr) -> bool {
+    let Expr::BinOp(BinOp::Mod, num, divisor) = mod_expr else { return false };
+    let Expr::Var { name: var, .. } = divisor.as_ref() else { return false };
+    let Some(zp) = expr_to_poly(zero_expr) else { return false };
+    if !zp.terms.is_empty() {
+        return false;
+    }
+    let Some(np) = expr_to_poly(num) else { return false };
+    np.exact_div_by_var(var).is_some()
+}
+
 /// Sound implication check between two relations expressed as polynomials.
 /// Both relations are written in the form `p rel 0`.  Returns true when
 /// `hyp` proves `goal` for every valuation.
@@ -2078,44 +2135,73 @@ fn simplify_list_ops(e: &Expr, ctx: &EvalCtx, env: &Env) -> Expr {
 /// Strip all leading `forall x in T, ...` binders, returning the body.
 /// We don't track the bound variable list because in the polynomial encoding
 /// every free variable is universally quantified by default.
-/// True if `body` references the closure's own `name` somewhere — i.e.
-/// the definition is recursive (direct recursion only, mutually-recursive
-/// pairs are still treated as non-recursive individually, which is fine:
-/// the bounded-iteration loop in `unfold_nonrec_transitive` cuts off mutual
-/// expansion before it blows up).
-fn closure_is_recursive(name: &str, body: &Expr) -> bool {
+/// True if `name`'s own definition is recursive — either directly (its body
+/// mentions itself) or *mutually*, through a cycle of other user-defined
+/// closures (e.g. `isEven` calling `isOdd` calling `isEven`).  Walks the call
+/// graph (via `collect_free_var_names` on each visited closure's body) with
+/// a `visited` set, so it terminates in O(number of reachable definitions)
+/// regardless of cycles.
+///
+/// This used to only check direct self-reference, leaving mutually-recursive
+/// pairs misclassified as "non-recursive" — `unfold_nonrec_transitive` would
+/// then try to fully expand them, ping-ponging between the two functions
+/// until its iteration cap kicked in, instead of stopping after one
+/// meaningful step the way genuine self-recursion does.
+fn closure_is_recursive(name: &str, globals: &crate::value::Globals) -> bool {
+    let own_body = match globals.defs.get(name) {
+        Some(Value::Closure { body, .. }) => body,
+        _ => return false,
+    };
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut stack: Vec<String> = Vec::new();
+    let mut seed = std::collections::BTreeSet::new();
+    collect_free_var_names(own_body, &mut seed);
+    stack.extend(seed);
+    while let Some(n) = stack.pop() {
+        if n == name {
+            return true;
+        }
+        if !visited.insert(n.clone()) {
+            continue;
+        }
+        if let Some(Value::Closure { body, .. }) = globals.defs.get(&n) {
+            let mut names = std::collections::BTreeSet::new();
+            collect_free_var_names(body, &mut names);
+            stack.extend(names);
+        }
+    }
+    false
+}
+
+/// True if `e` contains an `If` node whose *condition* still mentions
+/// `kvar` — i.e. a case-split on the induction step variable that
+/// `simplify_ifs` was unable to resolve to a single definite branch.  Used
+/// by `verify_strong_induction` as a soundness guard: normal recursive-call
+/// atoms (`f (k + 1)`, etc.) mentioning `kvar` are expected and fine — it's
+/// specifically an *unresolved `if`* keyed on `kvar` that signals a
+/// base-case boundary the chosen depth didn't cover.
+fn contains_var_conditioned_if(e: &Expr, kvar: &str) -> bool {
     use Expr::*;
-    match body {
-        Var { name: n, .. } => n == name,
-        Lambda { body, .. } => closure_is_recursive(name, body),
-        App { func, args } => {
-            closure_is_recursive(name, func)
-                || args.iter().any(|a| closure_is_recursive(name, a))
-        }
-        Let { value, body, .. } => {
-            closure_is_recursive(name, value) || closure_is_recursive(name, body)
-        }
+    match e {
         If { cond, then_branch, else_branch } => {
-            closure_is_recursive(name, cond)
-                || closure_is_recursive(name, then_branch)
-                || closure_is_recursive(name, else_branch)
+            let mut names = std::collections::BTreeSet::new();
+            collect_free_var_names(cond, &mut names);
+            if names.contains(kvar) {
+                return true;
+            }
+            contains_var_conditioned_if(then_branch, kvar)
+                || contains_var_conditioned_if(else_branch, kvar)
+        }
+        App { func, args } => {
+            contains_var_conditioned_if(func, kvar)
+                || args.iter().any(|a| contains_var_conditioned_if(a, kvar))
         }
         BinOp(_, l, r) => {
-            closure_is_recursive(name, l) || closure_is_recursive(name, r)
+            contains_var_conditioned_if(l, kvar) || contains_var_conditioned_if(r, kvar)
         }
-        UnOp(_, x) => closure_is_recursive(name, x),
-        SetEnum(xs) | Tuple(xs) | List(xs) => {
-            xs.iter().any(|x| closure_is_recursive(name, x))
-        }
-        SetComp { domain, pred, .. } => {
-            closure_is_recursive(name, domain) || closure_is_recursive(name, pred)
-        }
-        Arrow(a, b) => closure_is_recursive(name, a) || closure_is_recursive(name, b),
-        DepArrow { from, to, .. } => {
-            closure_is_recursive(name, from) || closure_is_recursive(name, to)
-        }
-        Forall { domain, body, .. } | Exists { domain, body, .. } => {
-            closure_is_recursive(name, domain) || closure_is_recursive(name, body)
+        UnOp(_, x) => contains_var_conditioned_if(x, kvar),
+        Let { value, body, .. } => {
+            contains_var_conditioned_if(value, kvar) || contains_var_conditioned_if(body, kvar)
         }
         _ => false,
     }
@@ -2194,7 +2280,7 @@ fn unfold_nonrec_transitive(
         let mut changed = false;
         for name in &names {
             if let Some(Value::Closure { params, body, .. }) = globals.defs.get(name) {
-                if !closure_is_recursive(name, body) {
+                if !closure_is_recursive(name, globals) {
                     let next = unfold_calls(&current, name, params, body);
                     if next != current {
                         current = next;

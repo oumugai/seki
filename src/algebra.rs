@@ -292,6 +292,31 @@ impl Polynomial {
         normalize(terms)
     }
 
+    /// If every monomial contains `var` to at least the first power, divide
+    /// it out of each and return the quotient — this is *exact* polynomial
+    /// division by a single variable, so `self mod var == 0` unconditionally
+    /// (regardless of `var`'s sign or the sign of any coefficient: an exact
+    /// multiple of `var` always has zero remainder). The zero polynomial
+    /// trivially divides. Returns `None` if some monomial lacks `var`
+    /// entirely (division wouldn't be exact).
+    pub fn exact_div_by_var(&self, var: &str) -> Option<Self> {
+        let mut terms = Vec::with_capacity(self.terms.len());
+        for m in &self.terms {
+            let exp = *m.vars.get(var)?;
+            if exp == 0 {
+                return None;
+            }
+            let mut vars = m.vars.clone();
+            if exp == 1 {
+                vars.remove(var);
+            } else {
+                vars.insert(var.to_string(), exp - 1);
+            }
+            terms.push(Monomial { coeff: m.coeff, vars });
+        }
+        Some(normalize(terms))
+    }
+
     /// True if this polynomial is just a (rational) constant.
     pub fn as_constant(&self) -> Option<Rat> {
         match self.terms.as_slice() {

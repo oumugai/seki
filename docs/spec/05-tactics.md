@@ -36,15 +36,24 @@ theorem t : 42 == 42 := refl
 
 ## 5.3 `by algebra`
 
-**意味**: 多項式正規化 + 符号解析 + 定数 div/mod + PSD 2 次形式判定。
+**意味**: 多項式正規化 + 符号解析 + PSD 2 次形式判定 + 有理関数の交差乗算。
 無限ドメインの多項式恒等式 / 不等式を扱える。
 
-**健全性**: ✅ `Int` / `Rat` 上の多項式について健全。`Real` は扱わない。
+- **div/mod**: 定数除数は直接畳み込む。可変除数は `==` かつ結果が単項キャンセル
+  で閉じる場合のみ対応 — `/` は `ratpoly_equal` (`(a*n)/n == a` を有理関数の
+  交差乗算で判定)、`mod` は `Polynomial::exact_div_by_var` (`(a*n) mod n == 0`
+  — 分子の全項が除数の変数を factor に持てば健全、符号無関係)。可変除数の
+  不等式や、剰余が非零の一般ケースは未対応。
+
+**健全性**: ✅ `Int` / `Rat` / **`Real`** 上の多項式について健全 (`Real` は
+`f64_to_rat` で厳密な有理数に変換して判定)。
 
 ```seki
 theorem distrib : forall (a b c) in Int, a * (b + c) == a * b + a * c
     := by algebra
 theorem cauchy : forall (a b) in Int, a*a + b*b >= 2 * a * b
+    := by algebra
+theorem mod_cancel : forall a in Int, forall n in Int, n != 0 -> (a * n) mod n == 0
     := by algebra
 ```
 
@@ -60,16 +69,32 @@ def listLen := \xs -> if null xs then 0 else 1 + listLen (tail xs)
 theorem nn : forall xs in (List Int), listLen xs >= 0 := by induction
 ```
 
-## 5.5 `by strong_induction`
+## 5.5 `by strong_induction` / `by strong_induction <N>`
 
-**意味**: 深さ 2 の強帰納法 (`P(n-1) ∧ P(n-2) ⊢ P(n)`)。Fibonacci など。
-
-**健全性**: ✅ Nat 上で健全。深さ 3 以上は未対応 (Phase 7 候補)。
+**意味**: 深さ `N` (省略時 2) の強帰納法。`P(0), ..., P(N-1)` を基底とし、
+`P(k+N)` を「展開で現れる再帰呼出しは (Nat 上の) 非負な不透明項」として
+多項式符号判定する。`N` は **タクティクが探索する深さではなく、対象の
+再帰定義が実際に何段前を参照するか** — Fibonacci (`fib(n-1)+fib(n-2)`) は
+`N=2`、tribonacci 型 (`f(n-1)+f(n-2)+f(n-3)`) は `N=3` が必要。
 
 ```seki
 def fib := \n -> if n < 2 then n else fib (n - 1) + fib (n - 2)
 theorem fib_nn : forall n in Nat, fib n >= 0 := by strong_induction
+
+def trib := \n ->
+    if n == 0 then 0 else if n == 1 then 1 else if n == 2 then 1
+    else trib (n - 1) + trib (n - 2) + trib (n - 3)
+theorem trib_nn : forall n in Nat, trib n >= 0 := by strong_induction 3
 ```
+
+**健全性**: ✅ Nat 上で健全 — `N` を関数の実際の参照深さより**小さく**指定すると、
+展開後にまだ `k` に依存する未解決の `if` (基底境界を跨ぐ場合分け) が残るが、
+これを検出して **証明を失敗させる** (`by strong_induction N: could not resolve
+every base-case boundary ...`)。この検出が無いと、未解決の `if` が
+「非負と仮定した不透明項」に丸め込まれ、境界のすぐ内側に潜む負のリテラルを
+一度も検査せずに偽の命題を通してしまう実際のバグがあった (2026-08 に発見・
+修正 — `docs/spec/06-soundness.md` 参照)。`N` を関数の参照深さより**大きく**
+指定した場合は単に余分な基底を検査するだけで安全。
 
 ## 5.6 `by simp` / `by simp [theorem1, theorem2]`
 
@@ -84,15 +109,35 @@ theorem t : x + 0 == x := by simp [add_zero]
 
 ## 5.7 `by unfold f`
 
-**意味**: 関数 `f` の定義を 1 段 β-展開する transformer。
+**意味**: 関数 `f` の定義を 1 段 β-展開する transformer。展開結果に現れる
+**非再帰**のユーザ定義呼び出しはさらに推移的に展開される
+(`unfold_nonrec_transitive`) — `f` が非再帰の `g` を呼ぶなら `g` も見える。
 通常は closer (`eval`, `algebra`, ...) と組み合わせる。
 
 **健全性**: ✅ 定義の展開は意味保存。
 
+**相互再帰**: `f` と `g` が互いを呼び合う組 (`isEven`/`isOdd` 等) の場合、
+呼び出しグラフのサイクル検出 (`closure_is_recursive`, 2026-08 修正) により
+両方とも「再帰的」と判定され、推移展開の対象から除外される — `f` 自身は
+1 段展開されるが、その中で呼ばれる `g (...)` はそこでオペークな項として
+止まる (直接の自己再帰と同じ扱い)。**2026-08 以前**は直接の自己参照しか
+検出できず、相互再帰の組を「非再帰」と誤判定して交互に展開し続け、
+32 回の反復上限まで暴走していた。
+
 ```seki
 def square := \x -> x * x
 theorem t : square 3 == 9 := by unfold square then eval
+
+def f := \n -> if n == 0 then 0 else g (n - 1) + 1
+def g := \n -> if n == 0 then 0 else f (n - 1) + 1
+-- 1段展開後、`g (n - 1)` はそのままオペークな項として残る
+theorem f_step : forall n in Nat, n > 0 -> f n == g (n - 1) + 1
+    := by unfold f then algebra
 ```
+
+**未対応**: 真の**相互帰納法** (2つの関数の性質を互いを IH として同時に
+証明する) はまだ無い。上の例のように「一方をもう一方の1段先のオペーク項
+として扱う」だけで閉じる範囲でしか使えない。
 
 ## 5.8 `by intros`
 

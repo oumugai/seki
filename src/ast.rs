@@ -168,11 +168,14 @@ pub enum Proof {
     /// Verifies the base case `P(0)` (by eval) and the step case
     /// `P(k+1)` from `P(k)` (by algebraic substitution).
     ByInduction,
-    /// `:= by strong_induction` — depth-2 strong induction over Nat.  Verifies
-    /// `P(0)`, `P(1)` as base cases and the step at `k+2`, with recursive
-    /// calls on `k` and `k+1` available as inductive hypotheses.  Useful for
-    /// recurrences that look back more than one step (Fibonacci, etc.).
-    ByStrongInduction,
+    /// `:= by strong_induction` (depth defaults to 2) or
+    /// `:= by strong_induction <N>` — strong induction over Nat with a
+    /// configurable look-back depth.  Verifies `P(0)`, ..., `P(N-1)` as base
+    /// cases and the step at `k+N`, with the recursive calls exposed by
+    /// unfolding at `k+N` available as (nonneg-atom) inductive hypotheses.
+    /// Useful for recurrences that look back more than one step (Fibonacci
+    /// needs depth 2, a tribonacci-style recurrence needs depth 3, etc.).
+    ByStrongInduction { depth: u32 },
     /// `:= by simp` or `:= by simp [lemma1, lemma2]` — equational rewriting.
     /// Applies known equality theorems as left-to-right rewrite rules until
     /// the goal becomes `true` (or both sides of an equality become
@@ -302,7 +305,13 @@ impl fmt::Display for Proof {
             Proof::ByLinarith => f.write_str("by linarith"),
             Proof::ByDecide => f.write_str("by decide"),
             Proof::ByInduction => f.write_str("by induction"),
-            Proof::ByStrongInduction => f.write_str("by strong_induction"),
+            Proof::ByStrongInduction { depth } => {
+                if *depth == 2 {
+                    f.write_str("by strong_induction")
+                } else {
+                    write!(f, "by strong_induction {}", depth)
+                }
+            }
             Proof::ByAuto => f.write_str("by auto"),
             Proof::ByIntros => f.write_str("by intros"),
             Proof::ByUnfold(name) => write!(f, "by unfold {}", name),

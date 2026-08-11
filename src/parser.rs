@@ -559,7 +559,21 @@ impl<'a> Parser<'a> {
             "eval" => Ok(Proof::ByEval),
             "algebra" => Ok(Proof::ByAlgebra),
             "induction" => Ok(Proof::ByInduction),
-            "strong_induction" => Ok(Proof::ByStrongInduction),
+            "strong_induction" => {
+                let depth = if let Tok::Int(n) = self.peek() {
+                    let n = *n;
+                    if n < 1 {
+                        return Err(SekiError::Parse(
+                            "by strong_induction: depth must be >= 1".into(),
+                        ));
+                    }
+                    self.bump();
+                    n as u32
+                } else {
+                    2
+                };
+                Ok(Proof::ByStrongInduction { depth })
+            }
             "intros" => Ok(Proof::ByIntros),
             "linarith" => Ok(Proof::ByLinarith),
             "decide" => Ok(Proof::ByDecide),
@@ -797,22 +811,26 @@ impl<'a> Parser<'a> {
                 "match expression has no arms (use `| pat -> body`)".into(),
             ));
         }
-        // Exhaustiveness check (warning only): for matches against known
-        // `data` types, report missing constructors.
-        self.check_exhaustiveness(&arms, match_line);
+        // Exhaustiveness check: for matches against known `data` types,
+        // report missing constructors (warning by default, hard error
+        // under `SEKI_STRICT_MATCH`).
+        self.check_exhaustiveness(&arms, match_line)?;
         Ok(desugar_match(scrutinee, arms))
     }
 
-    /// Emit a warning to stderr when a `match` is missing some constructors
-    /// of a known `data` type.  Non-fatal: the runtime fallback
+    /// Check whether a `match` is missing some constructors of a known
+    /// `data` type. By default this only emits a warning to stderr and
+    /// returns `Ok` — non-fatal, since the runtime fallback
     /// `error "non-exhaustive match"` still catches misses at evaluation
-    /// time.  Wildcard / Var patterns count as "all remaining covered".
-    fn check_exhaustiveness(&self, arms: &[(Pattern, Expr)], match_line: usize) {
+    /// time. When the `SEKI_STRICT_MATCH` env var is set, a non-exhaustive
+    /// match is instead rejected as a parse error. Wildcard / Var patterns
+    /// count as "all remaining covered".
+    fn check_exhaustiveness(&self, arms: &[(Pattern, Expr)], match_line: usize) -> SekiResult<()> {
         // If any arm has a wildcard or var pattern, the match is
         // exhaustive (by construction).
         for (pat, _) in arms {
             if matches!(pat, Pattern::Wildcard | Pattern::Var(_)) {
-                return;
+                return Ok(());
             }
         }
         // Collect constructor names used in arms.
@@ -833,17 +851,17 @@ impl<'a> Parser<'a> {
         // Literal-only or tuple-only matches can't be statically checked
         // for exhaustiveness from `data` registry — skip.
         if any_lit || any_tuple || used.is_empty() {
-            return;
+            return Ok(());
         }
         // Determine the data type from any of the used constructors.
         let any_ctor = used.iter().next().unwrap();
         let data_name = match self.ctor_to_data.get(any_ctor) {
             Some(d) => d.clone(),
-            None => return, // unknown constructor → ignore
+            None => return Ok(()), // unknown constructor → ignore
         };
         let all_ctors = match self.data_ctors.get(&data_name) {
             Some(cs) => cs,
-            None => return,
+            None => return Ok(()),
         };
         let mut missing: Vec<&String> = Vec::new();
         for c in all_ctors {
@@ -859,11 +877,20 @@ impl<'a> Parser<'a> {
                 }
                 buf.push_str(c);
             }
+            if std::env::var("SEKI_STRICT_MATCH").is_ok() {
+                return Err(SekiError::Parse(format!(
+                    "non-exhaustive match at line {}: missing constructor(s) of `{}`: {} \
+                     (rejected because SEKI_STRICT_MATCH is set; unset it, or add the missing \
+                     arm(s) / a wildcard `_ -> ...`)",
+                    match_line, data_name, buf
+                )));
+            }
             eprintln!(
                 "warning: non-exhaustive match at line {}: missing constructor(s) of `{}`: {}",
                 match_line, data_name, buf
             );
         }
+        Ok(())
     }
 
     /// Parse a single `match` pattern, handling at most one constructor with

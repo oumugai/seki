@@ -66,6 +66,11 @@ fn real_main() -> ExitCode {
             }
         } else if let Some(rest) = a.strip_prefix("-I") {
             extra_libs.push(PathBuf::from(rest));
+        } else if a == "--strict-match" {
+            // Promote non-exhaustive `match` from a warning to a parse
+            // error. Read by `check_exhaustiveness` in src/parser.rs; also
+            // settable directly as the `SEKI_STRICT_MATCH` env var.
+            std::env::set_var("SEKI_STRICT_MATCH", "1");
         } else {
             args.push(a);
         }
@@ -175,6 +180,7 @@ fn print_help() {
             seki --check FILE             verify a file (suppresses echoing)\n  \
             seki -e <expr> [-- args...]   evaluate one expression\n  \
             seki -I <dir>                 add <dir> to the lib path (repeatable)\n  \
+            seki --strict-match ...       non-exhaustive `match` is a parse error (or set SEKI_STRICT_MATCH)\n  \
             seki --list-builtins          print every Rust builtin (one per line)\n  \
             seki --list-builtins-doc      print every documented builtin's signature\n  \
             seki --builtin <name>         show full metadata for a builtin\n  \

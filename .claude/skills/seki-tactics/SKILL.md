@@ -25,7 +25,7 @@ seki は `theorem name : <命題> := <証明>` の形で命題を機械検証す
      (`by linarith` は完全に同じ実装への別名 — 名前で意図を示すだけ)
    - 再帰関数の構造帰納で閉じる → `by induction` (Nat: 0→k+1 / List: nil→cons /
      Tree / `data` ADT)
-   - 2段先まで参照する再帰 (Fibonacci 型) → `by strong_induction` (深さ2固定)
+   - 2段以上先まで参照する再帰 (Fibonacci は `by strong_induction`、tribonacci 型など3段以上は `by strong_induction 3` のように depth を指定)
    - 既存の証明済み等式の連鎖で書き換えられる → `by simp` /
      `by simp [lemma1, lemma2]`
    - 前提を剥がしてから閉じたい → `by intros then <closer>` /
@@ -51,13 +51,13 @@ seki は `theorem name : <命題> := <証明>` の形で命題を機械検証す
 |---|---|---|
 | `refl` | ✅ | 構文的に完全一致する場合のみ。alpha-renaming なし |
 | `by eval` | ✅ 有限ドメインのみ / 🟡 `Nat`・`Int` は `SAMPLE_BOUND`=200 まで | 無限ドメインで「通った」は健全性の証明ではない |
-| `by algebra` | ✅ Int/Rat/**Real** (Real は `f64_to_rat` で厳密な有理数化) | `if` の場合分け対応済み。仮定の連言 (`a>0 and b>0 => ...`) は個別の仮定に分解され、**複数仮定の等重み1の和** がゴールと一致すれば閉じる (`hyps_sum_proves`) — 例: `x>0, y>0 ⊢ x+y>0` は通るが `x>0, y>0 ⊢ x-y>0` は通らない (健全) |
+| `by algebra` | ✅ Int/Rat/**Real** (Real は `f64_to_rat` で厳密な有理数化) | `if` の場合分け対応済み。仮定の連言 (`a>0 and b>0 => ...`) は個別の仮定に分解され、**複数仮定の等重み1の和** がゴールと一致すれば閉じる (`hyps_sum_proves`) — 例: `x>0, y>0 ⊢ x+y>0` は通るが `x>0, y>0 ⊢ x-y>0` は通らない (健全)。可変除数は `==` かつ単項キャンセルで閉じる場合のみ (`(a*n)/n == a`、`(a*n) mod n == 0`) — 可変除数の不等式や剰余非零の一般ケースは未対応 |
 | `by linarith` | ✅ `by algebra` と全く同じ実装への別名 | **専用の単変数 Fourier-Motzkin ソルバ (`linarithProve` builtin, `src/linarith.rs`) にはタクティクとして未接続**。多変数の線形不等式が欲しい場合、`by algebra`/`by linarith` が通らなければ現状これ以上強い一般解はない |
-| `by induction` | ✅ 構造帰納 (Nat/List/Tree/data) | 相互再帰関数の unfold は未対応 (`even`/`odd` のような組) |
-| `by strong_induction` | ✅ well-founded on Nat | **深さ2固定** (P(0), P(1) が base、P(k+2) の判定)。3段以上必要なら手動で別形に変形するか `by induction` を工夫する |
+| `by induction` | ✅ 構造帰納 (Nat/List/Tree/data) | 真の**相互帰納法** (2つの関数の性質を互いを IH として同時に証明) は未対応 |
+| `by strong_induction <N>` | ✅ well-founded on Nat (`N` 省略時2) | `N` は「関数が実際に何段前を参照するか」であり探索深さではない — 小さすぎる `N` は証明失敗になる (基底境界を跨ぐ未解決の `if` を検出するガードあり。2026-08、これが無いと偽の命題が通ってしまうバグがあった)。大きすぎる `N` は余分な基底を検査するだけで安全 |
 | `by simp` | ✅ 各書換えステップが健全 | 対称規則 (`add_comm` 等) も AC-canonicalization で oscillation せず扱える。**条件付き等式** (`a > 0 => lhs == rhs` のような、規則自体に前提があるもの) は未対応 — `forall ..., lhs == rhs` の直接形のみ登録できる |
 | `by decide` | ✅ Bool に reduce できる場合のみ | 型クラス無しの直接評価。`Decidable` 型クラスへの一般化はまだ無い |
-| `by unfold f` | ✅ 1段展開 + 非再帰の呼び出し先を推移的に展開 | 再帰関数 `f` 自身は1段だけ展開されて止まる (無限展開しない安全策) |
+| `by unfold f` | ✅ 1段展開 + 非再帰の呼び出し先を推移的に展開 | 再帰関数 `f` 自身は1段だけ展開されて止まる (無限展開しない安全策)。相互再帰の組 (`isEven`/`isOdd` 等) も呼び出しグラフのサイクル検出で正しく「再帰」と判定され、同様に1段で止まる (2026-08 修正 — 以前は誤って「非再帰」判定され32回まで交互展開が暴走した) |
 | `by intros` | ✅ 全称除去 | transformer なので単体では閉じない。`then` で closer と組む |
 | `by auto` | ✅ (個々の候補の健全性に従う) | 固定順のポートフォリオ探索。`theorem t : P` (`:=` 省略形) はこれに desugar される |
 
