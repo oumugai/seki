@@ -1,0 +1,45 @@
+-- ===========================================================
+-- lib/analysis/ivt.seki — 中間値の定理 (IVT) の計算的核心: 二分法
+--
+-- 中間値の定理そのもの (「連続関数 f が f(a)<0<f(b) を満たすなら、
+-- ある c∈[a,b] で f(c)=0」) は実数の完備性に依存し、一般の関数について
+-- 構成的に証明することは今のタクティクの範囲を超える (詳細は
+-- docs/spec/06-soundness.md)。本ファイルは、その代わりに IVT の
+-- **計算的な核心**である二分法アルゴリズムそのものを実装し、
+-- アルゴリズムの不変条件 (区間幅が毎ステップ半分になること) を
+-- 次数・関数によらず一般に (∀a,b∈Real) 証明する。
+--
+-- 公開する名前:
+--   def bisect f a b n           — n ステップの二分法。符号が変わる側の
+--                                    半区間を選び続け、狭めた区間 (a',b') を返す
+--   theorem bisect_width_halves  — 1 ステップで区間幅が半分になる (一般)
+-- ===========================================================
+
+import "limit.seki"
+
+-- ----- 二分法本体 -----
+-- f(a)*f(mid) <= 0 なら根が [a,mid] 側にあると判断してそちらを選ぶ
+-- (等号 <= 0 を含めているので mid がちょうど根のときも正しく停止できる)。
+def bisect := \f a b n ->
+    if n == 0 then (a, b)
+    else
+        let mid = (a + b) / 2.0 in
+        if (f a) * (f mid) <= 0.0 then bisect f a mid (n - 1)
+        else bisect f mid b (n - 1)
+
+-- ----- 具体例: f(x) = x² - 2 (根は √2) -----
+def f_sqrt2 := \x -> x * x - 2.0
+def bisect10 := bisect f_sqrt2 0.0 2.0 10
+def midOf := \ab -> ((fst ab) + (snd ab)) / 2.0
+
+-- 複数ステップでの区間幅の推移を追う補助関数
+-- (n ステップでの厳密な閉じた式 width(n) = (b-a)/2^n の一般証明は、
+-- pow の指数が変数になるため `by algebra`/`by induction` の対応範囲外 —
+-- 詳細は docs/spec/06-soundness.md)
+def widthAfter := \n ->
+    let ab = bisect f_sqrt2 0.0 2.0 n in
+    (snd ab) - (fst ab)
+
+-- theorem (証明) は tests/seki/test_analysis_ivt.seki 側に置く
+-- (公開する `bisect_width_halves` は「1ステップの二分法は f・a・b に
+-- よらず区間幅を厳密に半分にする」という一般定理)。

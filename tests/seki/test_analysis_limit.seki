@@ -45,3 +45,30 @@ def harmonic_inv := \k ->
 -- 隣り合う差 (1/k - 1/(k+1)) は小さくなる
 def hi_xs := [harmonic_inv 10, harmonic_inv 100, harmonic_inv 1000, harmonic_inv 10000]
 theorem cauchy_harmonic : isCauchy 0.1 hi_xs := by eval
+
+-- ===========================================================
+-- ε-δ 論法: isContinuousAt/isLimit の具体例
+-- ===========================================================
+
+-- ----- 一般的に (∀ε,∀x0,∀x で) 証明できる例: 線形関数の連続性 -----
+-- f(x) = 3x+1 は任意の x0 で連続。δ(ε) = ε/3 が exists 層の witness になる
+-- (この「δ(ε)が機能することの核心」は forall のみの命題に量子化子除去
+-- した形で、by algebra で完全に健全に証明できる — isContinuousAt の
+-- exists 層そのものを閉じる正式な手段はまだ無いことに注意)。
+def f_lin := \x -> 3.0 * x + 1.0
+
+theorem continuous_linear_core
+  : forall eps in Real, forall x in Real, forall x0 in Real,
+      eps > 0.0 and (absR (x - x0)) < (eps / 3.0)
+      => (absR (f_lin x - f_lin x0)) < eps
+  := by unfold absR then unfold f_lin then algebra
+
+-- ----- 非線形関数 (x²) は数値的な例による確認に留める -----
+-- x0=2, δ=0.01 で ε=0.05 以内に収まることを具体的に確認 (一般の ε に
+-- ついての証明ではない — 2乗の展開で仮定同士の積を要し、現在の
+-- by algebra の線形範囲を超える)
+def f_sq2 := \x -> x * x
+def x_near := 2.005
+theorem continuous_x2_numeric_check
+  : (absR (x_near - 2.0)) < 0.01 => (absR (f_sq2 x_near - f_sq2 2.0)) < 0.05
+  := by eval

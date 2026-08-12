@@ -1526,7 +1526,12 @@ fn seki_lib_test_analysis_series() {
 
 #[test]
 fn seki_lib_test_analysis_limit() {
-    run_seki_test_file("tests/seki/test_analysis_limit.seki", 5);
+    run_seki_test_file("tests/seki/test_analysis_limit.seki", 7);
+}
+
+#[test]
+fn seki_lib_test_analysis_ivt() {
+    run_seki_test_file("tests/seki/test_analysis_ivt.seki", 4);
 }
 
 #[test]

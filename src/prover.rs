@@ -564,6 +564,33 @@ impl<'a> Prover<'a> {
         if hyps_contradict(hyps) {
             return Ok(Value::Bool(true));
         }
+        // Case-split on an `if` hiding *inside a hypothesis* (typically
+        // left there by unfolding a function like `absR := \r -> if r<0.0
+        // then -r else r`) before looking at the goal's own `if`s. Without
+        // this, a hypothesis such as `absR(x-x0) < delta` stays an opaque,
+        // unusable fact — `expr_to_poly` can't see through the embedded
+        // `if`, so the hypothesis never yields the linear bound on `x` a
+        // goal like an epsilon-delta continuity proof needs. Sound for the
+        // same reason the goal-side split is: each branch only needs to
+        // hold under the extra assumption that got it there.
+        for (i, (h, htrue)) in hyps.iter().enumerate() {
+            if let Some((then_h, else_h, cond)) = split_first_if(h) {
+                let mut then_hyps = hyps.to_vec();
+                then_hyps[i] = (then_h, *htrue);
+                then_hyps.push((cond.clone(), true));
+                if let Some(extra) = integer_strengthen(&cond, true, dom) {
+                    then_hyps.push(extra);
+                }
+                let mut else_hyps = hyps.to_vec();
+                else_hyps[i] = (else_h, *htrue);
+                else_hyps.push((cond.clone(), false));
+                if let Some(extra) = integer_strengthen(&cond, false, dom) {
+                    else_hyps.push(extra);
+                }
+                self.prove_algebra_rel(body, dom, &then_hyps)?;
+                return self.prove_algebra_rel(body, dom, &else_hyps);
+            }
+        }
         if let Some((then_body, else_body, cond)) = split_first_if(body) {
             // In the then-branch, propagate `cond ⇒ true` everywhere by
             // rewriting matching `if cond then T else E` subterms to `T`.

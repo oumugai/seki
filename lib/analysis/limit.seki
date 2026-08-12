@@ -8,9 +8,31 @@
 --   def isCauchy eps xs      — Cauchy 列か (差が eps 以下になるか)
 --   def converges eps n a    — 数列 a が n 項以内で誤差 eps 内に収まるか
 --   def fixedPoint f x0 iter — 反復 x ← f(x) で固定点に収束させる
+--   def isContinuousAt f x0  — 教科書通りの ε-δ 連続性の定義 (下記注意参照)
+--   def isLimit f x0 l       — 教科書通りの ε-δ 極限の定義
 -- ===========================================================
 
 def absR := \r -> if r < 0.0 then 0.0 - r else r
+
+-- ----- ε-δ 論法の形式的定義 (文書化目的) -----
+-- 教科書の定義をそのまま述語として書き下したもの。ただし
+-- `forall eps, exists delta, forall x, ...` という量化子の入れ子を
+-- `by eval`/`by decide`/裸の証明項で「証明」しても、Real 上の forall は
+-- 有限サンプルでの検査に格下げされるため不健全 (docs/spec/06-soundness.md)。
+-- 個々の具体的な (f, x0) について連続性を厳密に示したい場合は、
+-- exists 層を具体的な δ(ε) の式で埋めた「量化子除去後の核心の不等式」
+-- (forall eps, forall x, ... => ...) を `by algebra`/`by linarith` で
+-- 直接証明すること — この述語自体は exists の証明に使える汎用的な
+-- witness 抽出の仕組みを持たないので、`theorem` の証明には使わない。
+def isContinuousAt := \f x0 ->
+    forall eps in Real, eps > 0.0 =>
+      (exists delta in Real, delta > 0.0 and
+        (forall x in Real, (absR (x - x0)) < delta => (absR (f x - f x0)) < eps))
+
+def isLimit := \f x0 l ->
+    forall eps in Real, eps > 0.0 =>
+      (exists delta in Real, delta > 0.0 and
+        (forall x in Real, (x != x0) and ((absR (x - x0)) < delta) => (absR (f x - l)) < eps))
 
 -- ----- 数値極限: 関数 f を x0 の近傍 (x0 + h) で次々に評価し、最後の値を返す -----
 -- hList = [h_0, h_1, ..., h_k] が h → 0 に収束する列のとき、
