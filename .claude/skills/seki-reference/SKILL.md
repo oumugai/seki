@@ -54,7 +54,8 @@ sigma (x : A), B            -- 依存ペア型 Σ (B は x を参照可能; 非�
 
 `refl` / `by eval` / `by algebra` (= `by linarith`) / `by induction` /
 `by strong_induction` / `by simp [lemmas...]` / `by unfold f` / `by intros` /
-`by decide` / `by auto` / `then` での合成。証明戦術の選び方や健全性の注意は
+`by decide` / `by auto` / `by obtain w from L [with x:=e,...]` (existential
+elimination, 2026-08 追加) / `then` での合成。証明戦術の選び方や健全性の注意は
 `seki-tactics` skill を読み込むこと。
 
 ## その他のドキュメント
