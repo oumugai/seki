@@ -20,3 +20,31 @@ theorem bisect_width_halves
 -- 複数ステップでも区間幅が縮み続けることを具体例で確認
 theorem width_shrinks_0_to_5  : widthAfter 5 < widthAfter 0 := by eval
 theorem width_shrinks_5_to_10 : widthAfter 10 < widthAfter 5 := by eval
+
+-- ===========================================================
+-- ivt_general (公理) を by obtain で使う — Skolem 化の具体例
+-- ===========================================================
+
+-- f(x) = x³ - x - 2. f(1) = -2, f(2) = 4 なので f(1)*f(2) <= 0 → [1,2] に根がある
+def f_cubic := \x -> x * x * x - x - 2.0
+
+-- ivt_general を f_cubic, a=1.0, b=2.0 に特殊化し、根 w を obtain する。
+-- w の定義性質 (f_cubic w == 0.0、つまり w³ - w - 2 = 0、つまり w³ = w + 2)
+-- を後続の by algebra がシンボリックな仮定として使えることを示す —
+-- 「IVT (公理) から、この根 w について w³ = w + 2 が成り立つ」という、
+-- IVT を実際に使った (existential elimination による) 厳密な導出。
+theorem cubic_root_relation
+  : (f_cubic 1.0) * (f_cubic 2.0) <= 0.0 => (w * w * w) == (w + 2.0)
+  := by obtain w from ivt_general with f := f_cubic, a := 1.0, b := 2.0
+     then unfold f_cubic then algebra
+
+-- obtain した根が区間 [1,2] に収まっていることも同時に使える
+-- (by algebra はゴール自体が単一の関係式であることを要求するので、
+-- 連言のゴールは各成分に分けて別々の theorem にする)
+theorem cubic_root_lower_bound
+  : (f_cubic 1.0) * (f_cubic 2.0) <= 0.0 => 1.0 <= w
+  := by obtain w from ivt_general with f := f_cubic, a := 1.0, b := 2.0 then algebra
+
+theorem cubic_root_upper_bound
+  : (f_cubic 1.0) * (f_cubic 2.0) <= 0.0 => w <= 2.0
+  := by obtain w from ivt_general with f := f_cubic, a := 1.0, b := 2.0 then algebra
