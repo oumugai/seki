@@ -14,7 +14,10 @@
 --   def evalPoly p c      — Horner 法で p(c)
 --   def toPoly / fromPoly / expand    — Sym ↔ Poly 変換
 --   def divisors / scanRoots / findRationalRoot / divByLinear
---   def factor            — 有理根による因数分解
+--   def factor            — 有理根による因数分解 (1 次因子のみ)
+--   def factorFull        — 上記 + Kronecker 補間法による 2 次因子探索
+--                            (戻り値: (有理根リスト, 2次因子リスト, 残り))
+--   def reconstructFactorFull — factorFull の結果から多項式を再構成 (検証用)
 --   def polyDeriv         — 微分 (Int/Real 両対応)
 --   def polyIntegrate     — 不定積分 (Real 係数専用, 積分定数 C=0)
 --   theorem ftc_poly_general — 微積分学の基本定理の一般形 (次数非依存で証明)
@@ -216,6 +219,110 @@ def factorRec := \p roots ->
 
 -- 結果: (有理根のリスト, 残った既約因子と仮定する多項式)
 def factor := \p -> factorRec p nil
+
+-- ===========================================================
+-- Kronecker 法による 2 次因子の探索 (factor の拡張: factorFull)
+--
+-- 有理根定理 (factor/factorRec) は 1 次因子しか見つけられない。
+-- ここでは Kronecker の補間法を「2 次因子探索」に特化して実装し、
+-- 4 次までの多項式 (2 次×2 次への分解) を実際に扱えるようにする。
+--
+-- 原理: p が整数係数の 2 次因子 q = c0 + c1*x + c2*x^2 を持つなら、
+-- 任意の整数 a について q(a) は p(a) の約数でなければならない。
+-- 3 点 x=0,1,2 での値 y0=q(0), y1=q(1), y2=q(2) を p(0),p(1),p(2) の
+-- 約数からそれぞれ選び、Lagrange 補間で q の係数を復元、
+-- 実際に p を割り切るか (polyDivMod) を確認する。
+--
+-- 3 点 (0,1,2) 固定の Lagrange 補間を展開すると:
+--   q(x) = y0 + c1*x + c2*x^2,
+--   c2 = (y0 - 2*y1 + y2) / 2,  c1 = (-3*y0 + 4*y1 - y2) / 2
+-- (整数になるのは y0, y2 が同じ偶奇のとき — このとき自動的に c1 も整数)。
+-- ===========================================================
+
+-- 値 0 の場合は「任意の整数が約数」なので、実用上は小さな候補集合で代用する
+-- (無限集合を扱えないための実用上の妥協 — 0 は p が x=0..2 で根を持つ
+-- 特殊ケースだが、その場合は事前の有理根探索 (factorRec) で
+-- 該当する 1 次因子が既に除去されているはずなので、通常はここに来ない)。
+def kronDivisorsOf := \n -> if n == 0 then cons 0 (divisors 12) else divisors n
+
+-- 3 点 (0,1,2) での値 (y0, y1, y2) から 2 次補間多項式を構成。
+-- 整数係数にならない場合は None。
+def buildQuadFrom012 := \y0 y1 y2 ->
+    let s = y0 + y2 in
+    if (s mod 2) != 0 then None
+    else
+        let c2 = (y0 - 2 * y1 + y2) / 2 in
+        let c1num = (0 - 3) * y0 + 4 * y1 - y2 in
+        if (c1num mod 2) != 0 then None
+        else Some (cons y0 (cons (c1num / 2) (cons c2 nil)))
+
+-- y2 候補を総当り。見つかれば (商, 因子) を返す。
+def tryY2Cands := \p y0 y1 y2cands ->
+    if null y2cands then None
+    else
+        match buildQuadFrom012 y0 y1 (head y2cands) with
+        | None -> tryY2Cands p y0 y1 (tail y2cands)
+        | Some q ->
+            if (polyDeg q) < 2 then tryY2Cands p y0 y1 (tail y2cands)
+            else
+                match polyDivMod p q with
+                | None -> tryY2Cands p y0 y1 (tail y2cands)
+                | Some pr ->
+                    if null (stripTail (snd pr))
+                    then Some (fst pr, q)
+                    else tryY2Cands p y0 y1 (tail y2cands)
+
+-- y1 候補を総当り。
+def tryY1Cands := \p y0 y1cands y2cands ->
+    if null y1cands then None
+    else
+        match tryY2Cands p y0 (head y1cands) y2cands with
+        | Some res -> Some res
+        | None -> tryY1Cands p y0 (tail y1cands) y2cands
+
+-- y0 候補を総当り。
+def tryY0Cands := \p y0cands y1cands y2cands ->
+    if null y0cands then None
+    else
+        match tryY1Cands p (head y0cands) y1cands y2cands with
+        | Some res -> Some res
+        | None -> tryY0Cands p (tail y0cands) y1cands y2cands
+
+-- p の 2 次因子を 1 つ探す: 見つかれば Some (商多項式, 因子多項式)。
+def findQuadFactor := \p ->
+    let v0 = evalPoly p 0 in
+    let v1 = evalPoly p 1 in
+    let v2 = evalPoly p 2 in
+    tryY0Cands p (kronDivisorsOf v0) (kronDivisorsOf v1) (kronDivisorsOf v2)
+
+-- 見つかる限り 2 次因子を繰り返し取り出す。
+def factorQuadRec := \p quads ->
+    if (polyDeg p) < 2 then (quads, p)
+    else
+        match findQuadFactor p with
+        | None -> (quads, p)
+        | Some pr -> factorQuadRec (fst pr) (cons (snd pr) quads)
+
+-- ----- 因数分解 (有理根 + 2 次 Kronecker 法) -----
+-- 戻り値: (有理根のリスト, 見つかった 2 次因子のリスト, 残った多項式)
+-- 既存の `factor`/`factorRec` (1 次因子のみ) とは別名の関数として提供し、
+-- 呼び出し元コードとの互換性を壊さない。
+def factorFull := \p ->
+    let stage1 = factorRec p nil in
+    let roots = fst stage1 in
+    let rem1 = snd stage1 in
+    let stage2 = factorQuadRec rem1 nil in
+    (roots, fst stage2, snd stage2)
+
+-- ----- 検証用ヘルパ: (roots, quads, rem) から元の多項式を再構成 -----
+def linearFromRoot := \r -> cons (0 - r) (cons 1 nil)
+def prodPolyList := \ps -> if null ps then polyConst 1 else polyMul (head ps) (prodPolyList (tail ps))
+
+def reconstructFactorFull := \triple ->
+    match triple with
+    | (roots, quads, rem) ->
+        let linFactors = map linearFromRoot roots in
+        polyMul (polyMul (prodPolyList linFactors) (prodPolyList quads)) rem
 
 -- ===========================================================
 -- §3. Resultant と Discriminant (Sylvester 行列ベース)

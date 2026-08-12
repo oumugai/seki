@@ -17,6 +17,24 @@ seki は **pre-1.0** です。これは次を意味します:
 
 ### Added
 
+- `lib/cas/multipoly.seki`: `def buchberger` を実装 (これまではヘッダに
+  記載だけあり未定義だった)。生成元の全ペアの S-多項式を計算し、既存生成元で
+  簡約した非ゼロ剰余を新規生成元として追加する不動点反復。
+  `tests/seki/test_cas_multipoly.seki` に `<x²+y²-1, x-y>` (Cox-Little-O'Shea
+  の定番例) の Gröbner 基底を計算し、ideal 保存・非自明性・Buchberger 判定条件
+  (全ペアの S-多項式が 0 に簡約されること) を `by eval` で検証するテストを追加。
+- `lib/cas/poly.seki`: `def factorFull` — Kronecker 補間法による 2 次因子探索を
+  `factor` (有理根定理のみ) に追加。3 点 (0,1,2) での値の約数の組み合わせから
+  2 次補間多項式を構成し、実際に整除するか確認する。`x⁴+3x²+2 = (x²+1)(x²+2)`
+  (有理根なし・2 次因子に分解できる) と `x⁴+1` (Q 上既約、円分多項式) を
+  `tests/seki/test_cas_poly.seki` で検証。既存の `factor`/`factorRec` は不変。
+- `lib/cas/calc.seki`: `integ` に**部分分数分解**によるケースを追加。分母が
+  異なる整数根を持つ 1 次式の積に完全分解でき、かつ部分分数の係数
+  (`A_i = N(rᵢ)/D'(rᵢ)`) が整数になる有理関数を `Σ Aᵢ·ln(x-rᵢ)` として積分する
+  (`tryPartialFractionInteg`)。`1/((x-1)(x-2))` の積分を追加し、
+  `cas/rational.seki` の `RatFn` 演算による独立検証 (再構成した部分分数が
+  元の有理関数と等しいこと) も併記。適用できない場合 (仮分数・重根・既約2次分母
+  など) は既存のフォールバック (`SMul other (SVar v)`、不正確) を維持。
 - `by algebra` (および別名 `by linarith`) が仮定の**加算結合**を扱えるようになった:
   `x > 0 and y > 0 => x + y > 0` のように、連言の前提を複数の仮定へ分解した上で
   正の重み 1 での和がゴールと一致すれば閉じる (`hyps_sum_proves`)。

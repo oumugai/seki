@@ -219,6 +219,99 @@ impl<'a> Prover<'a> {
                     "by auto: no tactic in the portfolio closed the goal".into(),
                 )),
             },
+            Proof::Obtain { intro, lemma, substs } => {
+                // Standalone `obtain` (no following `then`): transform and
+                // require the result to evaluate to `true`, same pattern as
+                // standalone unfold/intros. Rarely useful alone since the
+                // transformed goal still has `intro` as a free symbol.
+                let (_, context_hyps) = peel_implications(strip_foralls(prop));
+                let fact = self.verify_obtain(intro, lemma, substs, &context_hyps, env)?;
+                let new_goal = implies_expr(fact, prop.clone());
+                let v = self.ctx.eval(&new_goal, env)?;
+                if matches!(v, Value::Bool(true)) {
+                    Ok(Value::Bool(true))
+                } else {
+                    Err(SekiError::Proof(format!(
+                        "by obtain {} from {}: result did not close the goal",
+                        intro, lemma
+                    )))
+                }
+            }
+        }
+    }
+
+    /// Instantiate `lemma` (an axiom or theorem name) by substituting each
+    /// `substs` binding for the corresponding name — first consuming
+    /// leading `forall`s positionally by name, then substituting any
+    /// remaining free occurrences (for names the lemma left unquantified,
+    /// e.g. an uninterpreted function parameter with no natural `Set`
+    /// domain to quantify over). Discharges any resulting premises via `by
+    /// algebra`, then requires the conclusion to be `exists w in D, P(w)`
+    /// and returns `P(intro)` — the fact the caller gets to assume.
+    fn verify_obtain(
+        &self,
+        intro: &str,
+        lemma: &str,
+        substs: &[(String, Expr)],
+        context_hyps: &[Expr],
+        env: &Env,
+    ) -> SekiResult<Expr> {
+        let prop = self
+            .ctx
+            .globals
+            .theorem_props
+            .get(lemma)
+            .or_else(|| self.ctx.globals.axiom_props.get(lemma))
+            .cloned()
+            .ok_or_else(|| {
+                SekiError::Proof(format!("by obtain: unknown axiom/theorem `{}`", lemma))
+            })?;
+        let mut cur = prop;
+        while let Expr::Forall { var, body, .. } = cur {
+            let value = substs
+                .iter()
+                .find(|(n, _)| *n == var)
+                .map(|(_, e)| e.clone())
+                .ok_or_else(|| {
+                    SekiError::Proof(format!(
+                        "by obtain: `{}` is universally quantified in `{}` but no \
+                         `with {} := ...` was given",
+                        var, lemma, var
+                    ))
+                })?;
+            cur = subst(body.as_ref(), &var, &value);
+        }
+        for (name, value) in substs {
+            cur = subst(&cur, name, value);
+        }
+        let (conclusion, premises) = peel_implications(&cur);
+        for p in &premises {
+            // First check whether `p` is literally already known — a
+            // premise of the theorem currently being proved, brought into
+            // scope via `strip_foralls`+`peel_implications` on the goal.
+            // Only fall back to `by algebra` (which can't see `context_hyps`
+            // and would have to re-derive `p` from nothing) when it isn't.
+            let already_known = context_hyps.iter().any(|h| crate::ast::alpha_equiv(h, p));
+            if already_known {
+                continue;
+            }
+            self.verify_algebra(p, env).map_err(|e| {
+                SekiError::Proof(format!(
+                    "by obtain: could not discharge premise `{}` of `{}` \
+                     (not already a hypothesis of the current goal either): {}",
+                    p, lemma, e
+                ))
+            })?;
+        }
+        match conclusion {
+            Expr::Exists { var, body, .. } => {
+                let intro_expr = Expr::Var { name: intro.to_string(), line: 0, col: 0 };
+                Ok(subst(body.as_ref(), &var, &intro_expr))
+            }
+            other => Err(SekiError::Proof(format!(
+                "by obtain: `{}` (after substitution) is not an existential, got {}",
+                lemma, other
+            ))),
         }
     }
 
@@ -414,6 +507,20 @@ impl<'a> Prover<'a> {
             Proof::ByIntros => {
                 let g = strip_foralls(prop).clone();
                 Ok(TacOutcome::NewGoal(g))
+            }
+            Proof::Obtain { intro, lemma, substs } => {
+                // Also strip the *current goal's own* leading foralls/
+                // implications here (not just to gather `context_hyps` for
+                // discharging the lemma's premises, but for the produced
+                // goal too) — otherwise a closer downstream would see a
+                // doubly-nested implication (`fact => (own_premises =>
+                // conclusion)`) and most closers only peel one level.
+                // Consuming the goal's own premises here is exactly what a
+                // separate `by intros`/implication-peel right before
+                // `obtain` would have done anyway.
+                let (conclusion, context_hyps) = peel_implications(strip_foralls(prop));
+                let fact = self.verify_obtain(intro, lemma, substs, &context_hyps, env)?;
+                Ok(TacOutcome::NewGoal(implies_expr(fact, conclusion)))
             }
             Proof::BySimp { lemmas } => {
                 // Try to close via simp; if it can't, return the most
@@ -2154,6 +2261,17 @@ fn flatten_relational_and(e: &Expr, out: &mut Vec<Expr>) -> bool {
         }
         _ => false,
     }
+}
+
+/// Build the `=>` desugaring `(not P) or Q` directly — matching what the
+/// parser produces for `P => Q` — so `peel_implications`/`by algebra`
+/// recognize the result as an implication without any special-casing.
+fn implies_expr(premise: Expr, conclusion: Expr) -> Expr {
+    Expr::BinOp(
+        BinOp::Or,
+        Box::new(Expr::UnOp(UnOp::Not, Box::new(premise))),
+        Box::new(conclusion),
+    )
 }
 
 fn peel_implications(body: &Expr) -> (Expr, Vec<Expr>) {

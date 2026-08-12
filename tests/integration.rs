@@ -1466,12 +1466,12 @@ fn seki_lib_test_cas_sym() {
 
 #[test]
 fn seki_lib_test_cas_calc() {
-    run_seki_test_file("tests/seki/test_cas_calc.seki", 16);
+    run_seki_test_file("tests/seki/test_cas_calc.seki", 19);
 }
 
 #[test]
 fn seki_lib_test_cas_poly() {
-    run_seki_test_file("tests/seki/test_cas_poly.seki", 13);
+    run_seki_test_file("tests/seki/test_cas_poly.seki", 22);
 }
 
 #[test]
@@ -1506,7 +1506,7 @@ fn seki_lib_test_algebra_matrix() {
 
 #[test]
 fn seki_lib_test_algebra_structures() {
-    run_seki_test_file("tests/seki/test_algebra_structures.seki", 14);
+    run_seki_test_file("tests/seki/test_algebra_structures.seki", 46);
 }
 
 #[test]
@@ -1707,7 +1707,7 @@ fn adt_induction_on_user_data() {
 
 #[test]
 fn seki_lib_test_cas_multipoly() {
-    run_seki_test_file("tests/seki/test_cas_multipoly.seki", 12);
+    run_seki_test_file("tests/seki/test_cas_multipoly.seki", 22);
 }
 
 #[test]

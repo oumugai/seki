@@ -6,14 +6,19 @@
 -- 公開する名前:
 --   def derive v e     — 記号微分 (連鎖律対応)
 --   def differ v e     — derive + simplify
---   def integ v e      — 記号積分 (線形 + 単項式 + 初等関数)
+--   def integ v e      — 記号積分 (線形 + 単項式 + 初等関数 + 部分分数分解)
 --   def integS v e     — integ + simplify
 --   def subst v c e    — 変数を Int に代入
 --   def evalNum e      — 完全数値化 (Option Int)
 --   def evalAt v c e   — subst + evalNum
+--   def tryPartialFractionInteg v u w
+--                      — SDiv u w (有理関数) の分母が異なる 1 次式の積に
+--                        完全分解でき、かつ部分分数の係数が整数になる場合に
+--                        Σ A_i * ln|x - r_i| を Some で返す (それ以外は None)
 -- ===========================================================
 
 import "sym.seki"
+import "poly.seki"
 
 -- ----- 記号微分 (連鎖律含む) ---------------------------------
 def derive := \v e ->
@@ -33,9 +38,79 @@ def derive := \v e ->
 
 def differ := \v e -> simplify (derive v e)
 
--- ----- 記号積分 (線形 + 単項式 + 初等関数) -----------------
+-- ----- 部分分数分解による有理関数の積分 -----------------------
+-- N(x)/D(x) (deg N < deg D) について、D が異なる整数根 r_1,...,r_n の
+-- 積に完全分解できるなら、A_i = N(r_i) / D'(r_i) を計算し
+-- (整数になる場合のみ) N/D = Σ A_i/(x - r_i) として
+-- ∫ N/D dx = Σ A_i * ln(x - r_i) を返す。
+-- 適用できない (仮分数・重根・非整数係数など) 場合は None。
+
+def containsInt := \x xs ->
+    if null xs then false
+    else if (head xs) == x then true
+    else containsInt x (tail xs)
+
+def hasDupInt := \xs ->
+    if null xs then false
+    else if containsInt (head xs) (tail xs) then true
+    else hasDupInt (tail xs)
+
+def buildLnTerm := \v pr ->
+    let r = fst pr in
+    let a = snd pr in
+    let base = if r == 0 then SVar v else SSub (SVar v) (SNum r) in
+    SMul (SNum a) (SLn base)
+
+def sumSymList := \xs ->
+    if null xs then SNum 0
+    else if null (tail xs) then head xs
+    else SAdd (head xs) (sumSymList (tail xs))
+
+-- Option を剥がすヘルパ (integ 内で match をネストさせず if 式のように使うため)
+def optionOr := \defaultVal opt ->
+    match opt with
+    | Some x -> x
+    | None -> defaultVal
+
+-- 各根 r_i について A_i = N(r_i)/D'(r_i) を計算 (非整数なら None)
+def partialFractionCoeffs := \nPoly dDeriv roots ->
+    if null roots then Some nil
+    else
+        let r = head roots in
+        let nr = evalPoly nPoly r in
+        let dr = evalPoly dDeriv r in
+        if dr == 0 then None
+        else if (nr mod dr) != 0 then None
+        else
+            match partialFractionCoeffs nPoly dDeriv (tail roots) with
+            | None -> None
+            | Some rest -> Some (cons (r, nr / dr) rest)
+
+def tryPartialFractionInteg := \v u w ->
+    let nPoly = toPoly u in
+    let dPoly = toPoly w in
+    let dn = polyDeg nPoly in
+    let dd = polyDeg dPoly in
+    if dd <= 0 then None                    -- 定数分母は他ケースで対応
+    else if dn >= dd then None               -- 仮分数 (帯分数化が必要、未対応)
+    else
+        let fac = factor dPoly in
+        let roots = fst fac in
+        let remainder = snd fac in
+        if (polyDeg remainder) > 0 then None          -- 1 次因子に完全分解できない
+        else if (length roots) != dd then None        -- 因子数が次数に届かない (重根等)
+        else if hasDupInt roots then None             -- 重根 (multiplicity>1) は未対応
+        else
+            match partialFractionCoeffs nPoly (polyDeriv dPoly) roots with
+            | None -> None
+            | Some coeffs -> Some (sumSymList (map (buildLnTerm v) coeffs))
+
+-- ----- 記号積分 (線形 + 単項式 + 初等関数 + 部分分数分解) -----------------
 def integ := \v e ->
     match e with
+    | SDiv u w ->
+        optionOr (SMul (SDiv u w) (SVar v)) (tryPartialFractionInteg v u w)
+        -- ↑ 部分分数分解が適用できない場合のフォールバック (誤りうる、旧来のまま)
     | SNum c -> SMul (SNum c) (SVar v)
     | SVar w ->
         if w == v

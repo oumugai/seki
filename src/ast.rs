@@ -232,6 +232,28 @@ pub enum Proof {
     /// witness for forall / exists / membership: e.g. for `forall x in S, P`
     /// supply `\x -> proof_of_P` and we apply it to each element of S.
     Term(Expr),
+    /// `:= by obtain c from lemma [with x := e1, y := e2, ...] then <rest>`
+    /// — existential elimination. `lemma` names an axiom or theorem whose
+    /// proposition, after substituting each `with`-bound name, has the
+    /// shape `<premises>* => exists w in D, P(w)` (or just `exists w in D,
+    /// P(w)` with no premises). Any premises are discharged automatically
+    /// (via `by algebra`); the witness's defining property `P(c)` (with the
+    /// bound variable renamed to `c`) is then available as a hypothesis for
+    /// the rest of the tactic sequence. `c` is a purely symbolic name here —
+    /// it names *the value logic says exists*, not a value this proof can
+    /// compute or evaluate. Transformer-only: must be followed by a closer.
+    ///
+    /// This is the standard existential-elimination rule, and it's what
+    /// lets an `axiom` that merely asserts `exists x, P(x)` (declared true
+    /// without proof — e.g. a classical fact like the intermediate value
+    /// theorem, whose constructive proof would require real-number
+    /// completeness this prover doesn't formalize) actually get *used* in
+    /// downstream proofs, rather than sitting inert.
+    Obtain {
+        intro: String,
+        lemma: String,
+        substs: Vec<(String, Expr)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -346,6 +368,18 @@ impl fmt::Display for Proof {
                 write!(f, "by {}", parts.join(" then "))
             }
             Proof::Term(e) => write!(f, "{}", e),
+            Proof::Obtain { intro, lemma, substs } => {
+                write!(f, "by obtain {} from {}", intro, lemma)?;
+                if !substs.is_empty() {
+                    write!(f, " with ")?;
+                    let parts: Vec<String> = substs
+                        .iter()
+                        .map(|(n, e)| format!("{} := {}", n, e))
+                        .collect();
+                    write!(f, "{}", parts.join(", "))?;
+                }
+                Ok(())
+            }
         }
     }
 }

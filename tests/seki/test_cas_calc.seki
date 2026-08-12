@@ -3,6 +3,7 @@
 -- ===========================================================
 
 import "../../lib/cas/calc.seki"
+import "../../lib/cas/rational.seki"
 
 def x_ := SVar "x"
 def n0 := SNum 0
@@ -61,3 +62,37 @@ def d_combined := differ "x" combined
 
 theorem linearity_at_0 : evalAt "x" 0 d_combined == Some 5  := by eval
 theorem linearity_at_1 : evalAt "x" 1 d_combined == Some 36 := by eval
+
+-- ===========================================================
+-- 部分分数分解による有理関数の積分: ∫ 1/((x-1)(x-2)) dx
+--   = -ln(x-1) + ln(x-2)
+-- ===========================================================
+
+def pf_denom := SAdd (SSub (SPow x_ 2) (SMul (SNum 3) x_)) (SNum 2)  -- x^2 - 3x + 2
+def pf_f := SDiv (SNum 1) pf_denom
+def pf_result := integ "x" pf_f
+
+def pf_expected :=
+    SAdd (SMul (SNum (0 - 1)) (SLn (SSub x_ (SNum 1))))
+         (SMul (SNum 1) (SLn (SSub x_ (SNum 2))))
+
+theorem pf_integ_exact_form : pf_result == pf_expected := by eval
+
+-- 独立検証: -1/(x-1) + 1/(x-2) は本当に 1/((x-1)(x-2)) と等しいか
+-- (cas/rational.seki の RatFn 演算で、integ とは独立に確認する)
+def pf_denom_poly := cons 2 (cons (0 - 3) (cons 1 nil))          -- x^2-3x+2
+def pf_orig_rat := mkRatFn (cons 1 nil) pf_denom_poly
+def pf_lin1 := cons (0 - 1) (cons 1 nil)                          -- x - 1
+def pf_lin2 := cons (0 - 2) (cons 1 nil)                          -- x - 2
+def pf_term1 := mkRatFn (cons (0 - 1) nil) pf_lin1
+def pf_term2 := mkRatFn (cons 1 nil) pf_lin2
+def pf_sum_rat := rfAdd pf_term1 pf_term2
+
+theorem pf_decomposition_is_correct : rfEq pf_orig_rat pf_sum_rat == true := by eval
+
+-- 分母が (実数根を持たない) 既約 2 次式の場合は未対応: 旧来のフォールバックのまま
+-- (誤った結果になりうることは承知の上で、少なくとも「壊れていない」= 既存動作を
+-- 保っていることを確認する)
+def pf_f_irred := SDiv (SNum 1) (SAdd (SPow x_ 2) (SNum 1))
+theorem pf_fallback_unchanged
+  : integ "x" pf_f_irred == SMul pf_f_irred x_ := by eval

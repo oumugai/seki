@@ -16,7 +16,15 @@
 --   def mpDivStep        — 単項式除算 (1 段)
 --   def mpRem            — 多変数除算: F を G_list で割った剰余
 --   def spol             — S-多項式
---   def buchberger       — Buchberger アルゴリズム (有限版・小さい入力向け)
+--   def mpListAppend     — リスト結合 (append 相当、標準に無いので自前定義)
+--   def buchberger gs    — Buchberger アルゴリズム本体 (不動点反復)。
+--                          gs (MPoly のリスト) が生成するイデアルの
+--                          Gröbner 基底 (整数係数、非極小・非被約) を返す。
+--                          係数は整数のまま (mpDivStep が整除可能な場合のみ
+--                          進む) なので、有理数係数が必要になる一般の入力
+--                          では簡約が止まってしまう場合がある — 小規模な
+--                          具体例 (tests/seki/test_cas_multipoly.seki 参照)
+--                          での使用を想定。
 -- ===========================================================
 
 -- ----- ヘルパ -----
@@ -148,23 +156,6 @@ def mpDivStep := \f g ->
 
 -- ----- 多変数除算: F を G_list で reduce、剰余を返す -----
 -- いずれかの G_i の LT で割り切れる限り進める。
-def mpRemRec := \f gs ->
-    if null f then nil
-    else
-        -- gs を走査して進める G を見つける
-        let tryRedRec = \g_rest ->
-            if null g_rest then None
-            else match mpDivStep f (head g_rest) with
-                 | Some pr -> Some pr
-                 | None -> tryRedRec (tail g_rest) in
-        match tryRedRec gs with
-        | Some pr -> mpRemRec (snd pr) gs
-        | None ->
-            -- 主項を確定して残部を再帰
-            if null (tail f) then f
-            else cons (head f) (mpRemRec (tail f) gs)
-
--- ★ Bug: tryRedRec は局所再帰なので top-level に
 def tryRed := \f gs ->
     if null gs then None
     else match mpDivStep f (head gs) with
@@ -202,25 +193,41 @@ def spol := \f g ->
     let mono_g = (lcf, e_g) in
     mpSub (mpMulMono mono_f f) (mpMulMono mono_g g)
 
--- ----- Buchberger 簡易版 -----
--- 入力 G: 多項式リスト。新しい S-多項式の剰余で 0 でないものを G に追加。
--- 固定回数試行 (完全アルゴリズムでは fixed point まで)。
-def buchPass := \gs newGs ->
-    -- gs の各ペアについて S-多項式を mpRem (gs + newGs) してみる
-    -- ペア列挙
-    if null gs then newGs
+-- ----- リスト結合 (append 相当。標準ライブラリに無いので自前定義) -----
+def mpListAppend := \xs ys ->
+    if null xs then ys
+    else cons (head xs) (mpListAppend (tail xs) ys)
+
+-- ----- Buchberger アルゴリズム (不動点反復) -----
+-- gs の要素 f と、f より後ろにある要素 others の全ペアについて S-多項式を
+-- 計算し、現在の生成元集合全体 (gs) で簡約 (mpRem) した剰余を集める。
+-- 剰余が 0 なら「このペアはもう Gröbner 条件を満たしている」ので捨てる。
+def buchNewFromPairs := \f others gs ->
+    if null others then nil
+    else
+        let s = spol f (head others) in
+        let r = mpRem s gs in
+        if null r
+        then buchNewFromPairs f (tail others) gs
+        else cons r (buchNewFromPairs f (tail others) gs)
+
+-- gs の全ペア (i < j) を走査して、非ゼロ剰余をすべて集めた 1 パス分。
+def buchPassNew := \gs ->
+    if null gs then nil
     else
         let f = head gs in
-        let restAfterF = tail gs in
-        -- f vs それ以外
-        let pairProcess = \others ->
-            if null others then newGs
-            else
-                let s = spol f (head others) in
-                let r = mpRem s (append gs newGs) in
-                if null r then pairProcess (tail others)
-                else pairProcess (tail others) in   -- 簡易: 新規を保持しない
-        buchPass restAfterF newGs
+        let rest = tail gs in
+        mpListAppend (buchNewFromPairs f rest gs) (buchPassNew rest)
+
+-- 不動点まで反復: 1 パスで新規生成元が 1 つも出なくなったら終了。
+-- 停止性: 新規に追加される生成元は既存生成元のどの主項でも割り切れない
+-- (mpRem 後も非ゼロ) ので、その主項イデアルは追加のたびに真に大きくなる。
+-- n 変数の単項式イデアルの昇鎖は有限で止まる (Dickson の補題の帰結) ので、
+-- このループは有限回で不動点に到達する。
+def buchberger := \gs ->
+    let news = buchPassNew gs in
+    if null news then gs
+    else buchberger (mpListAppend gs news)
 
 -- ----- 教育用デモ: 2 変数で動作確認 -----
 -- 変数 x = mvar 0 2, y = mvar 1 2

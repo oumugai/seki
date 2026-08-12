@@ -85,3 +85,85 @@ def psi := \x -> if x == 0 then false else true
 
 theorem psi_is_homo : isHomomorphismGG Z2_grp Bool_grp psi := by eval
 theorem psi_is_iso  : isIsomorphismGG Z2_grp Bool_grp psi := by eval
+
+-- ===========================================================
+-- 正規部分群 (isNormalSubgroupOf)
+-- ===========================================================
+-- Z/6Z は可換群なので任意の部分群は正規部分群。{0,3} (位数2) で確認。
+def H03 := {0, 3}
+theorem h03_is_subgroup : isSubgroupOf Z6_grp H03 := by eval
+theorem h03_is_normal   : isNormalSubgroupOf Z6_grp H03 := by eval
+
+-- 第一同型定理 (具体例): φ : Z/6 → Z/3, φ(x) = x mod 3
+-- 核 (= {0,3}) は正規部分群、像 (= Z/3 全体) は部分群であることを確認
+theorem kernel_is_normal_subgroup : isNormalSubgroupOf Z6_grp K := by eval
+theorem image_is_subgroup_of_z3   : isSubgroupOf Z3_grp I_phi := by eval
+
+-- ===========================================================
+-- 群の位数と Lagrange の定理 (groupOrderOf)
+-- ===========================================================
+-- card は列挙集合 (Enum) にのみ使えるので、Zn n (内包表記) ではなく
+-- 明示的に列挙した台集合を持つ群インスタンスを用意する。
+def Z12carrier := {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
+def Z12_grp_enum := MkGroup Z12carrier (addMod 12) 0 (negMod 12)
+
+-- Z/4Z 相当 (位数4): {0,3,6,9} (3 の倍数)
+def H4 := {0, 3, 6, 9}
+-- Z/6Z 相当 (位数6): {0,2,4,6,8,10} (偶数)
+def H6 := {0, 2, 4, 6, 8, 10}
+-- 位数3の部分群: {0,4,8}
+def H3 := {0, 4, 8}
+
+theorem h4_is_subgroup : isSubgroupOf Z12_grp_enum H4 := by eval
+theorem h6_is_subgroup : isSubgroupOf Z12_grp_enum H6 := by eval
+theorem h3_is_subgroup : isSubgroupOf Z12_grp_enum H3 := by eval
+
+theorem z12_order_is_12 : groupOrderOf Z12_grp_enum == 12 := by eval
+theorem h4_order_is_4   : card H4 == 4 := by eval
+theorem h6_order_is_6   : card H6 == 6 := by eval
+theorem h3_order_is_3   : card H3 == 3 := by eval
+
+-- Lagrange の定理: |H| は |G| を割り切る
+theorem lagrange_h4 : (groupOrderOf Z12_grp_enum) mod (card H4) == 0 := by eval
+theorem lagrange_h6 : (groupOrderOf Z12_grp_enum) mod (card H6) == 0 := by eval
+theorem lagrange_h3 : (groupOrderOf Z12_grp_enum) mod (card H3) == 0 := by eval
+
+-- ===========================================================
+-- 剰余類と商群 (cosetOf / quotientGroup): (Z/6Z) / {0,3}
+-- ===========================================================
+-- 剰余類は Comp (フィルタ) 集合になるため、リテラル集合との `==` 比較は
+-- Enum/Comp の型不一致で常に false になる (由来: set_eq は Enum どうし
+-- のみを要素比較する) ので、代わりに要素ごとの所属関係で確認する。
+theorem coset0_has_0  : 0 in (cosetOf Z6_grp H03 0) := by eval
+theorem coset0_has_3  : 3 in (cosetOf Z6_grp H03 0) := by eval
+theorem coset0_not_1  : (1 in (cosetOf Z6_grp H03 0)) == false := by eval
+theorem coset1_has_1  : 1 in (cosetOf Z6_grp H03 1) := by eval
+theorem coset1_has_4  : 4 in (cosetOf Z6_grp H03 1) := by eval
+
+-- 商群の台集合 = 各剰余類の代表元 {0, 1, 2}
+theorem qcarrier_has_0 : 0 in (quotientCarrier Z6_grp H03) := by eval
+theorem qcarrier_has_1 : 1 in (quotientCarrier Z6_grp H03) := by eval
+theorem qcarrier_has_2 : 2 in (quotientCarrier Z6_grp H03) := by eval
+theorem qcarrier_not_3 : (3 in (quotientCarrier Z6_grp H03)) == false := by eval
+
+-- 商群 (Z/6Z)/{0,3} ≅ Z/3Z がアーベル群になっていること
+def Q6mod3 := quotientGroup Z6_grp H03
+theorem quotient_is_abelian_group : isAbelianGroupOn Q6mod3 := by eval
+theorem quotient_e_is_0           : groupE Q6mod3 == 0 := by eval
+theorem quotient_op_example       : quotientOp Z6_grp H03 1 2 == 0 := by eval
+
+-- ===========================================================
+-- 可換環の単元群 (unitsOf): Z/7Z (p=7 は素数) → 単元群 = 非零元全体
+-- ===========================================================
+def U7 := unitsOf (fieldToRing F7_field)
+theorem u7_has_1  : 1 in U7 := by eval
+theorem u7_has_2  : 2 in U7 := by eval
+theorem u7_has_6  : 6 in U7 := by eval
+theorem u7_not_0  : (0 in U7) == false := by eval
+theorem u7_equals_nonzero :
+    forall x in {0, 1, 2, 3, 4, 5, 6}, (x in U7) == (x != 0) := by eval
+
+-- ===========================================================
+-- 体の標数 (charOf): Z/7Z (p=7 は素数) の標数は 7
+-- ===========================================================
+theorem f7_char_is_7 : charOf F7_field == 7 := by eval

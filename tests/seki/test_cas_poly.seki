@@ -51,6 +51,39 @@ theorem factor_cubic_sum : sumOfList roots2 == 6 := by eval
 theorem factor_cubic_prd : productOfList roots2 == 6 := by eval
 
 -- ===========================================================
+-- factorFull: Kronecker 法による 2 次因子探索の拡張
+-- (有理根定理だけでは見つからない、既約な 2 次因子を持つ場合)
+-- ===========================================================
+
+-- x^4 + 3x^2 + 2 = (x^2+1)(x^2+2) — 有理根を持たないが 2 次因子に分解できる
+def p_quartic_factorable := cons 2 (cons 0 (cons 3 (cons 0 (cons 1 nil))))
+def full1 := factorFull p_quartic_factorable
+def full1_roots := match full1 with | (r, q, rem) -> r
+def full1_quads := match full1 with | (r, q, rem) -> q
+def full1_rem   := match full1 with | (r, q, rem) -> rem
+
+-- 有理根は無い、2 次因子が 2 つ見つかる、残部は定数 (次数 0 未満扱い = nil/[1])
+theorem full1_no_linear_roots : null full1_roots == true := by eval
+theorem full1_found_two_quads : length full1_quads == 2 := by eval
+theorem full1_rem_is_constant : polyDeg full1_rem <= 0 := by eval
+
+-- 再構成すると元の多項式に一致する (根拠: factorFull は健全な分解)
+def full1_check := stripTail (polySub (reconstructFactorFull full1) p_quartic_factorable)
+theorem full1_reconstruct_ok : null full1_check == true := by eval
+
+-- x^4 + 1 — 有理根も整数係数の 2 次因子も持たない (Q 上既約な円分多項式)。
+-- Kronecker 法が「見つからない」ことを正しく判定できるかの確認。
+def p_quartic_irreducible := cons 1 (cons 0 (cons 0 (cons 0 (cons 1 nil))))
+def full2 := factorFull p_quartic_irreducible
+def full2_roots := match full2 with | (r, q, rem) -> r
+def full2_quads := match full2 with | (r, q, rem) -> q
+def full2_rem   := match full2 with | (r, q, rem) -> rem
+
+theorem full2_no_linear_roots : null full2_roots == true := by eval
+theorem full2_no_quad_factors : null full2_quads == true := by eval
+theorem full2_rem_is_original : stripTail full2_rem == stripTail p_quartic_irreducible := by eval
+
+-- ===========================================================
 -- 微積分学の基本定理 (FTC): polyIntegrate の逆演算が polyDeriv
 -- ===========================================================
 

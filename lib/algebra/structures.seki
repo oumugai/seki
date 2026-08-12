@@ -147,6 +147,16 @@ def isSubgroupOf := \g h_carrier ->
     (forall a in h_carrier, forall b in h_carrier, (op a b) in h_carrier) and  -- 閉じている
     (forall a in h_carrier, (inv a) in h_carrier)  -- 逆元を含む
 
+-- ----- 正規部分群 (Normal Subgroup) -----
+-- H ◁ G ⇔ H が部分群であり、かつ G の全ての元 a による共役 a·H·a⁻¹ が
+-- H に含まれる (∀a∈G, ∀k∈H, a·k·a⁻¹ ∈ H)。
+def isNormalSubgroupOf := \g h_carrier ->
+    let op = groupOp g in
+    let inv = groupInv g in
+    (isSubgroupOf g h_carrier) and
+    (forall a in (groupCarrier g), forall k in h_carrier,
+        (op a (op k (inv a))) in h_carrier)
+
 -- ----- 像 (Image): φ(G) のうち H に属する元の集合 -----
 -- ※ 集合論的には image φ G = {φ(a) | a ∈ carrier(G)}
 -- seki では comprehension で表現するが、入力 carrier が有限のときのみ動く。
@@ -176,3 +186,76 @@ def isIsomorphismGG := \g h phi ->
     (imageInOf g h phi) and
     (isInjectiveOn g phi) and
     (isSurjectiveOnto g (groupCarrier h) phi)
+
+-- ===========================================================
+-- §5. 群の位数と Lagrange の定理
+-- ===========================================================
+-- ※ `length` は List 専用 (cons/nil の再帰的分解) なので Set には使えない。
+--   台集合の濃度には組込 `card` を使うが、`card` は列挙集合 (Enum, 例:
+--   `{0,1,2}`) のみ対応で、`{x in Int | ...}` のような内包表記 (Comp) には
+--   使えない (「card: only enumerated sets have a known cardinality」)。
+--   そのため Lagrange の具体例では台集合を `Zn n` (内包表記) ではなく
+--   明示的な列挙集合として構成したインスタンスを使う。
+def groupOrderOf := \g -> card (groupCarrier g)
+
+-- ===========================================================
+-- §6. 剰余類 (Coset) と商群 (Quotient Group)
+-- ===========================================================
+
+-- ----- 左剰余類: aH = {a·k | k ∈ H} -----
+-- seki の内包表記は `{x in S | P}` のフィルタ型のみサポートし、
+-- `{f x | x in S}` のような写像型は構文上使えない。そこで外側の台集合
+-- (G 全体) 上でフィルタし、"∃k∈H, y = a·k" を述語として書く。
+def cosetOf := \g h_carrier a ->
+    let op = groupOp g in
+    {y in (groupCarrier g) | exists k in h_carrier, y == op a k}
+
+-- 剰余類 aH の中で「最小の代表元」であること (G の台集合が Int のときのみ
+-- 意味を持つ — Zn n 系の具体例はすべてこれに該当する)
+def isCosetMin := \g h_carrier a ->
+    forall b in (cosetOf g h_carrier a), a <= b
+
+-- x の属する剰余類の代表元 (剰余類内を 0 から昇順に走査して最初に見つかる
+-- 元 = 最小元) を求める。x 自身は必ず自分の剰余類の元なので、
+-- candidate が x に達するまでには必ず見つかり停止する。
+def findRepFrom := \g h_carrier x candidate ->
+    if candidate in (cosetOf g h_carrier x) then candidate
+    else findRepFrom g h_carrier x (candidate + 1)
+
+def canonicalRepOf := \g h_carrier x -> findRepFrom g h_carrier x 0
+
+-- ----- 商群 G/H の構成 (H が正規部分群であることを前提とする) -----
+-- 台集合: 各剰余類の最小元 (代表元) の集合。演算: 代表元同士を G の演算で
+-- 結合してから、その結果が属する剰余類の代表元に「正規化」する。
+def quotientCarrier := \g h_carrier ->
+    {a in (groupCarrier g) | isCosetMin g h_carrier a}
+
+def quotientOp := \g h_carrier a b ->
+    canonicalRepOf g h_carrier (groupOp g a b)
+
+def quotientGroup := \g h_carrier ->
+    MkGroup (quotientCarrier g h_carrier) (quotientOp g h_carrier)
+            (canonicalRepOf g h_carrier (groupE g))
+            (\a -> canonicalRepOf g h_carrier (groupInv g a))
+
+-- ===========================================================
+-- §7. 可換環の単元群 (Group of Units)
+-- ===========================================================
+-- U(R) = {x ∈ R | ∃y ∈ R, x·y = 1} — 乗法逆元を持つ元の集合。
+-- (有限 carrier を前提とする内包表記)
+def unitsOf := \r ->
+    let c = ringCarrier r in
+    let mul = ringMul r in
+    let one = ringOne r in
+    {x in c | exists y in c, mul x y == one}
+
+-- ===========================================================
+-- §8. 体の標数 (Characteristic)
+-- ===========================================================
+-- 1 を繰り返し加算していって初めて 0 に一致する回数。有限体なら必ず
+-- 何回か加算すれば 0 に戻る (carrier が有限なので鳩の巣原理で必ず停止)。
+def charStep := \f k acc ->
+    if acc == fieldZero f then k
+    else charStep f (k + 1) (fieldAdd f acc (fieldOne f))
+
+def charOf := \f -> charStep f 1 (fieldOne f)

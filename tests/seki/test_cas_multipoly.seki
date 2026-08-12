@@ -75,3 +75,49 @@ theorem mp_div_rem_zero : null mp_rem_test == true := by eval
 -- (簡易整数係数版なので符号と係数調整の結果が 0)
 def mp_spol_xy := spol mp_x mp_y
 theorem mp_spol_xy_zero : null mp_spol_xy == true := by eval
+
+-- ===========================================================
+-- Buchberger アルゴリズム本体: <x²+y²-1, x-y> の Gröbner 基底
+-- (Cox-Little-O'Shea の定番例。lex 順、x > y)
+--
+-- 期待される結果 (整数係数版): {x-y, 2y²-1} が本質的な基底、加えて
+-- 非極小のまま元の x²+y²-1 も残り得る。厳密な形は実装依存なので、
+-- 「Gröbner 基底であること」自体を検証可能な性質で確認する:
+--   1. 元の生成元 g1, g2 は gb で割ると 0 になる (ideal 保存)
+--   2. 手計算で導出できる 2y²-1 も gb で割ると 0 になる (完全性の傍証)
+--   3. 定数 1 は gb で割っても 0 にならない (イデアルが全体でない)
+--   4. gb の全ペアの S-多項式が gb で割って 0 になる
+--      (Buchberger 判定条件そのもの — これが Gröbner 基底の定義)
+-- ===========================================================
+
+def gb_g1 := mpAdd (mpMul mp_x mp_x) (mpSub (mpMul mp_y mp_y) (mp_const 1))
+def gb_g2 := mpSub mp_x mp_y
+def gb_result := buchberger (cons gb_g1 (cons gb_g2 nil))
+
+theorem buchberger_len3 : length gb_result == 3 := by eval
+
+theorem buchberger_g1_in_ideal : null (mpRem gb_g1 gb_result) == true := by eval
+theorem buchberger_g2_in_ideal : null (mpRem gb_g2 gb_result) == true := by eval
+
+-- 手計算で分かっている 2y²-1 も gb で剰余 0 になる
+def gb_expected_extra := mpSub (mpScale 2 (mpMul mp_y mp_y)) (mp_const 1)
+theorem buchberger_finds_2y2_minus_1
+  : null (mpRem gb_expected_extra gb_result) == true := by eval
+
+-- 定数 1 はイデアルに属さない (gb で割り切れず、剰余が非ゼロ)
+theorem buchberger_ideal_proper
+  : null (mpRem (mp_const 1) gb_result) == false := by eval
+
+-- Buchberger 判定条件: gb の全ペアの S-多項式が gb で 0 に簡約される
+def gbAllPairsZero := \f others gs ->
+    if null others then true
+    else if null (mpRem (spol f (head others)) gs) then gbAllPairsZero f (tail others) gs
+    else false
+
+def gbCriterion := \gs full ->
+    if null gs then true
+    else if gbAllPairsZero (head gs) (tail gs) full then gbCriterion (tail gs) full
+    else false
+
+theorem buchberger_is_groebner_basis
+  : gbCriterion gb_result gb_result == true := by eval

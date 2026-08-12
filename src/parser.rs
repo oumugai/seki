@@ -582,6 +582,33 @@ impl<'a> Parser<'a> {
                 let name = self.eat_ident("function name to unfold")?;
                 Ok(Proof::ByUnfold(name))
             }
+            "obtain" => {
+                let intro = self.eat_ident("obtained witness name")?;
+                let kw = self.eat_ident("expected 'from'")?;
+                if kw != "from" {
+                    return Err(SekiError::Parse(format!(
+                        "by obtain: expected 'from', got '{}'",
+                        kw
+                    )));
+                }
+                let lemma = self.eat_ident("lemma/axiom name to obtain from")?;
+                let mut substs = Vec::new();
+                if matches!(self.peek(), Tok::KwWith) {
+                    self.bump();
+                    loop {
+                        let name = self.eat_ident("substitution variable name")?;
+                        self.expect(&Tok::Assign, "':=' in obtain substitution")?;
+                        let expr = self.parse_expr()?;
+                        substs.push((name, expr));
+                        if matches!(self.peek(), Tok::Comma) {
+                            self.bump();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                Ok(Proof::Obtain { intro, lemma, substs })
+            }
             "simp" => {
                 let lemmas = if matches!(self.peek(), Tok::LBracket) {
                     self.bump();
