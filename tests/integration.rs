@@ -1535,6 +1535,11 @@ fn seki_lib_test_analysis_ivt() {
 }
 
 #[test]
+fn seki_lib_test_analysis_elementary() {
+    run_seki_test_file("tests/seki/test_analysis_elementary.seki", 11);
+}
+
+#[test]
 fn seki_lib_test_algebra_complex() {
     run_seki_test_file("tests/seki/test_algebra_complex.seki", 21);
 }

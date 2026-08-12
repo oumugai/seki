@@ -1,0 +1,51 @@
+-- ===========================================================
+-- tests/seki/test_analysis_elementary.seki — lib/analysis/elementary.seki の検証
+-- ===========================================================
+
+import "../../lib/analysis/elementary.seki"
+
+-- ===========================================================
+-- 階層1: 具体的な数値点での健全性チェック (seki 自身の sin/cos/exp/ln
+-- 実装がこの公理と矛盾しないことの確認 — 公理そのものの証明ではない)
+-- ===========================================================
+
+def x1 := 1.2345
+def x2 := 0.0 - 0.777
+def x3 := 2.5
+
+theorem check_pythagorean_x1
+  : absR (((sin x1) * (sin x1) + (cos x1) * (cos x1)) - 1.0) < 0.0000001 := by eval
+theorem check_pythagorean_x2
+  : absR (((sin x2) * (sin x2) + (cos x2) * (cos x2)) - 1.0) < 0.0000001 := by eval
+
+theorem check_sin_odd  : absR ((sin (0.0 - x1)) - (0.0 - (sin x1))) < 0.0000001 := by eval
+theorem check_cos_even : absR ((cos (0.0 - x1)) - (cos x1)) < 0.0000001 := by eval
+
+theorem check_exp_zero : absR ((exp 0.0) - 1.0) < 0.0000001 := by eval
+theorem check_exp_add
+  : absR ((exp (x1 + x3)) - ((exp x1) * (exp x3))) < 0.000001 := by eval
+theorem check_ln_exp : absR ((ln (exp x1)) - x1) < 0.0000001 := by eval
+
+-- ===========================================================
+-- 階層2: 公理を by simp の書き換え規則として実際に使う
+-- ===========================================================
+
+-- ピタゴラスの恒等式を使って、任意の x について sin²x+cos²x+5=6 を証明
+theorem pythagorean_usage
+  : forall x in Real, (((sin x) * (sin x)) + ((cos x) * (cos x))) + 5.0 == 6.0
+  := by simp [sin_sq_plus_cos_sq] then algebra
+
+-- 奇関数性を使って sin(-x) + sin(x) == 0 を証明
+theorem sin_odd_usage
+  : forall x in Real, (sin (0.0 - x)) + (sin x) == 0.0
+  := by simp [sin_neg] then algebra
+
+-- 指数法則を使って exp(x) * exp(0) == exp(x) を証明
+theorem exp_zero_usage
+  : forall x in Real, (exp x) * (exp 0.0) == exp x
+  := by simp [exp_zero] then algebra
+
+-- ln(exp(x)) を使って ln(exp(x)) + 1.0 == x + 1.0 を証明
+theorem ln_exp_usage
+  : forall x in Real, (ln (exp x)) + 1.0 == x + 1.0
+  := by simp [ln_exp] then algebra

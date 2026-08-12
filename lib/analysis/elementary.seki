@@ -1,0 +1,40 @@
+-- ===========================================================
+-- lib/analysis/elementary.seki — 初等関数 (sin/cos/exp/ln) の代数的性質
+--
+-- sin/cos/exp/ln/tan は Rust の f64 組込み関数として実装されており、
+-- `by algebra` の `expr_to_poly` はこれらの呼び出しを常に不透明アトムとして
+-- 扱う (超越関数の解析的性質は一切知らない) — これが「初等関数について
+-- 代数的推論ができない」という制約の原因だった。
+--
+-- 本ファイルは、教科書に載っている基本恒等式を `axiom` として宣言する
+-- ことでこの制約に対処する。証明はできない (三角関数・指数関数の定義
+-- そのものから導出する仕組みが無い) が、`axiom` として宣言すれば
+-- `by simp [名前]` の書き換え規則として使え、初等関数を含む後続の
+-- 定理を厳密に (公理を根拠として) 証明できるようになる。各公理には、
+-- 具体的な数値点での `by eval` による健全性チェック (seki 自身の
+-- sin/cos/exp/ln 実装がこの等式と矛盾しないことの確認) を併記する。
+--
+-- 公開する名前 (すべて axiom):
+--   sin_sq_plus_cos_sq  — sin²x + cos²x = 1        (ピタゴラスの恒等式)
+--   sin_neg / cos_neg   — sin(-x) = -sin(x), cos(-x) = cos(x)  (奇関数/偶関数)
+--   exp_zero            — exp(0) = 1
+--   exp_add             — exp(x+y) = exp(x)*exp(y)  (指数法則)
+--   ln_exp              — ln(exp(x)) = x            (対数は指数の逆関数)
+-- ===========================================================
+
+def absR := \r -> if r < 0.0 then 0.0 - r else r
+
+-- ----- ピタゴラスの恒等式 -----
+axiom sin_sq_plus_cos_sq
+  : forall x in Real, ((sin x) * (sin x)) + ((cos x) * (cos x)) == 1.0
+
+-- ----- 奇関数性・偶関数性 -----
+axiom sin_neg : forall x in Real, sin (0.0 - x) == 0.0 - (sin x)
+axiom cos_neg : forall x in Real, cos (0.0 - x) == cos x
+
+-- ----- 指数法則 -----
+axiom exp_zero : exp 0.0 == 1.0
+axiom exp_add  : forall x in Real, forall y in Real, exp (x + y) == (exp x) * (exp y)
+
+-- ----- 対数は指数の逆関数 -----
+axiom ln_exp : forall x in Real, ln (exp x) == x
