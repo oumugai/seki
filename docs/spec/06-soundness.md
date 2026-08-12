@@ -18,6 +18,7 @@ production 採用や数学的厳密性を求める場合の参考にしてくだ
 | `by linarith` | `by algebra` の別名 (同じ多項式判定 + 仮定の加算結合 `hyps_sum_proves` + 多変数 Fourier-Motzkin 消去 `fm_is_unsat`)。**FM は「証明できる」方向のみ健全** — 有理数緩和が unsat なら整数/Nat 系も unsat だが、逆に有理数 SAT が整数解の存在を保証しないので反証には使わない。単変数専用の Fourier-Motzkin ソルバ (`linarithProve` builtin, Phase 5, property test 検証済) は別実装で、タクティクにはまだ接続されていない |
 | 列挙集合 / 直積 / ADT membership | 完全に構造的 |
 | 型クラス辞書化 | 静的に解決、実行時に明示渡し可能 |
+| `by obtain` (existential elimination, 2026-08 追加) | 標準的な存在除去則。前提の discharge に失敗すればエラー、witness は評価不能なシンボルとしてのみ使える (§6.5) |
 
 ## 6.2 何が健全でないか
 
@@ -171,7 +172,43 @@ every base-case boundary ...`)。`tests/integration.rs` の
 `strong_induction_rejects_insufficient_depth_instead_of_a_false_proof` に
 回帰テストとして固定済み。
 
-## 6.5 production 利用に当たって
+## 6.5 `axiom` と `exists` — 何が証明で何が宣言か
+
+`axiom name : P` は **P を証明なしに真だと宣言するだけ** — `Decl::Axiom`の
+処理は shape check のみ行い、実際に `globals.axioms[name] = Value::Bool(true)`
+という真偽タグを登録する (`main.rs`)。つまり `axiom` はいかなる意味でも
+「証明」ではなく、**ユーザが正しいと保証する古典的な仮定**にすぎない。
+
+以前 (2026-08 前半) はこれが実質「宣言しただけで使い道が無い」機構だった:
+`exists x, P(x)` を主張する axiom を宣言しても、そこから `P` を満たす `x`
+の性質を取り出して**他の定理の証明に使う**手段が無かった (`axiom` の識別子
+を式中で参照すると常に `Bool(true)` として評価されるだけで、witness を
+計算に持ち込む経路が存在しなかった)。
+
+2026-08 に `by obtain w from L [with x:=e,...] then <closer>` (§5.12) を
+追加し、これを解消した。これは標準的な**存在除去則** (existential
+elimination) の実装であり、以下の点で健全:
+
+- `L` (axiom または theorem) の前提を実際に discharge できない限り
+  witness を取り出せない (偽の前提から任意の結論を「証明」できる抜け道は
+  無い)。
+- 取り出した `w` は**計算可能な値を一切持たない** — 純粋にシンボリックな
+  名前であり、`by algebra` のような自由変数をシンボリックに扱うタクティク
+  でのみ使える。`by eval` で `w` を評価しようとすると unbound identifier
+  エラーになる (これは意図的 — `w` に対応する実際の値を計算する手段は
+  一般には存在しない、というのが `axiom` を使う理由そのものだから)。
+
+**残る限界**: `by obtain` は「axiom として宣言された exists 命題を使う」
+ことしかできない。**exists 命題を axiom によらず構成的に証明する**手段
+(実数の完備性から `sup S` のような witness を導出する、Skolem 関数を
+`def` レベルで計算可能にする、等) はまだ無い。したがって「中間値の定理
+そのもの」(`lib/analysis/ivt.seki` の `ivt_general`) は今も証明されて
+おらず、古典的な公理として認めた上で `by obtain` により**そこから先を
+厳密に導出する**という形でしか使えない。これは多くの形式化ライブラリが
+実数解析の基礎を扱う標準的なやり方 (完備性や選択公理などを公理として
+認め、そこから演繹する) でもある。
+
+## 6.6 production 利用に当たって
 
 「絶対に必要な性質」は **`by algebra` / `by induction` / `by linarith` /
 `refl` でのみ証明された theorem** に限定するのが honest。
@@ -185,7 +222,7 @@ sample-based でしか証明されていない命題は invariant 維持に頼�
    `Rat = Int × Pos` を使う
 4. FFI と `execShell` は信頼できる入力に対してのみ使う
 
-## 6.6 まとめ
+## 6.7 まとめ
 
 - **健全な部分** は明確に存在し、それだけで実用的な検証が可能
 - **健全でない部分** も明確で、線形整数 refinement は Phase 5 で改善開始

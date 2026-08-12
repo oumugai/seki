@@ -17,6 +17,28 @@ seki は **pre-1.0** です。これは次を意味します:
 
 ### Added
 
+- `by obtain w from L [with x := e, ...] then <closer>` — 存在除去則
+  (existential elimination) タクティクを追加。`axiom`/`theorem` の
+  `exists x, P(x)` を具体化し、witness の性質を後続タクティクの仮定として
+  使えるようにする。`axiom` が計算内容を一切持たない (真偽タグに退化する)
+  ため、宣言しただけで使い道が無かった問題への対処 (`docs/spec/06-soundness.md`
+  §6.5)。
+- `lib/analysis/ivt.seki`: 中間値の定理を `axiom ivt_general` として宣言し、
+  `by obtain` で具体的な関数・区間に特殊化して使う例を追加。二分法
+  (`bisect`) と、1ステップで区間幅が厳密に半分になるという一般定理
+  (`bisect_width_halves`、∀a,b∈Real で健全) も追加。
+- `lib/analysis/elementary.seki`: sin/cos/exp/ln の代数的性質 (ピタゴラスの
+  恒等式・奇関数性/偶関数性・指数法則・対数の逆関数性) を axiom として追加。
+  `by algebra` はこれらの関数呼び出しを常に不透明アトム扱いするため、
+  `by simp` で使える形での提供。
+- `lib/analysis/limit.seki`: `isContinuousAt`/`isLimit` の教科書通りの
+  ε-δ 定義を追加。線形関数の連続性は `by algebra` で完全に健全に証明。
+- `lib/cas/poly.seki`: `polyIntegrate` (不定積分) を追加し、微積分学の
+  基本定理を次数非依存の一般形で証明 (`ftc_poly_general`、`by induction`
+  の汎化サポートが必要だった)。
+- `lib/algebra/structures.seki`: `isNormalSubgroupOf`・`groupOrderOf`・
+  `cosetOf`/`quotientGroup`・`unitsOf`・`charOf` を追加。Lagrangeの定理・
+  商群構成・単元群・体の標数を具体的な有限インスタンスで証明。
 - `lib/cas/multipoly.seki`: `def buchberger` を実装 (これまではヘッダに
   記載だけあり未定義だった)。生成元の全ペアの S-多項式を計算し、既存生成元で
   簡約した非ゼロ剰余を新規生成元として追加する不動点反復。
@@ -93,6 +115,22 @@ seki は **pre-1.0** です。これは次を意味します:
 
 ### Fixed
 
+- **健全性バグ修正**: `by algebra` の仮定リストが、単一の仮定が定数として
+  自己矛盾する場合 (例: `unfold` で `if n==0` を具体化した結果生じる
+  `1==0`) を検出できず、到達不能な `if` 分岐を無駄に証明しようとして
+  失敗していた。`hyps_contradict` に定数多項式の符号チェックを追加。
+- **健全性バグ修正**: 整数の離散性 (`n > 0 (Nat) ⊢ n >= 1`) が実装されて
+  おらず、既存テスト `dec_nn` が実は `let`/タプルの不透明アトム化バグに
+  隠れてどの仮定にも基づかず「証明」されていたことが発覚。`expr_to_poly`
+  に非再帰 `let`・リテラルタプルの `fst`/`snd`・`intToReal` の透過処理を
+  追加したところ真の (未証明の) ゴールが露出したため、`integer_strengthen`
+  (`poly>0 (Nat/Int) ⊢ poly>=1`) を追加して正しい根拠で証明が通るようにした。
+- **健全性バグ修正**: `by algebra` の `if` 場合分けがゴール側にしか適用
+  されず、仮定側に埋め込まれた `if` (`absR` 等を unfold した結果生じる)
+  は場合分けされずに実質使い物にならなかった。ε-δ論法や絶対値を含む
+  不等式の証明に広く影響する基礎的な穴だった。
+- `by algebra` にリストの構造的等価性分解 (`cons h1 t1 == cons h2 t2` ⟺
+  `h1==h2 and t1==t2`) を追加。
 - **クラッシュ修正**: 非末尾再帰なユーザ定義関数を深く評価すると (例:
   `forall n in Nat` のサンプル検査が `SAMPLE_BOUND` = 200 まで再帰する場合)
   デフォルトのメインスレッドスタック (Linux で通常 8 MiB) を溢れて

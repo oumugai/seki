@@ -1,6 +1,6 @@
 # 5. 証明戦術
 
-seki は **11 種類のタクティク + コンビネータ** を持ちます。それぞれの
+seki は **12 種類のタクティク + コンビネータ** を持ちます。それぞれの
 意味論と健全性条件をまとめます。
 
 タクティクは `theorem` の `:=` の後に `by <tactic>` 形式で書きます。
@@ -44,6 +44,25 @@ theorem t : 42 == 42 := refl
   交差乗算で判定)、`mod` は `Polynomial::exact_div_by_var` (`(a*n) mod n == 0`
   — 分子の全項が除数の変数を factor に持てば健全、符号無関係)。可変除数の
   不等式や、剰余が非零の一般ケースは未対応。
+- **`if` の場合分け**: ゴール側だけでなく**仮定 (hypothesis) 側**に埋め込まれた
+  `if` も場合分けする (2026-08 修正 — `absR := \r -> if r<0.0 then -r else r`
+  を unfold した結果生じる仮定側の `if` が場合分けされず、`n>0 ⊢ n-1>=0`
+  のような ε-δ 論法の核心的な推論すら通らなかった)。
+- **整数の離散性**: `Nat`/`Int` では厳密不等式 `poly > 0` から `poly >= 1` を
+  仮定強化として自動導出する (2026-08 追加、`integer_strengthen`)。有理数緩和
+  だけに頼る Fourier-Motzkin では `n > 0 (Nat) ⊢ n - 1 >= 0` は証明できない
+  (実数では偽) ため、これが無いと通らない。
+- **`let` / タプル / `intToReal`**: 非再帰 `let x = v in body` はインライン展開、
+  リテラルタプルへの `fst`/`snd` はその場で射影、`intToReal e` は値保存の型変換
+  として `e` の多項式をそのまま使う (2026-08 追加) — 以前はいずれも不透明アトム
+  だった。
+- **リスト構造等価性**: `xs == ys` のゴールで両辺が (`cons`/`nil`/リテラル
+  タプル形いずれかで) 構造的に判別できる場合、`cons h1 t1 == cons h2 t2`
+  は `h1==h2 and t1==t2` に、`nil==nil` は自明に真に、`nil` vs `cons` は
+  矛盾 (証明失敗ではなく偽) に分解する (2026-08 追加)。
+- **超越関数**: `sin`/`cos`/`exp`/`ln` などの呼び出しは常に不透明アトム。
+  代数的性質 (ピタゴラスの恒等式など) が必要な場合は
+  `lib/analysis/elementary.seki` の `axiom` を `by simp` で使う。
 
 **健全性**: ✅ `Int` / `Rat` / **`Real`** 上の多項式について健全 (`Real` は
 `f64_to_rat` で厳密な有理数に変換して判定)。
@@ -67,6 +86,26 @@ recursive constructor の引数は IH (帰納仮説) として扱う。
 ```seki
 def listLen := \xs -> if null xs then 0 else 1 + listLen (tail xs)
 theorem nn : forall xs in (List Int), listLen xs >= 0 := by induction
+```
+
+**汎化された帰納法仮説 (List、2026-08 追加)**: 帰納変数の直後にさらに
+`forall`が続く形 (`forall p in List T, forall k in Nat, forall c in Real,
+LHS(p,k,c) == RHS(p,k,c)`、`==` ゴールのみ) は `verify_list_induction_generalized`
+にディスパッチされる。単純な構造帰納では IH が「同じ k, c での性質」しか
+使えないが、再帰呼び出しが `k+1` のような**異なる値**での性質を必要とする
+関数 (積分の分母インデックスのような、呼び出しごとに変わる補助引数を持つ
+もの) には対応できない。汎化版は IH を「`forall k c, LHS(k,c,ys)==RHS(k,c,ys)`」
+という `by simp` 同様の書き換え規則として保持し、ステップケースの (1段
+unfold した) ゴールにパターンマッチで適用する — 必要な `k+1` 等への
+インスタンス化を自動的に発見する。`Nat` 帰納法はまだこの汎化に非対応。
+
+```seki
+-- 積分の分母インデックス k・微分側の先頭ジャンク係数 c を汎化した例
+-- (lib/cas/poly.seki の ftc_poly_general と同じ形)
+theorem ftc_general
+  : forall p in List Real, forall m in Nat, forall c in Real,
+      polyDerivRec (cons c (polyIntegrateRec p (m + 1))) (m + 1) == p
+  := by induction
 ```
 
 ## 5.5 `by strong_induction` / `by strong_induction <N>`
@@ -222,18 +261,70 @@ theorem gauss : forall n in Nat, 2 * sum n == n * (n + 1) := by auto
     -- portfolio が unfold + induction の組合せを発見して閉じる
 ```
 
-## 5.12 証明項 (Curry-Howard)
+## 5.12 `by obtain w from L [with x := e, ...] then <closer>`
 
-タクティクなしで Curry-Howard 風に書ける場合:
-- `forall x in S, P(x)` は関数として、適用すると証明を返す
-- `exists x in S, P(x)` は witness + 証明のタプル
+**意味**: 存在命題の除去 (existential elimination)。`L` は既存の `axiom`
+または `theorem` の名前。`with` の束縛で `L` の命題中の名前 (`forall`
+束縛変数、および `forall` で束縛されていない自由変数 — 関数のように
+`Set` で自然に表現しにくいドメインを持つものはしばしば自由変数のまま
+残される) を具体的な式に置き換える。置換後、残る前提 (`=>` の左辺) を
+現在のゴール自身の前提と照合するか `by algebra` で discharge し、
+結論が `exists v in D, P(v)` であることを要求して、`v` を `w` という
+**シンボリックな名前**に置き換えた `P(w)` を後続の `<closer>` の
+仮定として使えるようにする (transformer)。
+
+`w` は計算可能な値を持たない — 「論理的にはこの性質を満たす値が存在する」
+ことしか表さないので、`by eval` 等で `w` を評価しようとするとエラーになる。
+`by algebra` のように自由変数をシンボリックに扱うタクティクでのみ使える。
+
+**用途**: `axiom` は宣言されただけでは真偽タグに退化し計算内容
+(witness 抽出手続き) を一切持たない (`06-soundness.md` 参照)。
+`by obtain` はこれに対する対処で、たとえば中間値の定理のような
+「構成的に証明できないが古典的に真だと認める」事実を `axiom` として
+宣言した上で、**その先の定理を厳密に導出する**ことを可能にする。
+
+**健全性**: ✅ 標準的な自然演繹の存在除去則そのもの — `exists x, P(x)` と
+「任意の `x` が `P(x)` を満たすなら `Q`」から `Q` を導いてよい、という
+規則を、`w` という具体的だが不透明な名前を使って実現している。前提の
+discharge に失敗すれば (= `L` を正当に呼び出せる根拠が無ければ) proof
+error になるので、偽の前提から任意の結論を「証明」できてしまうことはない。
 
 ```seki
-theorem t : forall x in Nat, x == x := \x -> refl
-theorem e : exists x in Nat, x > 5 := (6, refl)  -- 略式
+-- 中間値の定理を axiom として宣言 (f, a, b は自由変数のまま)
+axiom ivt_general
+  : (f a) * (f b) <= 0.0
+    => (exists c in Real, (a <= c) and (c <= b) and ((f c) == 0.0))
+
+def f_cubic := \x -> x * x * x - x - 2.0
+
+-- f_cubic(1)*f_cubic(2) <= 0 なので [1,2] に根がある。
+-- その根 w について w³ = w + 2 が成り立つことを厳密に導出する。
+theorem cubic_root_relation
+  : (f_cubic 1.0) * (f_cubic 2.0) <= 0.0 => (w * w * w) == (w + 2.0)
+  := by obtain w from ivt_general with f := f_cubic, a := 1.0, b := 2.0
+     then unfold f_cubic then algebra
 ```
 
-## 5.13 タクティク合成 (`then`)
+## 5.13 証明項 (Curry-Howard)
+
+タクティクなしで Curry-Howard 風に書ける場合:
+- `forall x in S, P(x)` は関数 `\x -> ...` として与える。適用結果は捨てられ、
+  `P(x)` を `enumerate_set` でサンプルした各 `x` について直接 eval して
+  判定する — つまり `\x -> refl` のような「証明」を関数の中身に書く仕組みは
+  無く、関数はほぼ何でもよい (型が合ってさえいれば)。無限ドメイン (Real/
+  Nat/Int) では `06-soundness.md` の `by eval` と同じサンプル検査に
+  過ぎないので、無限ドメインの等式・不等式は素直に `by algebra` を使う方が
+  健全性が強い。
+- `exists x in S, P(x)` は witness 式そのもの (タプルではない)。
+
+```seki
+-- 動くが、無限ドメインでは by eval 同様サンプル検査でしかない (非推奨) —
+-- 実際にはこの命題は by algebra で完全に健全に証明できる
+theorem t : forall x in Nat, x == x := \x -> x
+theorem e : exists x in Nat, x > 5 := 6
+```
+
+## 5.14 タクティク合成 (`then`)
 
 ```
 proof := tac1 then tac2 then tac3
@@ -247,23 +338,24 @@ theorem mul_add : forall (x y z) in Int, x * (y + z) == x * y + x * z
     := by intros then algebra
 ```
 
-## 5.14 健全性の総まとめ
+## 5.15 健全性の総まとめ
 
 | 戦術 | 種別 | 健全性 |
 |---|---|---|
 | `eval` | closer | ✅ 有限のみ / 🟡 無限ドメインはサンプル |
 | `refl` | closer / 項 | ✅ |
-| `algebra` | closer | ✅ Int / Rat / Real 上の多項式 + 仮定の加算結合・多変数 Fourier-Motzkin |
+| `algebra` | closer | ✅ Int / Rat / Real 上の多項式 + 仮定の加算結合・多変数 Fourier-Motzkin (仮定側 if の場合分け、整数離散性、let/タプル/intToReal透過、リスト構造等価性を含む) |
 | `linarith` | closer | ✅ `algebra` の別名 (同じ健全性) |
 | `decide` | closer | ✅ Bool に reduce できる場合のみ |
-| `induction` | closer | ✅ 構造帰納 |
+| `induction` | closer | ✅ 構造帰納 (List は補助パラメータの汎化にも対応) |
 | `strong_induction <N>` | closer | ✅ Nat、深さ可変 (`N` 省略時2) |
 | `simp` | both | ✅ 既存定理の連鎖 |
 | `unfold` | transformer | ✅ 定義展開、相互再帰も1段で正しく止まる |
 | `intros` | transformer | ✅ 全称除去 |
 | `auto` | closer (portfolio) | ✅ 各候補タクティクの健全性に従う |
-| Curry-Howard 項 | closer | ✅ |
+| `obtain` | transformer | ✅ 存在除去則そのもの (前提discharge失敗時はエラー) |
+| Curry-Howard 項 | closer | ✅ (ただし forall 側は無限ドメインで `by eval` 同様サンプル検査 — 非推奨) |
 
-タクティク 11 種 (auto を含む) すべて、想定範囲内では健全。
+タクティク 12 種 (auto, obtain を含む) すべて、想定範囲内では健全。
 **全体としての健全性の弱点** は型システムの sample-based dep type check
 であり、タクティクではない。`06-soundness.md` 参照。
