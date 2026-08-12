@@ -389,8 +389,55 @@ pub fn expr_to_poly(e: &Expr) -> Option<Polynomial> {
             }
             _ => Some(Polynomial::from_var(&opaque_name(e))),
         },
-        // App / If / Let / Lambda / SetEnum / etc. — all opaque atoms.
+        // Non-recursive `let x = v in body` is a pure syntactic inlining —
+        // always sound to beta-reduce before treating the result as a
+        // polynomial. `let rec` is left opaque (self-reference would need
+        // fixpoint unfolding, not a simple substitution).
+        Expr::Let { name, value, body, rec: false, .. } => {
+            expr_to_poly(&crate::ast::subst(body, name, value))
+        }
+        // `fst (x, y)` / `snd (x, y)` — resolve through non-recursive lets
+        // to see whether the argument is literally a tuple construction,
+        // and if so project the corresponding component instead of
+        // opaquely atomizing the whole projection.
+        Expr::App { func, args } if args.len() == 1 => {
+            // `intToReal` is a pure value-preserving numeric coercion (Int
+            // exact-embeds into Real) — seeing through it lets e.g.
+            // `k * (x / intToReal k)` cancel against a plain `k` appearing
+            // elsewhere, instead of treating `intToReal k` as an atom
+            // unrelated to the polynomial `k`. NOTE: deliberately excludes
+            // `realToInt`, which truncates/rounds and is therefore NOT a
+            // value-preserving identity on its argument's polynomial value.
+            if let Expr::Var { name, .. } = func.as_ref() {
+                if name == "intToReal" {
+                    return expr_to_poly(&args[0]);
+                }
+            }
+            let proj = match func.as_ref() {
+                Expr::Var { name, .. } if name == "fst" => Some(0usize),
+                Expr::Var { name, .. } if name == "snd" => Some(1usize),
+                _ => None,
+            };
+            match proj.and_then(|i| resolve_tuple(&args[0]).map(|xs| (i, xs))) {
+                Some((i, xs)) if i < xs.len() => expr_to_poly(&xs[i]),
+                _ => Some(Polynomial::from_var(&opaque_name(e))),
+            }
+        }
+        // App / If / Lambda / SetEnum / etc. — all opaque atoms.
         _ => Some(Polynomial::from_var(&opaque_name(e))),
+    }
+}
+
+/// Best-effort resolution of `e` to a literal tuple's component list,
+/// looking through non-recursive `let` bindings. Returns `None` if `e`
+/// isn't (after inlining lets) a syntactic `Expr::Tuple`.
+fn resolve_tuple(e: &Expr) -> Option<Vec<Expr>> {
+    match e {
+        Expr::Tuple(xs) => Some(xs.clone()),
+        Expr::Let { name, value, body, rec: false, .. } => {
+            resolve_tuple(&crate::ast::subst(body, name, value))
+        }
+        _ => None,
     }
 }
 

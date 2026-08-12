@@ -15,6 +15,9 @@
 --   def toPoly / fromPoly / expand    — Sym ↔ Poly 変換
 --   def divisors / scanRoots / findRationalRoot / divByLinear
 --   def factor            — 有理根による因数分解
+--   def polyDeriv         — 微分 (Int/Real 両対応)
+--   def polyIntegrate     — 不定積分 (Real 係数専用, 積分定数 C=0)
+--   theorem ftc_poly_general — 微積分学の基本定理の一般形 (次数非依存で証明)
 -- ===========================================================
 
 import "sym.seki"
@@ -272,6 +275,15 @@ def polyDerivRec := \p k ->
     else cons (k * (head (tail p))) (polyDerivRec (tail p) (k + 1))
 
 def polyDeriv := \p -> polyDerivRec p 1
+
+-- ----- 多項式の不定積分 (微積分学の基本定理): F'(x) = f(x) -----
+-- Real 係数専用 (a_i / (i+1) は一般に非整数)。p = [a_0, a_1, ..., a_n] に対し
+-- polyIntegrate p = [0, a_0, a_1/2, ..., a_n/(n+1)] (積分定数 C=0 を選ぶ)。
+def polyIntegrateRec := \p k ->
+    if null p then nil
+    else cons ((head p) / (intToReal k)) (polyIntegrateRec (tail p) (k + 1))
+
+def polyIntegrate := \p -> cons 0.0 (polyIntegrateRec p 1)
 
 -- ----- 簡易 Resultant (2 つの 2 次以下に限定) -----
 -- Res([c, b, a], [c', b', a']) = (ac' - a'c)² - (ab' - a'b)(bc' - b'c)

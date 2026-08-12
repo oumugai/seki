@@ -537,6 +537,9 @@ impl<'a> Prover<'a> {
         // conclusion as the goal.
         let (conclusion, premises) = peel_implications(&body);
         for p in premises {
+            if let Some(h) = integer_strengthen(&p, true, dom) {
+                initial_hyps.push(h);
+            }
             initial_hyps.push((p, true));
         }
         self.prove_algebra_rel(&conclusion, dom, &initial_hyps)
@@ -577,8 +580,14 @@ impl<'a> Prover<'a> {
             let else_refined = else_collapsed;
             let mut then_hyps = hyps.to_vec();
             then_hyps.push((cond.clone(), true));
+            if let Some(h) = integer_strengthen(&cond, true, dom) {
+                then_hyps.push(h);
+            }
             let mut else_hyps = hyps.to_vec();
             else_hyps.push((cond.clone(), false));
+            if let Some(h) = integer_strengthen(&cond, false, dom) {
+                else_hyps.push(h);
+            }
             self.prove_algebra_rel(&then_refined, dom, &then_hyps)
                 .map_err(|e| {
                     SekiError::Proof(format!(
@@ -625,6 +634,35 @@ impl<'a> Prover<'a> {
                 )))
             }
         };
+        // Structural list equality: `cons`/`nil` are freely-generated (an
+        // injective, disjoint constructor pair), so `xs == ys` decomposes
+        // into `head xs == head ys and tail xs == tail ys` (both Cons) or
+        // is trivially true (both Nil) or false (one of each) — regardless
+        // of *which* AST shape each side happens to be in (a literal
+        // `App(cons, ..)`, a raw tag-tuple left over from unfolding `cons`
+        // itself, or an `Expr::List` literal all count). This lets `by
+        // algebra` close equalities between structurally-equal-but-
+        // differently-represented lists, e.g. from induction step goals
+        // where only one side got fully unfolded.
+        if op == BinOp::Eq {
+            match (list_shape(lhs), list_shape(rhs)) {
+                (Some(ListShape::Nil), Some(ListShape::Nil)) => return Ok(Value::Bool(true)),
+                (Some(ListShape::Cons(h1, t1)), Some(ListShape::Cons(h2, t2))) => {
+                    let head_eq = Expr::BinOp(BinOp::Eq, Box::new(h1), Box::new(h2));
+                    self.prove_algebra_rel(&head_eq, dom, hyps)?;
+                    let tail_eq = Expr::BinOp(BinOp::Eq, Box::new(t1), Box::new(t2));
+                    return self.prove_algebra_rel(&tail_eq, dom, hyps);
+                }
+                (Some(ListShape::Nil), Some(ListShape::Cons(_, _)))
+                | (Some(ListShape::Cons(_, _)), Some(ListShape::Nil)) => {
+                    return Err(SekiError::Proof(format!(
+                        "by algebra: cannot prove {} == {} (nil vs cons — structurally unequal)",
+                        lhs, rhs
+                    )))
+                }
+                _ => {}
+            }
+        }
         let lp = expr_to_poly(lhs).ok_or_else(|| {
             SekiError::Proof(
                 "by algebra: lhs contains expressions outside the polynomial fragment".into(),
@@ -870,6 +908,19 @@ impl<'a> Prover<'a> {
     }
 
     fn verify_list_induction(&self, var: &str, body: &Expr, env: &Env) -> SekiResult<Value> {
+        // A generalized induction: `body` still has leading `forall`s (over
+        // auxiliary parameters threaded through the recursion, e.g. an
+        // accumulator index) before the actual relation. Plain structural
+        // induction can't use these — the naturally-available IH would be
+        // fixed at the *same* auxiliary values as the goal, but many
+        // recursive definitions (integration threading a denominator index,
+        // for instance) need the IH at *different* values in the step. See
+        // `verify_list_induction_generalized` for how this is handled
+        // soundly via the IH-as-rewrite-rule technique already used by
+        // `by simp`.
+        if let Expr::Forall { .. } = body {
+            return self.verify_list_induction_generalized(var, body, env);
+        }
         let (op, lhs, rhs) = match body {
             Expr::BinOp(o, l, r) if is_relation(o) => (o.clone(), (**l).clone(), (**r).clone()),
             _ => {
@@ -916,6 +967,125 @@ impl<'a> Prover<'a> {
         // For list induction, opaque `head/tail` of a fresh `ys` are
         // unrestricted — treat the polynomial domain as Int.
         self.discharge_step(&op, &lhs_diff, &rhs_diff, PolyDomain::Int)
+    }
+
+    /// Structural list induction where the goal, after the induction
+    /// variable, still carries leading `forall`s over auxiliary parameters
+    /// (e.g. `forall p in List Real, forall k in Nat, forall c in Real,
+    /// LHS(p,k,c) == RHS(p,k,c)`). Plain `verify_list_induction` can't use
+    /// these: its diff-based step only ever compares against the IH at the
+    /// *same* auxiliary values as the current goal, but recursive
+    /// definitions that thread a changing accumulator (e.g. an integration
+    /// index incrementing on each recursive call) need the IH at *different*
+    /// values in the step.
+    ///
+    /// The fix: keep the auxiliary variables universally quantified (never
+    /// fix them), and represent the induction hypothesis "the property holds
+    /// for `ys`, for *any* value of the auxiliary variables" as a
+    /// `by simp`-style rewrite rule (`SimpRule`) whose metavariables are
+    /// exactly those auxiliary names, with the induction variable itself
+    /// fixed to the concrete fresh tail symbol `ys` (never a metavariable —
+    /// this is what keeps the self-reference well-founded: the rule can only
+    /// ever fire on the literal smaller instance `ys`, not on `cons x ys` or
+    /// anything containing it). Applying that rule via the existing
+    /// `simp_rewrite` engine to the (one-level-unfolded) step goal discovers
+    /// whatever instantiation of the auxiliary variables the recursion
+    /// actually needs, exactly as pattern-matching would in an interactive
+    /// prover's `rewrite [ih]`. What's left after rewriting is closed by
+    /// `by algebra`, which already knows how to discharge a relation under
+    /// several leading `forall`s.
+    ///
+    /// Only `==` goals are supported (rewriting needs an equation) — `<=`
+    /// etc. would need a genuine generalization of this technique.
+    fn verify_list_induction_generalized(
+        &self,
+        var: &str,
+        body: &Expr,
+        env: &Env,
+    ) -> SekiResult<Value> {
+        let (extra, inner) = peel_leading_foralls(body);
+        let (lhs, rhs) = match inner {
+            Expr::BinOp(BinOp::Eq, l, r) => (l.as_ref(), r.as_ref()),
+            _ => {
+                return Err(SekiError::Proof(format!(
+                    "by induction: generalized list induction only supports `==` goals \
+                     (auxiliary foralls before the relation), got {}",
+                    inner
+                )))
+            }
+        };
+        let extra_names: Vec<String> = extra.iter().map(|(n, _)| n.clone()).collect();
+
+        // ---- base: forall extra.., lhs[var:=nil] == rhs[var:=nil] ----
+        let nil_expr = Expr::List(vec![]);
+        let lhs_nil = unfold_to_fixpoint(&subst(lhs, var, &nil_expr), self.ctx, env);
+        let rhs_nil = unfold_to_fixpoint(&subst(rhs, var, &nil_expr), self.ctx, env);
+        if !exprs_equal(&canonicalize(&lhs_nil), &canonicalize(&rhs_nil)) {
+            let base_goal = rebuild_foralls(
+                &extra,
+                Expr::BinOp(BinOp::Eq, Box::new(lhs_nil), Box::new(rhs_nil)),
+            );
+            self.verify_algebra(&base_goal, env).map_err(|e| {
+                SekiError::Proof(format!("by induction: base case P([]) failed: {}", e))
+            })?;
+        }
+
+        // ---- step: IH is `forall extra.., lhs[var:=ys] == rhs[var:=ys]` ----
+        let xname = format!("__x_{}", var);
+        let ysname = format!("__ys_{}", var);
+        let ys_expr = Expr::Var { name: ysname.clone(), line: 0, col: 0 };
+        let cons_expr = Expr::App {
+            func: Box::new(Expr::Var { name: "cons".into(), line: 0, col: 0 }),
+            args: vec![Expr::Var { name: xname, line: 0, col: 0 }, ys_expr.clone()],
+        };
+        // Only ONE level of unfolding here (mirroring the plain
+        // `verify_list_induction` step) — enough to expose the recursive
+        // sub-call(s) on `ys` that the IH rewrite rule below should match.
+        // Fully reducing to a fixpoint (as the base case does) would chase
+        // `null`/`head`/`tail` through the still-symbolic `ys`, producing
+        // an explosion of undecidable case-splits instead of a clean IH
+        // application.
+        let lhs_cons = normalize_nil(&simplify_list_ops_fixpoint(
+            &unfold_one(&subst(lhs, var, &cons_expr), self.ctx, env),
+            self.ctx,
+            env,
+        ));
+        let rhs_cons = normalize_nil(&simplify_list_ops_fixpoint(
+            &unfold_one(&subst(rhs, var, &cons_expr), self.ctx, env),
+            self.ctx,
+            env,
+        ));
+        // Normalize the IH's lhs/rhs the same way as `lhs_cons`/`rhs_cons`
+        // (`simplify_list_ops` may rewrite `cons`-applications into a
+        // different internal shape while resolving `head`/`tail`/`null` —
+        // matching against an un-normalized IH pattern would silently never
+        // fire).
+        let ih_rule = SimpRule {
+            name: "<induction hypothesis>".into(),
+            metavars: extra_names,
+            lhs: normalize_nil(&simplify_list_ops_fixpoint(&subst(lhs, var, &ys_expr), self.ctx, env)),
+            rhs: normalize_nil(&simplify_list_ops_fixpoint(&subst(rhs, var, &ys_expr), self.ctx, env)),
+        };
+        let rule = std::slice::from_ref(&ih_rule);
+        let mut lhs_step = lhs_cons;
+        let mut rhs_step = rhs_cons;
+        for _ in 0..8 {
+            let l2 = canonicalize(&simp_rewrite(&lhs_step, rule));
+            let r2 = canonicalize(&simp_rewrite(&rhs_step, rule));
+            let done = exprs_equal(&l2, &lhs_step) && exprs_equal(&r2, &rhs_step);
+            lhs_step = l2;
+            rhs_step = r2;
+            if done {
+                break;
+            }
+        }
+        let step_goal = rebuild_foralls(
+            &extra,
+            Expr::BinOp(BinOp::Eq, Box::new(lhs_step), Box::new(rhs_step)),
+        );
+        self.verify_algebra(&step_goal, env).map_err(|e| {
+            SekiError::Proof(format!("by induction: step case fails: {}", e))
+        })
     }
 
     /// `by strong_induction` (default depth 2, or `by strong_induction <N>`):
@@ -1600,6 +1770,30 @@ fn normalize_nonneg_hyp(cond: &Expr, htrue: bool) -> Option<(crate::algebra::Pol
     }
 }
 
+/// Under `Nat`/`Int`, a *strict* inequality hypothesis is about an
+/// integer-valued polynomial, so `poly > 0` implies the sharper `poly >= 1`
+/// (equivalently `poly - 1 >= 0`) — there's no integer strictly between 0
+/// and 1. Feeding this back into the hypothesis list lets the existing
+/// (rational-sound) machinery close goals that genuinely need integer
+/// discreteness, e.g. `n > 0 (Nat) ⊢ n - 1 >= 0`, which is false over the
+/// reals/rationals and therefore unreachable via Fourier-Motzkin alone.
+fn integer_strengthen(cond: &Expr, htrue: bool, dom: PolyDomain) -> Option<(Expr, bool)> {
+    if !matches!(dom, PolyDomain::Nat | PolyDomain::Int) {
+        return None;
+    }
+    let (poly, is_strict) = normalize_nonneg_hyp(cond, htrue)?;
+    if !is_strict {
+        return None;
+    }
+    let shifted = poly.sub(crate::algebra::Polynomial::from_const(1));
+    let expr = Expr::BinOp(
+        BinOp::Ge,
+        Box::new(crate::algebra::poly_to_expr(&shifted)),
+        Box::new(Expr::Int(0)),
+    );
+    Some((expr, true))
+}
+
 /// Try to discharge a `>` / `>=` goal as a *positive combination* (equal
 /// weight 1, no scaling) of the available inequality hypotheses — e.g.
 /// `x > 0`, `y > 0` ⊢ `x + y > 0`.  Sound: a sum of quantities each known
@@ -1796,6 +1990,24 @@ fn hyps_contradict(hyps: &[(Expr, bool)]) -> bool {
         for (c2, t2) in hyps.iter().skip(i + 1) {
             if t1 != t2 && c1 == c2 {
                 return true;
+            }
+        }
+    }
+    // 1b. A single hypothesis about a *constant* polynomial (no free
+    // variables) whose claimed sign-set excludes its own literal sign is
+    // unconditionally impossible — e.g. a hypothesis `1 == 0` arising from
+    // specializing `if n == 0` after substituting a concrete `n` (via
+    // `by unfold`). Without this check, `prove_algebra_rel`'s `if`
+    // case-split chases the vacuous branch as if it were reachable and
+    // reports a spurious proof failure instead of pruning it.
+    for (h, htrue) in hyps {
+        if let Some((p, ss)) = hyp_to_signset(h, *htrue) {
+            if let Some(c) = p.as_constant() {
+                let sign = c.sign();
+                let compatible = (sign < 0 && ss.neg) || (sign == 0 && ss.zero) || (sign > 0 && ss.pos);
+                if !compatible {
+                    return true;
+                }
             }
         }
     }
@@ -2036,6 +2248,8 @@ fn list_shape(e: &Expr) -> Option<ListShape> {
             }
             _ => None,
         },
+        List(xs) if xs.is_empty() => Some(ListShape::Nil),
+        List(xs) => Some(ListShape::Cons(xs[0].clone(), List(xs[1..].to_vec()))),
         _ => None,
     }
 }
@@ -2355,6 +2569,107 @@ fn strip_foralls(e: &Expr) -> &Expr {
         cur = body;
     }
     cur
+}
+
+/// Peel every leading `forall var in domain, ...` off `e`, returning the
+/// `(var, domain)` pairs in outer-to-inner order together with the
+/// innermost non-`Forall` body.
+fn peel_leading_foralls(e: &Expr) -> (Vec<(String, Expr)>, &Expr) {
+    let mut vars = Vec::new();
+    let mut cur = e;
+    while let Expr::Forall { var, domain, body } = cur {
+        vars.push((var.clone(), (**domain).clone()));
+        cur = body;
+    }
+    (vars, cur)
+}
+
+/// Inverse of `peel_leading_foralls`: wrap `inner` back in `forall var in
+/// domain, ...` binders, outer-to-inner matching `vars`' order.
+fn rebuild_foralls(vars: &[(String, Expr)], inner: Expr) -> Expr {
+    let mut cur = inner;
+    for (var, domain) in vars.iter().rev() {
+        cur = Expr::Forall {
+            var: var.clone(),
+            domain: Box::new(domain.clone()),
+            body: Box::new(cur),
+        };
+    }
+    cur
+}
+
+/// Repeatedly apply `unfold_one` (plus list-op simplification) until a
+/// fixpoint or a small iteration cap. Sound for any starting expression —
+/// each step is the same beta/delta-reduction `unfold_one` already
+/// performs — and terminates quickly whenever the recursion's termination
+/// depends only on concrete (non-symbolic) structure, e.g. list recursion
+/// once the list argument is literally `nil` or `cons x ys` for a fixed
+/// depth of concrete conses.
+/// `simplify_list_ops` resolves `null`/`head`/`tail` against a `cons`/`nil`
+/// literal it can already see — but a residual `if` left behind by
+/// `unfold_one`'s own (weaker) internal `simplify_ifs` can hide a *second*
+/// concrete cons/nil one level down, which only becomes visible after the
+/// outer `if` collapses. Iterate a few rounds so those newly-exposed shapes
+/// get their own chance at simplification, without going all the way to
+/// `unfold_to_fixpoint`'s full reduction (which would also try to decide
+/// `null` on the still-symbolic `ys` and blow up into case-splits).
+fn simplify_list_ops_fixpoint(e: &Expr, ctx: &EvalCtx, env: &Env) -> Expr {
+    let mut current = e.clone();
+    for _ in 0..4 {
+        let next = simplify_list_ops(&current, ctx, env);
+        if exprs_equal(&next, &current) {
+            break;
+        }
+        current = next;
+    }
+    current
+}
+
+fn unfold_to_fixpoint(e: &Expr, ctx: &EvalCtx, env: &Env) -> Expr {
+    let mut current = normalize_nil(e);
+    for _ in 0..16 {
+        let next = normalize_nil(&simplify_list_ops(&unfold_one(&current, ctx, env), ctx, env));
+        if exprs_equal(&next, &current) {
+            break;
+        }
+        current = next;
+    }
+    current
+}
+
+/// `nil` (the identifier) and `[]` (a literal empty `Expr::List`) are the
+/// same value but different ASTs — unfolding a recursive list function's
+/// `if null p then nil else ...` base case surfaces the identifier form,
+/// while callers substituting a concrete empty list in typically use the
+/// literal form. Canonicalize both to `Expr::List(vec![])` so syntactic
+/// equality checks (and `by algebra`'s opaque-atom naming) see them as
+/// identical.
+fn normalize_nil(e: &Expr) -> Expr {
+    use Expr::*;
+    match e {
+        Var { name, .. } if name == "nil" => List(vec![]),
+        App { func, args } => App {
+            func: Box::new(normalize_nil(func)),
+            args: args.iter().map(normalize_nil).collect(),
+        },
+        If { cond, then_branch, else_branch } => If {
+            cond: Box::new(normalize_nil(cond)),
+            then_branch: Box::new(normalize_nil(then_branch)),
+            else_branch: Box::new(normalize_nil(else_branch)),
+        },
+        Let { name, ty, value, body, rec } => Let {
+            name: name.clone(),
+            ty: ty.clone(),
+            value: Box::new(normalize_nil(value)),
+            body: Box::new(normalize_nil(body)),
+            rec: *rec,
+        },
+        BinOp(op, l, r) => BinOp(op.clone(), Box::new(normalize_nil(l)), Box::new(normalize_nil(r))),
+        UnOp(op, x) => UnOp(op.clone(), Box::new(normalize_nil(x))),
+        List(xs) => List(xs.iter().map(normalize_nil).collect()),
+        Tuple(xs) => Tuple(xs.iter().map(normalize_nil).collect()),
+        _ => e.clone(),
+    }
 }
 
 /// Walk `e` and collect every identifier referenced (variable / function /

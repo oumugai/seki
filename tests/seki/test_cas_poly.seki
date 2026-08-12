@@ -49,3 +49,30 @@ def roots2 := fst fact2
 
 theorem factor_cubic_sum : sumOfList roots2 == 6 := by eval
 theorem factor_cubic_prd : productOfList roots2 == 6 := by eval
+
+-- ===========================================================
+-- 微積分学の基本定理 (FTC): polyIntegrate の逆演算が polyDeriv
+-- ===========================================================
+
+-- 具体例: 1 + 2x + 3x² を積分してから微分すると元に戻る
+def pEx := cons 1.0 (cons 2.0 (cons 3.0 nil))
+
+theorem ftc_roundtrip_concrete : polyDeriv (polyIntegrate pEx) == pEx := by eval
+
+-- 一般形: polyDerivRec/polyIntegrateRec が積分開始インデックス k と
+-- (微分側の) 先頭ジャンク係数 c を任意に取っても相殺することを、
+-- 次数に依存せず全称的に証明する。`polyIntegrate p` は k=1, c=0.0 の
+-- 特殊化 (`polyDeriv (polyIntegrate p) == p` は上の具体例の通り、この
+-- 一般形のインスタンス)。
+--
+-- 証明メモ: 単純な構造帰納 (p のみに対する帰納法) では、IH が固定した
+-- k, c でしか使えず、再帰呼び出しが必要とする k+1, (新しい先頭要素)/k
+-- という「異なる値でのIH適用」を汎化できずに失敗する。本定理は k, c を
+-- forall として残したまま帰納法を回すことで、IH を「forall k c, ...」
+-- という強い形で使えるようにしている (2026-08、`by induction` 側に
+-- この汎化パターンをサポートする拡張を追加して初めて到達できた — 詳細は
+-- src/prover.rs の `verify_list_induction_generalized`)。
+theorem ftc_poly_general
+  : forall p in List Real, forall m in Nat, forall c in Real,
+      polyDerivRec (cons c (polyIntegrateRec p (m + 1))) (m + 1) == p
+  := by induction
