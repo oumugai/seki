@@ -162,6 +162,41 @@ pub enum Expr {
     },
 }
 
+/// Every immediate sub-expression of `e`, in source order.
+///
+/// Generic traversals (the trust scan in `crate::prover`, for instance) need
+/// to recurse into an arbitrary node without re-listing all 20 variants and
+/// silently missing the next one that gets added.
+pub fn children(e: &Expr) -> Vec<&Expr> {
+    use Expr::*;
+    match e {
+        Int(_) | Real(_) | Bool(_) | Str(_) | Var { .. } => Vec::new(),
+        Lambda { body, .. } => vec![body],
+        App { func, args } => {
+            let mut v = vec![func.as_ref()];
+            v.extend(args.iter());
+            v
+        }
+        Let { ty, value, body, .. } => {
+            let mut v = Vec::new();
+            if let Some(t) = ty {
+                v.push(t.as_ref());
+            }
+            v.push(value);
+            v.push(body);
+            v
+        }
+        If { cond, then_branch, else_branch } => vec![cond, then_branch, else_branch],
+        BinOp(_, l, r) => vec![l, r],
+        UnOp(_, x) => vec![x],
+        SetEnum(xs) | Tuple(xs) | List(xs) => xs.iter().collect(),
+        SetComp { domain, pred, .. } => vec![domain, pred],
+        Arrow(a, b) => vec![a, b],
+        DepArrow { from, to, .. } | DepPair { from, to, .. } => vec![from, to],
+        Forall { domain, body, .. } | Exists { domain, body, .. } => vec![domain, body],
+    }
+}
+
 // -- Top-level declarations -------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
@@ -254,6 +289,40 @@ pub enum Proof {
         lemma: String,
         substs: Vec<(String, Expr)>,
     },
+
+    /// `by apply L [with x := e, ...]` — discharge the goal by citing an
+    /// accepted theorem or axiom.
+    ///
+    /// This is *modus ponens*, and its absence was the reason a library of
+    /// 955 theorems contained only twelve proofs that used another theorem:
+    /// the only ways to reuse a fact were `by simp` (equalities only) and
+    /// `by obtain` (existentials only), so an implication or an inequality
+    /// could not be reused at all and every theorem was re-decided from
+    /// scratch.
+    ///
+    /// The lemma's universally quantified variables are matched against the
+    /// goal where possible, so `with` is only needed for the ones that do
+    /// not appear in the conclusion.  Its premises are discharged against
+    /// the hypotheses already in scope, falling back on `by algebra`.
+    Apply {
+        lemma: String,
+        substs: Vec<(String, Expr)>,
+    },
+
+    /// `by have h : P := <proof> then <rest>` — forward reasoning.
+    ///
+    /// Proves `P` under the hypotheses currently in scope, then continues
+    /// with `P` added to them.  This is the cut rule, and it is what lets a
+    /// proof be built up in steps instead of having to fall out of a single
+    /// decision procedure.  Transformer-only: must be followed by a closer.
+    Have {
+        name: String,
+        prop: Box<Expr>,
+        proof: Box<Proof>,
+    },
+
+    /// `by assumption` — the goal is one of the hypotheses already in scope.
+    Assumption,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -265,7 +334,22 @@ pub enum Decl {
         value: Expr,
     },
     /// `axiom name : prop`  — taken as given
-    Axiom { name: String, prop: Expr },
+    Axiom {
+        name: String,
+        prop: Expr,
+        /// `with confidence 0.85` — how much of the time the assumption is
+        /// believed to hold, as a **lower bound**.
+        ///
+        /// An axiom is an assumption either way; this records *how much* of
+        /// one it is, so a conclusion resting on several can report a bound
+        /// rather than only naming them.  `None` is the classical reading:
+        /// asserted outright.
+        confidence: Option<Expr>,
+        /// `from "..."` — where the assumption came from.  Free text, kept
+        /// so an audit can show the provenance behind a number instead of
+        /// just the number.
+        provenance: Option<String>,
+    },
     /// `theorem name : prop := proof`
 ///
 /// Available proof tactics in addition to `by eval` and `refl`:
@@ -370,18 +454,31 @@ impl fmt::Display for Proof {
             Proof::Term(e) => write!(f, "{}", e),
             Proof::Obtain { intro, lemma, substs } => {
                 write!(f, "by obtain {} from {}", intro, lemma)?;
-                if !substs.is_empty() {
-                    write!(f, " with ")?;
-                    let parts: Vec<String> = substs
-                        .iter()
-                        .map(|(n, e)| format!("{} := {}", n, e))
-                        .collect();
-                    write!(f, "{}", parts.join(", "))?;
-                }
-                Ok(())
+                write_substs(f, substs)
             }
+            Proof::Apply { lemma, substs } => {
+                write!(f, "by apply {}", lemma)?;
+                write_substs(f, substs)
+            }
+            Proof::Have { name, prop, proof } => {
+                write!(f, "by have {} : {} := {}", name, prop, proof)
+            }
+            Proof::Assumption => write!(f, "by assumption"),
         }
     }
+}
+
+/// Render a `with x := e, y := f` clause, or nothing when there is none.
+fn write_substs(f: &mut fmt::Formatter<'_>, substs: &[(String, Expr)]) -> fmt::Result {
+    if substs.is_empty() {
+        return Ok(());
+    }
+    write!(f, " with ")?;
+    let parts: Vec<String> = substs
+        .iter()
+        .map(|(n, e)| format!("{} := {}", n, e))
+        .collect();
+    write!(f, "{}", parts.join(", "))
 }
 
 impl fmt::Display for BinOp {

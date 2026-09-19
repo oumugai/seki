@@ -5,6 +5,8 @@ use seki::ast::Decl;
 use seki::eval::{make_prelude, EvalCtx};
 use seki::parse_program;
 use seki::prover::Prover;
+use seki::session::Session;
+use seki::trust::TrustLevel;
 use seki::value::{Env, Globals, Value};
 
 /// Count the number of elements in a tagged-pair-encoded list value.
@@ -27,53 +29,26 @@ fn list_len(mut v: &Value) -> Option<usize> {
     }
 }
 
+/// Run a source string through the real declaration driver.
+///
+/// This used to be a reimplementation of `run_decl_inner` living in this
+/// file, which meant the integration tests exercised a *copy* of the driver
+/// rather than the driver: the copy could not handle `import` at all, and
+/// never saw the def-time membership check, the termination warning, or the
+/// trust accounting.  `Session` is the same code path `seki file.seki`
+/// takes.
 fn run(src: &str) -> Globals {
-    let mut g = make_prelude();
-    let decls = parse_program(src).expect("parse");
-    let ctx_globals: *const Globals = &g; // placeholder for closure capture
-    let _ = ctx_globals;
-    for ld in decls {
-        let ctx = EvalCtx::new(&g);
-        let env = Env::new();
-        match ld.decl {
-            Decl::Def { name, ty: _, value } => {
-                let v = ctx.eval(&value, &env).expect("eval def");
-                g.defs.insert(name, v);
-            }
-            Decl::Theorem { name, prop, proof } => {
-                let prover = Prover::new(&ctx);
-                let v = prover.verify(&prop, &proof, &env).expect("verify theorem");
-                g.theorem_props.insert(name.clone(), prop);
-                g.theorem_proofs.insert(name.clone(), proof);
-                g.theorems.insert(name, v);
-            }
-            Decl::Axiom { name, prop } => {
-                g.axiom_props.insert(name.clone(), prop);
-                g.axioms.insert(name, Value::Bool(true));
-            }
-            Decl::Expr(e) => {
-                let _ = ctx.eval(&e, &env).expect("eval expr");
-            }
-            Decl::Import { .. } => {
-                // The lightweight `run` test helper doesn't support module
-                // loading; tests that need imports go through the binary.
-                panic!("Decl::Import not supported in `run` test helper");
-            }
-            Decl::ClassMeta { class_name, ctor_name, methods } => {
-                g.class_ctor.insert(class_name.clone(), ctor_name);
-                for m in methods {
-                    g.class_methods.insert(m, class_name.clone());
-                }
-            }
-            Decl::InstanceMeta { instance_name, class_name, type_name } => {
-                g.instances.insert((class_name, type_name), instance_name);
-            }
-            Decl::DataMeta { name, ctors } => {
-                g.data_info.insert(name, ctors);
-            }
-        }
-    }
-    g
+    let mut session = Session::new();
+    session.run_source(src, /* quiet */ true).expect("run");
+    session.globals
+}
+
+/// Like [`run`], but returns the driver's error instead of panicking.
+fn run_err(src: &str) -> seki::SekiError {
+    let mut session = Session::new();
+    session
+        .run_source(src, true)
+        .expect_err("expected the driver to reject this program")
 }
 
 #[test]
@@ -1459,6 +1434,55 @@ fn run_seki_test_file(rel_path: &str, min_theorems: usize) {
     );
 }
 
+// These four `.seki` suites existed but were never wired into `cargo test`,
+// so nothing ran them.  Two of them had in fact been broken since `sigma`
+// became a keyword (Σ-types): `lib/probability/{continuous,montecarlo}.seki`
+// used `sigma` as a lambda parameter and no longer parsed.
+#[test]
+fn seki_lib_test_analysis_advanced() {
+    run_seki_test_file("tests/seki/test_analysis_advanced.seki", 14);
+}
+
+#[test]
+fn seki_lib_test_numeric_linalg() {
+    run_seki_test_file("tests/seki/test_numeric_linalg.seki", 9);
+}
+
+#[test]
+fn seki_lib_test_numeric_matrix_eq() {
+    run_seki_test_file("tests/seki/test_numeric_matrix_eq.seki", 8);
+}
+
+#[test]
+fn seki_lib_test_probability() {
+    run_seki_test_file("tests/seki/test_probability.seki", 7);
+}
+
+/// Guard against the wiring gap itself: every `tests/seki/test_*.seki` must
+/// have a `#[test]` that runs it, or it is dead weight that silently rots.
+#[test]
+fn every_seki_test_file_is_wired_into_cargo_test() {
+    let this_file = include_str!("integration.rs");
+    let mut unwired = Vec::new();
+    for entry in std::fs::read_dir("tests/seki").expect("read tests/seki") {
+        let path = entry.expect("dir entry").path();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if !name.starts_with("test_") || !name.ends_with(".seki") {
+            continue;
+        }
+        if !this_file.contains(&format!("tests/seki/{}", name)) {
+            unwired.push(name);
+        }
+    }
+    unwired.sort();
+    assert!(
+        unwired.is_empty(),
+        "these .seki test files are never run by `cargo test`; add a \
+         `run_seki_test_file` test for each: {:?}",
+        unwired
+    );
+}
+
 #[test]
 fn seki_lib_test_cas_sym() {
     run_seki_test_file("tests/seki/test_cas_sym.seki", 10);
@@ -2238,4 +2262,1069 @@ fn run_decl_attaches_source_location_to_errors() {
         "expected location-prefixed type error, got: {}",
         stderr
     );
+}
+
+// -- trust accounting -------------------------------------------------------
+//
+// `Prover::verify` answering "yes" is not the same as the theorem being
+// true: `by eval` over an infinite domain only samples it.  These pin the
+// classification down so a future change cannot quietly widen what counts
+// as a proof.  See `src/trust.rs` and `docs/spec/06-soundness.md` §6.2.
+
+fn trust_of(src: &str, thm: &str) -> TrustLevel {
+    let g = run(src);
+    *g.theorem_trust
+        .get(thm)
+        .unwrap_or_else(|| panic!("theorem `{}` was not registered", thm))
+}
+
+#[test]
+fn finite_domain_by_eval_is_sound() {
+    assert_eq!(
+        trust_of(
+            r"
+            def Small := {1, 2, 3}
+            theorem all_pos : forall x in Small, x > 0 := by eval
+            ",
+            "all_pos"
+        ),
+        TrustLevel::Sound
+    );
+}
+
+#[test]
+fn infinite_domain_by_eval_is_only_sampled() {
+    // `f` agrees with the claim on every sampled point and breaks well past
+    // `SAMPLE_BOUND`, so `by eval` accepts a proposition the evaluator
+    // itself refutes.  It must not be recorded as a proof.
+    let src = r"
+        def f : Nat -> Nat := \(n : Nat) -> if n < 300 then 0 else 1
+        theorem f_zero : forall n in Nat, f(n) == 0 := by eval
+    ";
+    assert_eq!(trust_of(src, "f_zero"), TrustLevel::Sampled);
+    let g = run(src);
+    let ctx = EvalCtx::new(&g);
+    let refutation = ctx
+        .eval(&only_expr("f(10000)"), &Env::new())
+        .expect("eval f(10000)");
+    assert!(
+        matches!(refutation, Value::Int(1)),
+        "the evaluator should disagree with the 'proved' theorem"
+    );
+}
+
+#[test]
+fn sampled_trust_propagates_through_simp() {
+    assert_eq!(
+        trust_of(
+            r"
+            def f : Nat -> Nat := \(n : Nat) -> if n < 300 then 0 else 1
+            theorem f_zero : forall n in Nat, f(n) == 0 := by eval
+            theorem consequence : f(10000) == 0 := by simp [f_zero]
+            ",
+            "consequence"
+        ),
+        TrustLevel::Sampled,
+        "a lemma that was only sampled must not be laundered into a proof"
+    );
+}
+
+#[test]
+fn axiom_dependence_is_recorded() {
+    assert_eq!(
+        trust_of(
+            r"
+            def f : Nat -> Nat := \(n : Nat) -> n
+            axiom my_ax : forall n in Nat, f(n) + 1 == 1
+            theorem uses_ax : f(3) + 1 == 1 := by simp [my_ax]
+            ",
+            "uses_ax"
+        ),
+        TrustLevel::Axiomatic
+    );
+}
+
+#[test]
+fn by_algebra_over_an_infinite_domain_is_sound() {
+    assert_eq!(
+        trust_of(
+            "theorem sq_nn : forall x in Real, x * x >= 0.0 := by algebra",
+            "sq_nn"
+        ),
+        TrustLevel::Sound
+    );
+}
+
+#[test]
+fn definitional_discharge_of_an_infinite_forall_is_sound() {
+    // `try_forall_from_definition` decides these symbolically, so no
+    // enumeration happens even though the domain is infinite.
+    for (src, name) in [
+        ("theorem t : forall n in Nat, n >= 0 := by eval", "t"),
+        (
+            "def W := {x in Int | (-3 <= x) and (x <= 3)}\n\
+             theorem t : forall x in W, x <= 3 := by eval",
+            "t",
+        ),
+        (
+            "theorem t : forall a in Int, forall b in Int, forall c in Int, \
+             a * (b + c) == a * b + a * c := by eval",
+            "t",
+        ),
+    ] {
+        assert_eq!(trust_of(src, name), TrustLevel::Sound, "for: {}", src);
+    }
+}
+
+#[test]
+fn existential_witness_over_an_infinite_domain_is_sound() {
+    // Enumeration found an actual witness; that is a proof regardless of
+    // how much of the domain was left unvisited.
+    assert_eq!(
+        trust_of("theorem big : exists n in Nat, n > 100 := by eval", "big"),
+        TrustLevel::Sound
+    );
+}
+
+#[test]
+fn unfold_then_algebra_is_sound_even_over_reals() {
+    // Only the closer evaluates; `by unfold` merely rewrites the goal, so
+    // the chain is as sound as the `by algebra` that ends it.
+    assert_eq!(
+        trust_of(
+            r"
+            def absR := \(r : Real) -> if r < 0.0 then 0.0 - r else r
+            theorem absR_nonneg : forall x in Real, absR x >= 0.0
+              := by unfold absR then algebra
+            ",
+            "absR_nonneg"
+        ),
+        TrustLevel::Sound
+    );
+}
+
+#[test]
+fn strict_mode_rejects_a_sampled_theorem() {
+    let mut session = Session::new();
+    session.strict = true;
+    let err = session
+        .run_source(
+            r"
+            def f : Nat -> Nat := \(n : Nat) -> if n < 300 then 0 else 1
+            theorem f_zero : forall n in Nat, f(n) == 0 := by eval
+            ",
+            true,
+        )
+        .expect_err("--strict must refuse a sampled theorem");
+    assert!(err.is_proof_error(), "got {:?}", err);
+    assert!(
+        err.message().contains("sampled"),
+        "error should say why: {}",
+        err.message()
+    );
+}
+
+#[test]
+fn strict_mode_accepts_a_sound_theorem() {
+    let mut session = Session::new();
+    session.strict = true;
+    session
+        .run_source(
+            "theorem sq_nn : forall x in Real, x * x >= 0.0 := by algebra",
+            true,
+        )
+        .expect("--strict must accept a fully sound proof");
+}
+
+// -- integer overflow -------------------------------------------------------
+
+#[test]
+fn int_overflow_is_an_error_not_a_wrapped_value() {
+    // `Int` is the mathematical integers in the logic: `by algebra` would
+    // normalize `9223372036854775807 + 1 > 0` to true.  If the evaluator
+    // wrapped, `by eval` would "prove" the opposite.
+    for src in [
+        "def x := 9223372036854775807 + 1",
+        "def x := 0 - 9223372036854775807 - 2",
+        "def x := 4611686018427387904 * 4",
+        "def x := pow(2, 64)",
+    ] {
+        let err = run_err(src);
+        assert!(
+            err.message().contains("overflow"),
+            "expected an overflow error for `{}`, got: {}",
+            src,
+            err.message()
+        );
+    }
+}
+
+#[test]
+fn ordinary_arithmetic_is_unaffected_by_the_overflow_check() {
+    let g = run(
+        "def a := 2 + 3 * 4\n\
+         def b := 0 - 5\n\
+         def c := pow(2, 10)\n\
+         def d := (0 - 7) mod 3\n\
+         def e := 10 / 3",
+    );
+    assert!(matches!(g.defs.get("a"), Some(Value::Int(14))));
+    assert!(matches!(g.defs.get("b"), Some(Value::Int(-5))));
+    assert!(matches!(g.defs.get("c"), Some(Value::Int(1024))));
+    assert!(matches!(g.defs.get("d"), Some(Value::Int(2))));
+    assert!(matches!(g.defs.get("e"), Some(Value::Int(3))));
+}
+
+// -- driver / parser regressions --------------------------------------------
+
+#[test]
+fn the_test_harness_can_now_follow_imports() {
+    // The hand-rolled `run` helper this file used to carry panicked on
+    // `Decl::Import`, so nothing about module loading was covered here.
+    let g = run(r#"import "settheory/axioms.seki""#);
+    assert!(
+        !g.defs.is_empty(),
+        "importing a stdlib module should bring names into scope"
+    );
+}
+
+#[test]
+fn a_keyword_in_a_binder_position_says_so() {
+    // Before this, `sigma` (a keyword since Σ-types) as a lambda parameter
+    // produced "expected Arrow but got LParen", and two stdlib modules sat
+    // broken because of it.
+    let err = seki::parse_program(r"def f := \(mu : Real) (sigma : Real) -> mu")
+        .expect_err("a keyword parameter must be rejected");
+    let msg = err.message();
+    assert!(msg.contains("sigma"), "{}", msg);
+    assert!(msg.contains("keyword"), "{}", msg);
+}
+
+/// Parse a source string that is a single expression declaration and return
+/// that expression.
+fn only_expr(src: &str) -> seki::ast::Expr {
+    let decls = seki::parse_program(src).expect("parse expression");
+    match decls.into_iter().next().expect("one declaration").decl {
+        Decl::Expr(e) => e,
+        other => panic!("expected a bare expression, got {:?}", other),
+    }
+}
+
+// -- structural encodings ---------------------------------------------------
+
+#[test]
+fn constructor_injectivity_works_for_lists_and_trees_alike() {
+    // `by algebra` decomposes an equality between two applications of the
+    // same constructor into one equality per field.  This used to be
+    // written out for lists only; driving it from the encoding table gives
+    // trees the same treatment.
+    let g = run(
+        r"
+        theorem list_inj : cons 1 (cons 2 nil) == cons 1 (cons (1 + 1) nil) := by algebra
+        theorem tree_inj : node leaf 5 leaf == node leaf (2 + 3) leaf := by algebra
+        ",
+    );
+    assert!(g.theorems.contains_key("list_inj"));
+    assert!(g.theorems.contains_key("tree_inj"));
+}
+
+#[test]
+fn distinct_constructors_are_rejected_not_silently_accepted() {
+    let err = run_err("theorem bad : nil == cons 1 nil := by algebra");
+    assert!(err.is_proof_error(), "got {:?}", err);
+    assert!(
+        err.message().contains("structurally unequal"),
+        "{}",
+        err.message()
+    );
+}
+
+
+// -- documentation that must not drift --------------------------------------
+
+#[test]
+fn the_documented_keyword_list_matches_the_lexer() {
+    // `sigma` became a keyword without being added to the spec, and two
+    // stdlib modules quietly stopped parsing.  Pin the two together.
+    let doc = std::fs::read_to_string("docs/spec/01-lexical.md")
+        .expect("read docs/spec/01-lexical.md");
+    let start = doc
+        .find("def let in where")
+        .expect("the keyword block should start with `def let in where`");
+    let end = start + doc[start..].find("\n```").expect("closing fence");
+    let documented: std::collections::BTreeSet<&str> =
+        doc[start..end].split_whitespace().collect();
+
+    let actual: std::collections::BTreeSet<&str> = ALL_KEYWORDS.iter().copied().collect();
+    assert_eq!(
+        documented, actual,
+        "docs/spec/01-lexical.md and src/lexer.rs disagree about the keywords"
+    );
+}
+
+/// Every keyword the lexer recognizes.  Derived by asking `keyword_spelling`
+/// about each candidate, so it cannot silently fall behind the lexer.
+const ALL_KEYWORDS: &[&str] = &[
+    "def", "let", "in", "where", "if", "then", "else", "lambda", "fn", "forall", "exists",
+    "sigma", "theorem", "axiom", "type", "by", "data", "match", "with", "import", "as",
+    "class", "instance", "true", "false", "and", "or", "not", "subset", "union",
+    "intersect", "diff", "times", "notin", "mod", "for", "do",
+];
+
+#[test]
+fn every_listed_keyword_really_is_one() {
+    for kw in ALL_KEYWORDS {
+        let toks = seki::lexer::tokenize(kw).expect("tokenize");
+        assert!(
+            seki::lexer::keyword_spelling(&toks[0].tok).is_some(),
+            "`{}` is listed as a keyword but the lexer scans it as an identifier",
+            kw
+        );
+    }
+    // And a non-keyword must not be mistaken for one.
+    let toks = seki::lexer::tokenize("mu").expect("tokenize");
+    assert!(seki::lexer::keyword_spelling(&toks[0].tok).is_none());
+}
+
+// -- proof terms ------------------------------------------------------------
+//
+// Every accepted theorem now carries a `kernel::Cert` that an independent
+// checker re-established.  These pin down that the certificate is real
+// (it records the actual structure of the proof), that the kernel's verdict
+// drives the reported trust level, and that the remaining gaps stay visible.
+
+fn cert_of(src: &str, name: &str) -> seki::kernel::Cert {
+    let g = run(src);
+    g.theorem_certs
+        .get(name)
+        .unwrap_or_else(|| panic!("no proof term recorded for `{}`", name))
+        .clone()
+}
+
+#[test]
+fn a_finite_forall_certificate_covers_every_element() {
+    let cert = cert_of(
+        "def Small := {1, 2, 3}\ntheorem t : forall x in Small, x > 0 := by eval",
+        "t",
+    );
+    match cert {
+        seki::kernel::Cert::ForallFinite { subs } => assert_eq!(subs.len(), 3),
+        other => panic!("expected a per-element certificate, got {}", other.render()),
+    }
+}
+
+#[test]
+fn an_existential_certificate_carries_the_witness() {
+    let cert = cert_of("theorem t : exists n in Nat, n > 100 := by eval", "t");
+    assert!(
+        cert.render().contains("witness 101"),
+        "the certificate should name the witness: {}",
+        cert.render()
+    );
+}
+
+#[test]
+fn an_inequality_certificate_carries_a_checkable_witness() {
+    // `by algebra` searched for the decomposition; the certificate records
+    // it so the kernel only has to multiply out and compare.
+    let cert = cert_of(
+        "theorem t : forall a in Int, forall b in Int, a*a + b*b >= 2*a*b := by algebra",
+        "t",
+    );
+    let text = cert.render();
+    assert!(
+        text.contains("combination of the squares"),
+        "expected a sum-of-squares witness, got: {}",
+        text
+    );
+}
+
+#[test]
+fn a_case_split_certificate_records_both_branches() {
+    let cert = cert_of(
+        "def absInt := \\x -> if x >= 0 then x else 0 - x\n\
+         theorem t : forall x in Int, absInt x >= 0 := by unfold absInt then algebra",
+        "t",
+    );
+    let text = cert.render();
+    assert!(text.contains("unfold"), "{}", text);
+    assert!(text.contains("case split"), "{}", text);
+    assert!(text.contains("when it does not"), "{}", text);
+}
+
+#[test]
+fn the_kernel_verdict_drives_the_reported_trust() {
+    // A sampled proof cannot be fully checked, and says why.
+    let g = run(
+        "def f : Nat -> Nat := \\(n : Nat) -> if n < 300 then 0 else 1\n\
+         theorem s : forall n in Nat, f(n) == 0 := by eval",
+    );
+    let verdict = &g.theorem_verdicts["s"];
+    assert!(!verdict.fully_checked);
+    assert!(verdict.is_sampled());
+    assert_eq!(g.theorem_trust["s"], TrustLevel::Sampled);
+
+    // A fully checked one has nothing outstanding.
+    let g = run("theorem q : forall x in Real, x * x >= 0.0 := by algebra");
+    let verdict = &g.theorem_verdicts["q"];
+    assert!(verdict.fully_checked);
+    assert!(!verdict.has_assumptions());
+    assert_eq!(g.theorem_trust["q"], TrustLevel::Sound);
+}
+
+#[test]
+fn a_tactic_without_a_proof_term_is_reported_as_unchecked() {
+    // `by induction`'s step has no witness form yet.  That is a *visible*
+    // gap, not a silent one: the theorem is accepted, marked, and refused
+    // by `--strict`.
+    let g = run(
+        "def sum := \\n -> if n == 0 then 0 else n + sum (n - 1)\n\
+         theorem nn : forall n in Nat, sum n >= 0 := by induction",
+    );
+    assert_eq!(g.theorem_trust["nn"], TrustLevel::Unchecked);
+    let text = g.theorem_certs["nn"].render();
+    assert!(text.contains("base case"), "{}", text);
+    assert!(text.contains("NOT CHECKED"), "{}", text);
+
+    let mut strict = Session::new();
+    strict.strict = true;
+    assert!(strict
+        .run_source(
+            "def sum := \\n -> if n == 0 then 0 else n + sum (n - 1)\n\
+             theorem nn : forall n in Nat, sum n >= 0 := by induction",
+            true
+        )
+        .is_err());
+}
+
+#[test]
+fn opaque_subterms_are_not_assumed_non_negative() {
+    // The bug the proof terms caught.  `by algebra` used to accept this
+    // because `neg n` became an opaque atom and every atom was assumed
+    // non-negative over Nat.
+    let err = run_err(
+        "def neg : Nat -> Int := \\(n : Nat) -> 0 - 5\n\
+         theorem bad : forall n in Nat, neg n >= 0 := by algebra",
+    );
+    assert!(err.is_proof_error(), "{:?}", err);
+    let g = run("def neg : Nat -> Int := \\(n : Nat) -> 0 - 5\ndef v := neg 3");
+    assert!(
+        matches!(g.defs.get("v"), Some(Value::Int(-5))),
+        "and the evaluator does disagree with the claim"
+    );
+}
+
+#[test]
+fn a_bounded_comprehension_counts_as_finite() {
+    // `Zn 12 = {x in Nat | x < 12}` is finite, so enumerating it is
+    // exhaustive and the proof is checked rather than sampled.
+    let g = run(
+        "def Zn := \\n -> {x in Nat | x < n}\n\
+         theorem t : forall x in (Zn 12), x < 12 := by eval",
+    );
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+    // An unbounded comprehension is still infinite.
+    let g = run(
+        "def Big := {x in Nat | x * x >= 0}\n\
+         def f : Nat -> Nat := \\(n : Nat) -> if n < 300 then 0 else 1\n\
+         theorem u : forall x in Big, f x == 0 := by eval",
+    );
+    assert_eq!(g.theorem_trust["u"], TrustLevel::Sampled);
+}
+
+#[test]
+fn the_audit_command_reports_every_theorem() {
+    let dir = std::env::temp_dir().join("seki_audit_test");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let file = dir.join("audit.seki");
+    std::fs::write(
+        &file,
+        "theorem a : forall x in Real, x * x >= 0.0 := by algebra\n\
+         def f : Nat -> Nat := \\(n : Nat) -> if n < 300 then 0 else 1\n\
+         theorem b : forall n in Nat, f(n) == 0 := by eval\n",
+    )
+    .expect("write");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--audit")
+        .arg(&file)
+        .output()
+        .expect("run seki --audit");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", stdout);
+    assert!(stdout.contains("kernel-checked from primitives"), "{}", stdout);
+    assert!(stdout.contains("sampled"), "{}", stdout);
+    assert!(stdout.contains("2 theorems"), "{}", stdout);
+}
+
+#[test]
+fn the_proof_command_prints_the_term() {
+    let dir = std::env::temp_dir().join("seki_proof_test");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let file = dir.join("proof.seki");
+    std::fs::write(
+        &file,
+        "def Small := {1, 2, 3}\ntheorem t : forall x in Small, x > 0 := by eval\n",
+    )
+    .expect("write");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--proof")
+        .arg(&file)
+        .arg("t")
+        .output()
+        .expect("run seki --proof");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", stdout);
+    assert!(stdout.contains("3 elements"), "{}", stdout);
+    assert!(stdout.contains("every step re-established"), "{}", stdout);
+}
+
+// -- deduction --------------------------------------------------------------
+//
+// `by apply` / `by have` / `by assumption` were added because a library of
+// 955 theorems contained only twelve proofs that used another theorem: the
+// only ways to reuse a fact were `by simp` (equalities) and `by obtain`
+// (existentials), so an implication or an inequality could not be reused at
+// all.  These pin down that proofs now compose.
+
+#[test]
+fn a_lemma_can_be_applied_to_concrete_values() {
+    // Before `by apply`, this failed with "lemma is not an equality".
+    let g = run(
+        "axiom mono : forall x in Real, forall y in Real, x <= y => (2.0*x) <= (2.0*y)\n\
+         theorem t : (2.0 * 1.0) <= (2.0 * 3.0) := by apply mono",
+    );
+    assert!(g.theorems.contains_key("t"));
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Axiomatic);
+}
+
+#[test]
+fn applying_a_lemma_infers_its_instantiation_from_the_goal() {
+    let g = run(
+        "theorem mono : forall x in Real, forall y in Real, x <= y => (2.0*x) <= (2.0*y)\n\
+           := by algebra\n\
+         theorem t : forall a in Real, forall b in Real, a <= b => (2.0*a) <= (2.0*b)\n\
+           := by apply mono",
+    );
+    // Nothing was given with `with`, so both bindings came from matching.
+    match &g.theorem_certs["t"] {
+        seki::kernel::Cert::Apply { substs, .. } => assert_eq!(substs.len(), 2),
+        other => panic!("expected an application, got {}", other.render()),
+    }
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+}
+
+#[test]
+fn a_binding_the_goal_does_not_determine_must_be_given() {
+    // Transitivity is the canonical case: `y` is nowhere in the conclusion
+    // `x <= z`, so matching cannot find it and the user has to say.
+    const TRANS: &str = "theorem le_trans : forall x in Real, forall y in Real, \
+         forall z in Real, (x <= y) and (y <= z) => x <= z := by algebra\n";
+    let err = run_err(&format!(
+        "{}theorem t : forall a in Real, forall c in Real,\n\
+             (a <= 5.0) and (5.0 <= c) => a <= c := by apply le_trans",
+        TRANS
+    ));
+    assert!(err.message().contains("with y"), "{}", err.message());
+
+    let g = run(&format!(
+        "{}theorem t : forall a in Real, forall c in Real,\n\
+             (a <= 5.0) and (5.0 <= c) => a <= c := by apply le_trans with y := 5.0",
+        TRANS
+    ));
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+    // Both of transitivity's premises came from the goal's own hypotheses.
+    match &g.theorem_certs["t"] {
+        seki::kernel::Cert::Apply { premises, .. } => assert_eq!(premises.len(), 2),
+        other => panic!("expected an application, got {}", other.render()),
+    }
+}
+
+#[test]
+fn applying_a_lemma_does_not_skip_its_premises() {
+    // `mono` needs `a <= b`, and nothing here supplies it.
+    let err = run_err(
+        "theorem mono : forall x in Real, forall y in Real, x <= y => (2.0*x) <= (2.0*y)\n\
+           := by algebra\n\
+         theorem bad : forall a in Real, forall b in Real, (2.0*a) <= (2.0*b)\n\
+           := by apply mono",
+    );
+    assert!(err.is_proof_error(), "{:?}", err);
+    assert!(err.message().contains("premise"), "{}", err.message());
+}
+
+#[test]
+fn forward_reasoning_composes_steps() {
+    let g = run(
+        "theorem mono : forall x in Real, forall y in Real, x <= y => (2.0*x) <= (2.0*y)\n\
+           := by algebra\n\
+         theorem t : forall a in Real, a <= 5.0 => (2.0 * a) <= 12.0\n\
+           := by have h : (2.0 * a) <= (2.0 * 5.0) := by apply mono\n\
+              then algebra",
+    );
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+    let text = g.theorem_certs["t"].render();
+    assert!(text.contains("have"), "{}", text);
+    assert!(text.contains("apply `mono`"), "{}", text);
+}
+
+#[test]
+fn a_have_may_not_assume_what_it_cannot_prove() {
+    let err = run_err(
+        "theorem bad : forall a in Real, a <= 5.0 => (2.0 * a) <= 4.0\n\
+           := by have h : (2.0 * a) <= 4.0 := by assumption\n\
+              then assumption",
+    );
+    assert!(err.is_proof_error(), "{:?}", err);
+}
+
+#[test]
+fn assumption_closes_a_goal_that_is_already_assumed() {
+    let g = run("theorem t : forall p in Real, p > 0.0 => p > 0.0 := by assumption");
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+    let err = run_err("theorem bad : forall p in Real, p > 0.0 => p > 1.0 := by assumption");
+    assert!(err.message().contains("not among the hypotheses"), "{}", err.message());
+}
+
+// -- linear arithmetic with a witness ---------------------------------------
+
+#[test]
+fn a_scaled_hypothesis_produces_a_farkas_certificate() {
+    // `x <= 3 ⊢ 2x <= 6` needs a multiplier of 2; the old equal-weights
+    // subset search could not express that, so it went unchecked.
+    let g = run("theorem t : forall x in Real, x <= 3.0 => (2.0 * x) <= 6.0 := by algebra");
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+    assert!(g.theorem_certs["t"].render().contains('='));
+}
+
+#[test]
+fn an_interval_bound_is_kernel_checked() {
+    // The shape a parameterised model actually wants: "for every value in
+    // this range, the conclusion holds".
+    let g = run(
+        "theorem t : forall r in Real, (0.05 <= r) and (r <= 0.15)\n\
+             => (100.0 - 200.0 * r) > 0.0 := by algebra",
+    );
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+    let g = run(
+        "theorem u : forall r in Real, forall d in Real,\n\
+             (0.05 <= r) and (r <= 0.15) and (0.0 <= d) and (d <= 0.1)\n\
+             => (100.0 - 200.0*r - 100.0*d) > 0.0 := by algebra",
+    );
+    assert_eq!(g.theorem_trust["u"], TrustLevel::Sound);
+}
+
+#[test]
+fn an_equality_hypothesis_can_be_rearranged() {
+    // `w³ - w - 2 = 0 ⊢ w³ = w + 2` — what an obtained witness's defining
+    // property looks like once it has to meet the goal's shape.
+    let g = run(
+        "theorem t : forall w in Real, ((w*w*w) - w - 2.0) == 0.0 => (w*w*w) == (w + 2.0)\n\
+           := by algebra",
+    );
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+}
+
+#[test]
+fn a_case_split_can_close_a_branch_by_assumption() {
+    // `(if x >= y then x else y) >= y`: one branch is the hypothesis
+    // itself, the other is `y >= y`.
+    let g = run(
+        "theorem t : forall x in Int, forall y in Int, (if x >= y then x else y) >= y\n\
+           := by algebra",
+    );
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+    let text = g.theorem_certs["t"].render();
+    assert!(text.contains("case split"), "{}", text);
+    assert!(text.contains("hypotheses in scope"), "{}", text);
+}
+
+#[test]
+fn the_deduction_example_is_entirely_kernel_checked() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--audit")
+        .arg("examples/40_deduction.seki")
+        .output()
+        .expect("run seki --audit");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", stdout);
+    assert!(
+        stdout.contains("every claim in this file was re-established by the kernel"),
+        "the deduction example must stay fully checked:\n{}",
+        stdout
+    );
+}
+
+// -- non-termination and the set-theoretic foundation -----------------------
+
+/// Run a source string through the real binary with extra environment, and
+/// return its combined output.  Used for the runaway tests: the limits are
+/// read from the environment, and setting that in-process would leak into
+/// every other test running alongside.
+fn run_binary_with_env(src: &str, env: &[(&str, &str)]) -> String {
+    let dir = std::env::temp_dir().join("seki_env_test");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let file = dir.join(format!("t{}.seki", env.len() + src.len()));
+    std::fs::write(&file, src).expect("write");
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_seki"));
+    cmd.arg("--check").arg(&file);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("run seki");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+#[test]
+fn a_tail_recursive_runaway_is_an_error_not_a_hang() {
+    // `docs/spec/06-soundness.md` used to claim a fuel limit caught this.
+    // It did not: `COMP_FUEL` bounds how many *domain elements* a
+    // comprehension filters, and a tail-recursive call never re-enters
+    // `eval`, so this ran forever.
+    let out = run_binary_with_env(
+        "def loop := \\n -> loop (n + 1)\ndef v := loop 0\n",
+        &[("SEKI_EVAL_BUDGET", "200000")],
+    );
+    assert!(
+        out.contains("budget"),
+        "expected the step budget to stop it:\n{}",
+        out
+    );
+}
+
+#[test]
+fn a_deep_recursive_runaway_is_an_error_not_a_crash() {
+    // The step budget alone does not catch this one: each level eats native
+    // stack far faster than budget, so the process used to abort with
+    // `fatal runtime error: stack overflow`.
+    let out = run_binary_with_env(
+        "def deep := \\n -> 1 + deep (n + 1)\ndef v := deep 0\n",
+        &[("SEKI_EVAL_DEPTH", "500")],
+    );
+    assert!(
+        out.contains("nested"),
+        "expected the depth limit to stop it:\n{}",
+        out
+    );
+}
+
+#[test]
+fn ordinary_recursion_is_unaffected_by_the_limits() {
+    let g = run(
+        "def fact := \\n -> if n <= 1 then 1 else n * fact (n - 1)\n\
+         def r := fact 10",
+    );
+    assert!(matches!(g.defs.get("r"), Some(Value::Int(3628800))));
+}
+
+#[test]
+fn the_universe_is_not_a_member_of_itself() {
+    // `Set` is the class of all sets.  A proper class is not a set, so it
+    // does not contain itself; reporting `true` here was how seki announced
+    // that it sat on naive comprehension.
+    let g = run("def selfmem := Set in Set");
+    assert!(matches!(g.defs.get("selfmem"), Some(Value::Bool(false))));
+    // Ordinary sets are still members of it.
+    let g = run("def ok := {1, 2} in Set");
+    assert!(matches!(g.defs.get("ok"), Some(Value::Bool(true))));
+}
+
+#[test]
+fn a_set_cannot_be_carved_out_of_the_universe() {
+    // Separation, not unrestricted comprehension — and with it, no Russell
+    // set.  Asking seki whether the old `{x in Set | x notin x}` contained
+    // itself used to abort the process.
+    let err = run_err("def R := {x in Set | x notin x}");
+    assert!(
+        err.message().contains("class of all sets"),
+        "{}",
+        err.message()
+    );
+    // Carving a subset out of a set that exists is of course still fine.
+    let g = run(
+        "def evens := {x in {1, 2, 3, 4} | x mod 2 == 0}\n\
+         def has2 := 2 in evens\n\
+         def has3 := 3 in evens",
+    );
+    assert!(matches!(g.defs.get("has2"), Some(Value::Bool(true))));
+    assert!(matches!(g.defs.get("has3"), Some(Value::Bool(false))));
+}
+
+// -- refinement obligations -------------------------------------------------
+//
+// `def f : A -> {y in B | Q y}` claims `forall x in A, Q[y := f x]`.  That
+// was the last part of seki where "checked" meant "spot-checked": the
+// theorem side became kernel-verified while the type side stayed a sample.
+// These pin down that the claim is now proved where it can be, and recorded
+// as sampled where it cannot.
+
+#[test]
+fn a_provable_refinement_is_proved_not_sampled() {
+    let g = run(
+        "def Pos := {x in Int | x > 0}\n\
+         def f : Int -> Pos := \\x -> x * x + 1",
+    );
+    assert_eq!(g.def_trust["f"], TrustLevel::Sound);
+    // And a proof term was kept for it.
+    let (goal, cert) = &g.def_obligations["f"];
+    assert!(format!("{}", goal).contains("forall"), "{}", goal);
+    assert!(cert.is_some(), "a discharged obligation should keep its proof");
+}
+
+#[test]
+fn an_unprovable_refinement_is_recorded_as_sampled() {
+    // Positive on every sampled point, negative at 10^9 — the shape
+    // `docs/spec/06-soundness.md` §6.2 uses as its example of the hole.
+    let g = run(
+        "def Pos := {x in Int | x > 0}\n\
+         def f : Int -> Pos := \\x -> if x == 1000000001 then 0 - 1 else x * x + 1",
+    );
+    assert_eq!(g.def_trust["f"], TrustLevel::Sampled);
+    // The obligation is still recorded, and so is whatever the search came
+    // back with — that is what makes the gap inspectable rather than just
+    // reported.  What matters is that it is not a *sound* proof.
+    let (goal, _) = &g.def_obligations["f"];
+    assert!(format!("{}", goal).contains("forall __arg1 in Int"), "{}", goal);
+}
+
+#[test]
+fn strict_mode_refuses_a_refinement_that_was_only_sampled() {
+    let mut session = Session::new();
+    session.strict = true;
+    let err = session
+        .run_source(
+            "def Pos := {x in Int | x > 0}\n\
+             def f : Int -> Pos := \\x -> if x == 1000000001 then 0 - 1 else x * x + 1",
+            true,
+        )
+        .expect_err("--strict must refuse an unproved refinement");
+    assert!(err.message().contains("not proved"), "{}", err.message());
+    // A provable one passes.
+    let mut session = Session::new();
+    session.strict = true;
+    session
+        .run_source(
+            "def Pos := {x in Int | x > 0}\n\
+             def f : Int -> Pos := \\x -> x * x + 1",
+            true,
+        )
+        .expect("--strict must accept a proved refinement");
+}
+
+#[test]
+fn a_guarded_withdrawal_keeps_its_balance_non_negative_by_type() {
+    // The invariant `sample/ledger` enforces with a runtime check, stated
+    // as a type and proved: the guard is what makes it hold, and removing
+    // it is caught.
+    let g = run(
+        "def NonNeg := {x in Int | x >= 0}\n\
+         def safeWithdraw : Nat -> Nat -> NonNeg\n\
+           := \\bal amt -> if amt <= bal then bal - amt else bal\n\
+         def unsafeWithdraw : Nat -> Nat -> NonNeg := \\bal amt -> bal - amt",
+    );
+    assert_eq!(g.def_trust["safeWithdraw"], TrustLevel::Sound);
+    assert_eq!(g.def_trust["unsafeWithdraw"], TrustLevel::Sampled);
+}
+
+#[test]
+fn an_unrefined_annotation_generates_no_obligation() {
+    let g = run("def f : Int -> Int := \\x -> x + 1");
+    assert!(!g.def_trust.contains_key("f"));
+}
+
+#[test]
+fn the_portfolio_prefers_a_proof_the_kernel_accepts() {
+    // `by auto` used to take the first candidate that closed the goal, and
+    // the cheap closers come first — so `by eval` won by sampling even when
+    // `by unfold f then algebra` would have proved it.
+    let g = run(
+        "def f := \\x -> x * x + 1\n\
+         theorem t : forall a in Int, (f a) > 0 := by auto",
+    );
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+}
+
+#[test]
+fn a_strict_inequality_needs_more_than_non_negative_coefficients() {
+    // `forall n in Nat, n > 0` is false at 0.  The coefficient of `n` is
+    // positive, so a rule that only asked for that would accept it.
+    let err = run_err("theorem bad : forall n in Nat, n > 0 := by algebra");
+    assert!(err.is_proof_error(), "{:?}", err);
+    // With a constant to stand on, it holds.
+    let g = run("theorem ok : forall n in Nat, n + 1 > 0 := by algebra");
+    assert_eq!(g.theorem_trust["ok"], TrustLevel::Sound);
+}
+
+#[test]
+fn the_refinement_example_is_audited_as_documented() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--audit")
+        .arg("examples/41_refinement_types.seki")
+        .output()
+        .expect("run seki --audit");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", stdout);
+    assert!(stdout.contains("safeWithdraw"), "{}", stdout);
+    assert!(
+        stdout.contains("the obligation was proved and kernel-checked"),
+        "{}",
+        stdout
+    );
+    assert!(stdout.contains("only sampled"), "{}", stdout);
+}
+
+// -- reasoning from uncertain facts -----------------------------------------
+//
+// An LLM-extracted fact is an assumption with a number attached.  The number
+// lives outside the kernel — letting it in would turn `Sound` into a
+// continuous quantity — and rides on the assumption set the proof term
+// already records.
+
+#[test]
+fn a_confidence_annotation_is_recorded_exactly() {
+    let g = run(
+        "axiom a : forall x in Nat, x >= 1 => x * 2 >= 2 with confidence 0.9 \
+         from \"LLM extraction\"",
+    );
+    assert_eq!(
+        g.axiom_confidence.get("a"),
+        Some(&seki::algebra::Rat::new(9, 10)),
+        "0.9 should read as nine tenths, not as the nearest f64"
+    );
+    assert_eq!(g.axiom_provenance.get("a").map(|s| s.as_str()), Some("LLM extraction"));
+}
+
+#[test]
+fn a_single_uncertain_assumption_passes_its_confidence_through() {
+    let g = run(
+        "axiom a : forall x in Nat, x >= 1 => x * 2 >= 2 with confidence 0.9\n\
+         theorem t : 5 * 2 >= 2 := by apply a with x := 5",
+    );
+    let c = seki::confidence::of_verdict(&g.theorem_verdicts["t"], &g);
+    assert_eq!(c.lower_bound(), seki::algebra::Rat::new(9, 10));
+    // It is still an *assumption*, so the trust level is unchanged.
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Axiomatic);
+}
+
+#[test]
+fn two_uncertain_assumptions_combine_by_frechet_not_by_product() {
+    // 0.9 and 0.8.  The product, 0.72, assumes independence — and facts
+    // from one extraction pass are not independent.  The guaranteed bound
+    // is 0.9 + 0.8 - 1 = 0.7.
+    let g = run(
+        "axiom a : forall x in Nat, x >= 1 => x * 2 >= 2 with confidence 0.9\n\
+         axiom b : forall y in Nat, y >= 2 => y * 3 >= 6 with confidence 0.8\n\
+         theorem t : 4 * 3 >= 6\n\
+           := by have h : (5 * 2) >= 2 := by apply a with x := 5\n\
+              then apply b with y := 4",
+    );
+    let c = seki::confidence::of_verdict(&g.theorem_verdicts["t"], &g);
+    assert_eq!(c.lower_bound(), seki::algebra::Rat::new(7, 10));
+}
+
+#[test]
+fn a_classical_axiom_does_not_qualify_a_conclusion() {
+    let g = run(
+        "axiom ivt : forall x in Nat, x >= 0\n\
+         theorem t : 5 >= 0 := by apply ivt with x := 5",
+    );
+    let c = seki::confidence::of_verdict(&g.theorem_verdicts["t"], &g);
+    assert!(matches!(c, seki::confidence::Confidence::Unqualified));
+}
+
+#[test]
+fn a_confidence_floor_refuses_a_conclusion_it_is_not_warranted_to() {
+    let mut session = Session::new();
+    session.min_confidence = Some(seki::algebra::Rat::new(85, 100));
+    let err = session
+        .run_source(
+            "axiom a : forall x in Nat, x >= 1 => x * 2 >= 2 with confidence 0.7\n\
+             theorem t : 5 * 2 >= 2 := by apply a with x := 5",
+            true,
+        )
+        .expect_err("a floor of 0.85 must refuse a conclusion warranted to 0.7");
+    assert!(err.message().contains("warranted"), "{}", err.message());
+}
+
+#[test]
+fn a_confidence_outside_zero_to_one_is_rejected() {
+    let err = run_err("axiom a : 1 >= 0 with confidence 1.5");
+    assert!(err.message().contains("[0, 1]"), "{}", err.message());
+}
+
+// -- working backwards ------------------------------------------------------
+
+#[test]
+fn a_failed_linear_goal_says_what_would_make_it_hold() {
+    let err = run_err("theorem t : forall r in Real, (100.0 - 200.0 * r) > 0.0 := by algebra");
+    assert!(
+        err.message().contains("it would hold given"),
+        "{}",
+        err.message()
+    );
+    assert!(err.message().contains("r < (1 / 2)"), "{}", err.message());
+}
+
+#[test]
+fn a_hypothesis_that_is_not_tight_enough_gets_the_real_bound() {
+    let err = run_err(
+        "theorem t : forall r in Real, r <= 0.6 => (100.0 - 200.0 * r) > 0.0 := by algebra",
+    );
+    assert!(err.message().contains("r < (1 / 2)"), "{}", err.message());
+    // And with the bound it suggests, the theorem goes through and is
+    // kernel-checked.
+    let g = run("theorem t : forall r in Real, r < 0.5 => (100.0 - 200.0 * r) > 0.0 := by algebra");
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+}
+
+#[test]
+fn no_suggestion_is_offered_when_there_is_nothing_useful_to_say() {
+    // Restating the goal is not a suggestion, and a non-linear goal has no
+    // single bound.
+    let err = run_err("theorem t : forall n in Nat, n >= 5 := by algebra");
+    assert!(!err.message().contains("it would hold given"), "{}", err.message());
+    let err = run_err(
+        "theorem t : forall x in Real, forall y in Real, x * y >= 0.0 := by algebra",
+    );
+    assert!(!err.message().contains("it would hold given"), "{}", err.message());
+}
+
+// -- error messages that name what is missing -------------------------------
+
+#[test]
+fn a_missing_premise_is_named_with_a_way_to_supply_it() {
+    let err = run_err(
+        "theorem mono : forall x in Real, forall y in Real, x <= y => (2.0*x) <= (2.0*y)\n\
+           := by algebra\n\
+         theorem t : forall a in Real, forall b in Real, (2.0*a) <= (2.0*b) := by apply mono",
+    );
+    let m = err.message();
+    assert!(m.contains("premise `(a <= b)`"), "{}", m);
+    assert!(m.contains("by have"), "the message should say how to supply it: {}", m);
+    assert!(m.contains("nothing is assumed here"), "{}", m);
+}
+
+#[test]
+fn a_misspelled_lemma_gets_a_suggestion() {
+    let err = run_err(
+        "theorem mono : forall x in Real, x >= 0.0 => x + 1.0 >= 1.0 := by algebra\n\
+         theorem t : 5.0 + 1.0 >= 1.0 := by apply mno",
+    );
+    assert!(err.message().contains("did you mean `mono`"), "{}", err.message());
+}
+
+#[test]
+fn the_uncertain_facts_example_reports_the_frechet_bound() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--audit")
+        .arg("examples/42_uncertain_facts.seki")
+        .output()
+        .expect("run seki --audit");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", stdout);
+    assert!(stdout.contains("confidence >= 7/10"), "{}", stdout);
+    assert!(stdout.contains("confidence >= 9/10"), "{}", stdout);
 }

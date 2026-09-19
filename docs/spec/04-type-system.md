@@ -152,10 +152,11 @@ IO : Set -> Set
 | 構成子 | 健全性 |
 |---|---|
 | Atomic, Enum, 列挙集合 | ✅ |
-| 関数型 (Arrow) | 🟡 sample-based |
+| 関数型 (Arrow) | 🟡 sample-based (返り値が refinement なら上の経路も通る) |
 | 依存型 (DepArrow, Π) | 🟡 sample-based |
 | 依存ペア (DepPair, Σ) | ✅ **exact** — 候補の pair `(a, b)` を直接持っているので、関数の全域サンプリングと違い近似不要 |
-| Refinement | 🟡 sample-based、線形整数で linarith 強化 |
+| Refinement (返り値位置) | ✅ **証明義務として prover + kernel に流す** (0.9.0)。落とせなければ sample に戻り `[sampled]` と記録される — `docs/spec/06-soundness.md` §6.0.9 |
+| Refinement (引数位置) | 🟡 sample-based |
 | Product (Tuple) | ✅ |
 | ListOf, TreeOf | 🟡 sample 一定数 |
 | ADT (`data`) | ✅ (構造一致なので健全) |

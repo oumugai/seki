@@ -22,8 +22,75 @@ const COMP_FUEL: usize = 10_000;
 /// sample up to this bound.  Any counterexample within the sample is reported.
 pub const SAMPLE_BOUND: i64 = 200;
 
+/// Default evaluation-step budget for one top-level declaration.
+///
+/// The whole of `lib/` + `examples/` + `tests/seki/` evaluates within five
+/// million steps, so this leaves an order of magnitude of headroom while
+/// still stopping a runaway in a few seconds rather than never.
+pub const DEFAULT_EVAL_BUDGET: u64 = 50_000_000;
+
+/// Deepest nesting of `eval` before the evaluator gives up.
+///
+/// The step budget alone does not catch a *non-tail* runaway: each level
+/// consumes native stack much faster than it consumes budget, so the process
+/// dies with `fatal runtime error: stack overflow` — an abort, not an error
+/// a program can report.  `src/main.rs` already runs on a 256 MiB stack for
+/// legitimately deep recursion; this keeps the runaway case inside it.
+pub const DEFAULT_EVAL_DEPTH: u32 = 2_000;
+
+fn eval_depth_limit() -> u32 {
+    std::env::var("SEKI_EVAL_DEPTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_EVAL_DEPTH)
+}
+
+fn eval_budget() -> u64 {
+    std::env::var("SEKI_EVAL_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_EVAL_BUDGET)
+}
+
 pub struct EvalCtx<'a> {
     pub globals: &'a Globals,
+    /// Evaluation steps left before the evaluator gives up.
+    ///
+    /// seki does not require definitions to terminate — the termination
+    /// check is a warning — so a non-terminating one has to be stopped
+    /// somewhere.  `docs/spec/06-soundness.md` used to claim a fuel limit
+    /// already did this; it did not.  `COMP_FUEL` bounds how many *domain
+    /// elements* a comprehension filters, which says nothing about how long
+    /// evaluating one of them takes, so `def loop := \n -> loop (n + 1)`
+    /// ran forever (tail calls) or overflowed the stack (everything else).
+    ///
+    /// The budget is per top-level declaration and is refunded each time a
+    /// fresh `EvalCtx` is built, so a long file is not penalised for its
+    /// length.  `SEKI_EVAL_BUDGET` overrides the default.
+    steps_left: std::cell::Cell<u64>,
+    /// Current `eval` nesting, against [`DEFAULT_EVAL_DEPTH`].
+    depth: std::cell::Cell<u32>,
+    /// When set, `enumerate_set` refuses to materialize an infinite set
+    /// instead of returning a `SAMPLE_BOUND`-sized sample.
+    ///
+    /// This is what makes `crate::kernel` unable to accept a sampled
+    /// "proof" no matter what a tactic claims: the kernel evaluates through
+    /// a context built by [`EvalCtx::finite_only`], so the moment a check
+    /// would need to enumerate `Nat` it fails instead of quietly looking at
+    /// the first 200 elements.  Tactics keep the sampling context — they
+    /// are allowed to *search* however they like, because whatever they
+    /// find has to survive the kernel afterwards.
+    pub finite_only: bool,
+}
+
+/// Restores the evaluator's nesting count when it goes out of scope, so the
+/// depth stays right no matter how a level is left.
+struct DepthGuard<'a>(&'a std::cell::Cell<u32>);
+
+impl Drop for DepthGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get().saturating_sub(1));
+    }
 }
 
 /// Result of evaluating a closure body with tail-call awareness.
@@ -42,10 +109,66 @@ enum EvalOutcome {
 
 impl<'a> EvalCtx<'a> {
     pub fn new(globals: &'a Globals) -> Self {
-        EvalCtx { globals }
+        EvalCtx {
+            globals,
+            finite_only: false,
+            steps_left: std::cell::Cell::new(eval_budget()),
+            depth: std::cell::Cell::new(0),
+        }
+    }
+
+    /// An evaluation context that refuses to sample an infinite domain.
+    /// See [`EvalCtx::finite_only`].
+    pub fn finite_only(globals: &'a Globals) -> Self {
+        EvalCtx {
+            globals,
+            finite_only: true,
+            steps_left: std::cell::Cell::new(eval_budget()),
+            depth: std::cell::Cell::new(0),
+        }
+    }
+
+    /// Charge one evaluation step, failing once the budget runs out.
+    ///
+    /// A budget rather than a timeout so that a failure is *reproducible*:
+    /// the same program fails the same way on every machine.
+    fn step(&self) -> SekiResult<()> {
+        let left = self.steps_left.get();
+        if left == 0 {
+            return Err(SekiError::Runtime(format!(
+                "evaluation budget of {} steps exhausted — the computation does not \
+                 appear to terminate. seki only *warns* about non-terminating \
+                 definitions, so this is where one is caught. Raise SEKI_EVAL_BUDGET \
+                 if the computation is genuinely this large.",
+                eval_budget()
+            )));
+        }
+        self.steps_left.set(left - 1);
+        Ok(())
+    }
+
+    /// Enter one level of evaluation, failing if the nesting is already at
+    /// the limit.  The returned guard restores the depth however the caller
+    /// leaves — including through `?`.
+    fn enter(&self) -> SekiResult<DepthGuard<'_>> {
+        let d = self.depth.get();
+        let limit = eval_depth_limit();
+        if d >= limit {
+            return Err(SekiError::Runtime(format!(
+                "evaluation nested {} levels deep — the computation does not appear to \
+                 terminate. seki only *warns* about non-terminating definitions, so \
+                 this is where one is caught before it exhausts the native stack. \
+                 Raise SEKI_EVAL_DEPTH if the recursion is genuinely this deep.",
+                limit
+            )));
+        }
+        self.depth.set(d + 1);
+        Ok(DepthGuard(&self.depth))
     }
 
     pub fn eval(&self, e: &Expr, env: &Env) -> SekiResult<Value> {
+        self.step()?;
+        let _depth = self.enter()?;
         match e {
             Expr::Int(n) => Ok(Value::Int(*n)),
             Expr::Real(r) => Ok(Value::Real(*r)),
@@ -194,6 +317,23 @@ impl<'a> EvalCtx<'a> {
                         )))
                     }
                 };
+                // Separation, not unrestricted comprehension: a new set may
+                // only be carved out of one that already exists.  `Set` is
+                // the class of all sets, not a set, so `{x in Set | P}` is
+                // rejected — and with it Russell's `{x in Set | x notin x}`,
+                // which seki used to accept and then die on when asked
+                // whether it contained itself.
+                if matches!(&*dset, SetVal::Atomic(AtomicSet::Universe)) {
+                    return Err(SekiError::Runtime(format!(
+                        "cannot build a set by comprehension over `Set`: `Set` is the \
+                         class of all sets, not a set itself, so `{{{} in Set | ...}}` \
+                         is not a legitimate construction (this is the separation \
+                         restriction that distinguishes ZF from naive set theory — \
+                         see docs/spec/06-soundness.md). Carve the subset out of a \
+                         set that already exists instead.",
+                        var
+                    )));
+                }
                 Ok(Value::Set(Arc::new(SetVal::Comp {
                     var: var.clone(),
                     domain: dset,
@@ -325,6 +465,11 @@ impl<'a> EvalCtx<'a> {
     /// recursion depth for tail-recursive functions.
     pub fn apply(&self, mut f: Value, mut args: Vec<Value>) -> SekiResult<Value> {
         while !args.is_empty() {
+            // Charge the loop itself, not just `eval`: a tail-recursive
+            // function never re-enters `eval` for its own call, so without
+            // this a tail-recursive non-terminating definition would spin
+            // here forever instead of being caught.
+            self.step()?;
             match f {
                 Value::Closure { params, body, env, rec_name } => {
                     let take = args.len().min(params.len());
@@ -522,9 +667,9 @@ impl<'a> EvalCtx<'a> {
         let lv = self.eval(l, env)?;
         let rv = self.eval(r, env)?;
         match op {
-            BinOp::Add => arith(lv, rv, |a, b| a + b, |a, b| a + b),
-            BinOp::Sub => arith(lv, rv, |a, b| a - b, |a, b| a - b),
-            BinOp::Mul => arith(lv, rv, |a, b| a * b, |a, b| a * b),
+            BinOp::Add => arith(lv, rv, "+", i64::checked_add, |a, b| a + b),
+            BinOp::Sub => arith(lv, rv, "-", i64::checked_sub, |a, b| a - b),
+            BinOp::Mul => arith(lv, rv, "*", i64::checked_mul, |a, b| a * b),
             BinOp::Div => arith_div(lv, rv),
             BinOp::Mod => arith_mod(lv, rv),
             BinOp::Eq => Ok(Value::Bool(value_eq(&lv, &rv))),
@@ -582,7 +727,10 @@ impl<'a> EvalCtx<'a> {
     fn eval_unop(&self, op: &UnOp, e: &Expr, env: &Env) -> SekiResult<Value> {
         let v = self.eval(e, env)?;
         match (op, v) {
-            (UnOp::Neg, Value::Int(n)) => Ok(Value::Int(-n)),
+            (UnOp::Neg, Value::Int(n)) => n
+                .checked_neg()
+                .map(Value::Int)
+                .ok_or_else(|| overflow_error("unary -", 0, n)),
             (UnOp::Neg, Value::Real(r)) => Ok(Value::Real(-r)),
             (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
             (op, v) => Err(SekiError::Runtime(format!(
@@ -608,7 +756,14 @@ impl<'a> EvalCtx<'a> {
                 AtomicSet::Bool => matches!(x, Value::Bool(_)),
                 AtomicSet::StringS => matches!(x, Value::Str(_)),
                 AtomicSet::Prop => matches!(x, Value::Bool(_)),
-                AtomicSet::Universe => matches!(x, Value::Set(_)),
+                // `Set` is the class of *all* sets.  A proper class is not
+                // a set, so it is not a member of itself: `Set in Set` is
+                // false.  Reporting it as true was how seki advertised that
+                // it sits on unrestricted comprehension rather than ZF.
+                AtomicSet::Universe => matches!(
+                    x,
+                    Value::Set(s) if !matches!(**s, SetVal::Atomic(AtomicSet::Universe))
+                ),
             }),
             SetVal::Comp { var, domain, pred, env: e } => {
                 if !self.member(x, domain, env)? {
@@ -835,14 +990,39 @@ fn expect_set(v: Value, ctx: &str) -> SekiResult<Arc<SetVal>> {
 /// Mixed Int/Real arithmetic with automatic promotion.
 /// If either operand is Real (or both are), the result is Real and `fr` is
 /// applied; otherwise both are Int and `fi` is applied.
+/// The error raised when an `Int` operation leaves the range of `i64`.
+///
+/// seki's `Int` is backed by `i64`, but the *logic* treats it as ℤ: `by
+/// algebra` normalizes `n + 1 > n` as a statement about the integers, with
+/// no wrap-around.  If the evaluator silently wrapped, `by eval` and `by
+/// algebra` would disagree about the same proposition — and `by eval` would
+/// "prove" things like `9223372036854775807 + 1 < 0`.  Overflow is therefore
+/// a *runtime error*, never a value: the two tactics can then never contradict
+/// each other, because the evaluator refuses to produce the wrapped witness.
+pub fn overflow_error(op: &str, a: i64, b: i64) -> SekiError {
+    SekiError::Runtime(format!(
+        concat!(
+            "Int overflow in `{} {} {}`: the result leaves the range of a ",
+            "64-bit integer. seki's Int is the mathematical integers in the ",
+            "logic but i64 at runtime; wrapping would make `by eval` ",
+            "disagree with `by algebra`, so it is refused. Use ",
+            "lib/cas/bigint.seki for arbitrary-precision arithmetic."
+        ),
+        a, op, b
+    ))
+}
+
 fn arith(
     lv: Value,
     rv: Value,
-    fi: fn(i64, i64) -> i64,
+    op: &str,
+    fi: fn(i64, i64) -> Option<i64>,
     fr: fn(f64, f64) -> f64,
 ) -> SekiResult<Value> {
     match (lv, rv) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(fi(a, b))),
+        (Value::Int(a), Value::Int(b)) => fi(a, b)
+            .map(Value::Int)
+            .ok_or_else(|| overflow_error(op, a, b)),
         (Value::Real(a), Value::Real(b)) => Ok(Value::Real(fr(a, b))),
         (Value::Int(a), Value::Real(b)) => Ok(Value::Real(fr(a as f64, b))),
         (Value::Real(a), Value::Int(b)) => Ok(Value::Real(fr(a, b as f64))),
@@ -859,7 +1039,9 @@ fn arith_div(lv: Value, rv: Value) -> SekiResult<Value> {
         (Value::Int(_), Value::Int(b)) if *b == 0 => {
             Err(SekiError::Runtime("division by zero".into()))
         }
-        _ => arith(lv, rv, |a, b| a / b, |a, b| a / b),
+        // `checked_div` also rejects the one overflowing division,
+        // `i64::MIN / -1`, which would otherwise panic in a debug build.
+        _ => arith(lv, rv, "/", i64::checked_div, |a, b| a / b),
     }
 }
 
@@ -870,7 +1052,12 @@ fn arith_mod(lv: Value, rv: Value) -> SekiResult<Value> {
         (Value::Int(_), Value::Int(b)) if b == 0 => {
             Err(SekiError::Runtime("mod by zero".into()))
         }
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.rem_euclid(b))),
+        // `i64::MIN.rem_euclid(-1)` overflows (and panics in a debug build),
+        // so go through the checked form.
+        (Value::Int(a), Value::Int(b)) => a
+            .checked_rem_euclid(b)
+            .map(Value::Int)
+            .ok_or_else(|| overflow_error("mod", a, b)),
         (a, b) => Err(SekiError::Runtime(format!(
             "mod is only defined on Int (got {} and {})",
             a.type_name(),
@@ -923,10 +1110,25 @@ pub fn sample_for_membership(s: &SetVal) -> Vec<Value> {
 /// their (enumerable) domain; atomic infinite sets fall back to a sample
 /// bounded by `SAMPLE_BOUND`.  Function-type sets cannot be enumerated.
 pub fn enumerate_set(s: &SetVal, ctx: &EvalCtx, env: &Env) -> SekiResult<Vec<Value>> {
+    // The finiteness gate is checked once, here, against the set as a
+    // whole.  A bounded comprehension such as `{x in Nat | x < 12}` is
+    // finite even though its base domain is not, and enumerating it means
+    // walking that base domain and filtering — which `comprehension_is_bounded`
+    // has already established is exhaustive for this set.
+    if ctx.finite_only && !is_definitely_finite(s) {
+        return Err(SekiError::Runtime(format!(
+            "cannot enumerate the infinite set {} without sampling it",
+            s
+        )));
+    }
+    enumerate_set_inner(s, ctx, env)
+}
+
+fn enumerate_set_inner(s: &SetVal, ctx: &EvalCtx, env: &Env) -> SekiResult<Vec<Value>> {
     match s {
         SetVal::Enum(xs) => Ok(xs.clone()),
         SetVal::Comp { var, domain, pred, env: e } => {
-            let base = enumerate_set(domain, ctx, env)?;
+            let base = enumerate_set_inner(domain, ctx, env)?;
             let mut out = Vec::new();
             for v in base.into_iter().take(COMP_FUEL) {
                 let env2 = e.extend(var.clone(), v.clone());
@@ -975,7 +1177,7 @@ pub fn enumerate_set(s: &SetVal, ctx: &EvalCtx, env: &Env) -> SekiResult<Vec<Val
             // are sampled which keeps things workable.
             let mut acc: Vec<Vec<Value>> = vec![vec![]];
             for p in parts {
-                let elems = enumerate_set(p, ctx, env)?;
+                let elems = enumerate_set_inner(p, ctx, env)?;
                 let mut next = Vec::with_capacity(acc.len() * elems.len());
                 for prefix in &acc {
                     for e in &elems {
@@ -1002,9 +1204,112 @@ pub fn is_definitely_finite(s: &SetVal) -> bool {
     match s {
         SetVal::Enum(_) => true,
         SetVal::Atomic(AtomicSet::Bool) | SetVal::Atomic(AtomicSet::Prop) => true,
-        SetVal::Comp { domain, .. } => is_definitely_finite(domain),
+        SetVal::Comp { var, domain, pred, env } => {
+            is_definitely_finite(domain) || comprehension_is_bounded(var, domain, pred, env)
+        }
         SetVal::Product(parts) => parts.iter().all(|p| is_definitely_finite(p)),
         _ => false,
+    }
+}
+
+/// Is `{x in Nat | pred}` (or over `Int`) finite *and* fully covered by the
+/// range `enumerate_set` walks?
+///
+/// `Zn 12 = {x in Nat | x < 12}` is obviously finite, but the plain
+/// structural test above only looks at the base domain and calls it
+/// infinite.  That mattered once proofs started being checked: a goal
+/// quantified over `Zn 12` looked like it needed sampling when enumerating
+/// it is in fact exhaustive.
+///
+/// The rule is deliberately narrow, because it has to be *sound*: some
+/// conjunct of the predicate must bound the variable above by an integer
+/// literal (and below too, over `Int`), and the bound must lie inside
+/// `SAMPLE_BOUND` — the range `enumerate_set` actually walks.  Then every
+/// member really is visited and nothing is missed.
+fn comprehension_is_bounded(
+    var: &str,
+    domain: &SetVal,
+    pred: &Expr,
+    cenv: &Env,
+) -> bool {
+    let (lo_needed, hi_limit) = match domain {
+        SetVal::Atomic(AtomicSet::Nat) => (false, SAMPLE_BOUND),
+        SetVal::Atomic(AtomicSet::Int) => (true, SAMPLE_BOUND),
+        // A comprehension over another comprehension: the inner one has to
+        // carry the bound.
+        SetVal::Comp { var: v, domain: d, pred: p, env: e } => {
+            return comprehension_is_bounded(v, d, p, e)
+        }
+        _ => return false,
+    };
+    let mut conjuncts = Vec::new();
+    flatten_and(pred, &mut conjuncts);
+    let mut has_upper = false;
+    let mut has_lower = false;
+    for c in conjuncts {
+        if let Some((bound, upper)) = literal_bound_on(var, c, cenv) {
+            if upper {
+                if bound <= hi_limit {
+                    has_upper = true;
+                }
+            } else if bound >= -hi_limit {
+                has_lower = true;
+            }
+        }
+    }
+    has_upper && (!lo_needed || has_lower)
+}
+
+fn flatten_and<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match e {
+        Expr::BinOp(BinOp::And, l, r) => {
+            flatten_and(l, out);
+            flatten_and(r, out);
+        }
+        other => out.push(other),
+    }
+}
+
+/// Read `var < k` / `var <= k` / `k > var` / `k >= var` (and the `>=`
+/// direction) as a constant bound.  Returns `(bound, is_upper)`.
+///
+/// `k` may be an integer literal or a name the comprehension's closure
+/// already binds to one — `Zn n = {x in Nat | x < n}` applied to 12 has a
+/// perfectly concrete bound, it is just written as a variable.
+fn literal_bound_on(var: &str, e: &Expr, cenv: &Env) -> Option<(i64, bool)> {
+    let is_var = |x: &Expr| matches!(x, Expr::Var { name, .. } if name == var);
+    // A bound is either an integer literal or a name the comprehension's
+    // closure already binds to one.
+    let const_int = |name: &str| match cenv.lookup(name) {
+        Some(Value::Int(k)) => Some(*k),
+        _ => None,
+    };
+    let as_int = |x: &Expr| -> Option<i64> {
+        match x {
+            Expr::Int(n) => Some(*n),
+            Expr::Var { name, .. } if name != var => const_int(name),
+            Expr::UnOp(UnOp::Neg, inner) => match inner.as_ref() {
+                Expr::Int(n) => Some(-*n),
+                Expr::Var { name, .. } if name != var => const_int(name).map(|k| -k),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    let (op, l, r) = match e {
+        Expr::BinOp(op, l, r) => (op, l.as_ref(), r.as_ref()),
+        _ => return None,
+    };
+    match (op, is_var(l), is_var(r)) {
+        (BinOp::Lt, true, false) => as_int(r).map(|k| (k - 1, true)),
+        (BinOp::Le, true, false) => as_int(r).map(|k| (k, true)),
+        (BinOp::Gt, false, true) => as_int(l).map(|k| (k - 1, true)),
+        (BinOp::Ge, false, true) => as_int(l).map(|k| (k, true)),
+        (BinOp::Gt, true, false) => as_int(r).map(|k| (k + 1, false)),
+        (BinOp::Ge, true, false) => as_int(r).map(|k| (k, false)),
+        (BinOp::Lt, false, true) => as_int(l).map(|k| (k + 1, false)),
+        (BinOp::Le, false, true) => as_int(l).map(|k| (k, false)),
+        _ => None,
     }
 }
 
@@ -1027,13 +1332,18 @@ pub fn try_forall_from_definition(
     dset: &SetVal,
     body: &Expr,
 ) -> Option<bool> {
-    // Case 1: comprehension predicate ≡ body
+    // Case 1: the comprehension's own predicate, or any one conjunct of it.
+    // `{x in Int | -3 <= x and x <= 3}` really does have `x <= 3` for every
+    // member; before this, only the whole predicate counted and the
+    // single-conjunct form fell through to enumeration.
     if let SetVal::Comp { var: cv, pred, .. } = dset {
         let canon = "__taut_var__";
         let canon_expr = Expr::Var { name: canon.into(), line: 0, col: 0 };
         let body_canon = subst(body, var, &canon_expr);
         let pred_canon = subst(pred, cv, &canon_expr);
-        if body_canon == pred_canon {
+        let mut conjuncts = Vec::new();
+        flatten_conjuncts(&pred_canon, &mut conjuncts);
+        if conjuncts.iter().any(|c| **c == body_canon) {
             return Some(true);
         }
     }
@@ -1043,8 +1353,27 @@ pub fn try_forall_from_definition(
             return Some(true);
         }
     }
-    // Case 3: polynomial-decidable relation over numeric atomic domain.
+    // Case 3: polynomial-decidable relation over a numeric atomic domain.
+    //
+    // Nested binders over the *same* domain are peeled first, so a
+    // multi-variable identity like `forall a in Int, forall b in Int,
+    // forall c in Int, a * (b + c) == a * b + a * c` is decided
+    // symbolically instead of by a 200x200x400 sweep.  Binders over a
+    // different domain stop the peel: the polynomial criteria differ per
+    // domain (`Nat` may assume variables are non-negative, `Int` may not),
+    // and mixing them would apply the wrong one.
     let dom = numeric_domain(dset)?;
+    let mut body = body;
+    while let Expr::Forall { domain: inner_dom, body: inner_body, .. } = body {
+        // The inner domain must be syntactically the same atomic set; an
+        // arbitrary expression could depend on the outer binder.
+        match inner_dom.as_ref() {
+            Expr::Var { name, .. } if same_atomic_domain(name, dom) => {
+                body = inner_body;
+            }
+            _ => break,
+        }
+    }
     if let Expr::BinOp(op, l, r) = body {
         if !matches!(
             op,
@@ -1103,10 +1432,37 @@ pub fn try_exists_from_definition(
     None
 }
 
+/// Split `a and b and c` into its conjuncts (a non-conjunction is a single
+/// conjunct).
+fn flatten_conjuncts<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match e {
+        Expr::BinOp(BinOp::And, l, r) => {
+            flatten_conjuncts(l, out);
+            flatten_conjuncts(r, out);
+        }
+        other => out.push(other),
+    }
+}
+
+/// Does the built-in set named `name` denote exactly `dom`?  Used to decide
+/// whether a nested `forall` binder may be peeled into the same polynomial
+/// judgement as its parent.
+fn same_atomic_domain(name: &str, dom: PolyDomain) -> bool {
+    matches!(
+        (name, dom),
+        ("Nat", PolyDomain::Nat) | ("Int", PolyDomain::Int) | ("Real", PolyDomain::Real)
+    )
+}
+
 fn numeric_domain(s: &SetVal) -> Option<PolyDomain> {
     match s {
         SetVal::Atomic(AtomicSet::Nat) => Some(PolyDomain::Nat),
         SetVal::Atomic(AtomicSet::Int) => Some(PolyDomain::Int),
+        // `by algebra` decides the polynomial fragment over the reals too
+        // (each literal goes through `f64_to_rat`, so the judgement is
+        // exact); leaving `Real` out here meant `forall x in Real, x * x >=
+        // 0.0` fell back to a seven-point sample of the reals.
+        SetVal::Atomic(AtomicSet::Real) => Some(PolyDomain::Real),
         SetVal::Comp { domain, .. } => numeric_domain(domain),
         _ => None,
     }
@@ -1189,7 +1545,7 @@ fn expr_to_sym_value(e: &crate::ast::Expr) -> Result<Value, String> {
         Real(_) => Err("parseSym: Real literals not supported (use Int)".into()),
         Bool(_) => Err("parseSym: Bool literals not supported".into()),
         Str(_) => Err("parseSym: String literals not supported".into()),
-        Var { name: name, .. } => Ok(make_sym_ctor("SVar", vec![Value::Str(name.clone())])),
+        Var { name, .. } => Ok(make_sym_ctor("SVar", vec![Value::Str(name.clone())])),
         BinOp(op, a, b) => {
             let tag = match op {
                 B::Add => "SAdd",
@@ -1469,7 +1825,24 @@ pub fn make_builtin_prelude() -> Globals {
             (Value::Real(a), Value::Real(b)) => Ok(Value::Real(a.powf(*b))),
             (Value::Real(a), Value::Int(b)) => Ok(Value::Real(a.powi(*b as i32))),
             (Value::Int(a), Value::Int(b)) if *b >= 0 => {
-                Ok(Value::Int((*a).pow(*b as u32)))
+                // `i64::pow` panics on overflow in a debug build and wraps in
+                // release; both would let `by eval` contradict `by algebra`
+                // (see `overflow_error`).  Report it as an error instead.
+                u32::try_from(*b)
+                    .ok()
+                    .and_then(|e| (*a).checked_pow(e))
+                    .map(Value::Int)
+                    .ok_or_else(|| {
+                        format!(
+                            concat!(
+                                "Int overflow in `pow({}, {})`: the result ",
+                                "leaves the range of a 64-bit integer. Use ",
+                                "lib/cas/bigint.seki for arbitrary-precision ",
+                                "arithmetic."
+                            ),
+                            a, b
+                        )
+                    })
             }
             (Value::Int(a), Value::Real(b)) => Ok(Value::Real((*a as f64).powf(*b))),
             (a, b) => Err(format!(
@@ -3673,4 +4046,40 @@ pub fn set_program_args(g: &mut Globals, items: Vec<String>) {
         ]);
     }
     g.defs.insert("args".into(), acc);
+}
+
+#[cfg(test)]
+mod finite_only_tests {
+    use super::*;
+
+    #[test]
+    fn a_finite_only_context_refuses_to_sample_an_infinite_set() {
+        let g = make_prelude();
+        let sampling = EvalCtx::new(&g);
+        let strict = EvalCtx::finite_only(&g);
+        let env = Env::new();
+        let prop = crate::parse_program("forall n in Nat, n < 1000")
+            .expect("parse");
+        let e = match &prop[0].decl {
+            crate::ast::Decl::Expr(e) => e.clone(),
+            _ => panic!("expected an expression"),
+        };
+        // The sampling context happily "confirms" a false proposition.
+        assert!(matches!(sampling.eval(&e, &env), Ok(Value::Bool(true))));
+        // The strict one refuses rather than looking at 200 points.
+        assert!(strict.eval(&e, &env).is_err());
+    }
+
+    #[test]
+    fn a_finite_only_context_still_evaluates_finite_domains() {
+        let g = make_prelude();
+        let strict = EvalCtx::finite_only(&g);
+        let env = Env::new();
+        let prop = crate::parse_program("forall n in {1, 2, 3}, n > 0").expect("parse");
+        let e = match &prop[0].decl {
+            crate::ast::Decl::Expr(e) => e.clone(),
+            _ => panic!("expected an expression"),
+        };
+        assert!(matches!(strict.eval(&e, &env), Ok(Value::Bool(true))));
+    }
 }

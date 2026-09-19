@@ -1,0 +1,62 @@
+-- ===========================================================
+-- 41: refinement 型 — 不変条件を型に書き、証明する
+--
+-- `def f : A -> {y in B | Q y}` は「どんな引数でも結果が Q を満たす」と
+-- 主張します。0.9.0 まで、seki はその主張を**関数を定義域の標本に適用して
+-- 結果を見る**ことで検査していました。`docs/spec/06-soundness.md` §6.2 が
+-- 「残る最大の穴」と呼び続けてきた部分です。定理側が 95% kernel 検証済みに
+-- なっても、型側は点検査のままでした。
+--
+-- しかしその主張は普通の命題です:
+--
+--     def f : A -> {y in B | Q y}   ⟹   forall x in A, Q[y := f x]
+--
+-- 0.9.0 からは、この義務を定理と同じ prover に投げ、同じ kernel が検証
+-- します。落とせなければ従来どおり標本検査に落ちますが、**そう記録されます**
+-- (`[sampled — NOT a proof]` と表示され、`--strict` が拒否し、
+--  `--audit` が義務そのものを見せます)。
+-- ===========================================================
+
+def NonNeg := {x in Int | x >= 0}
+def Pos    := {x in Int | x > 0}
+
+-- ----- 証明される例 ---------------------------------------------------
+
+-- x² + 1 はどんな整数でも正
+def alwaysPos : Int -> Pos := \x -> x * x + 1
+
+-- 後者は常に正
+def succ : Nat -> Pos := \n -> n + 1
+
+-- ----- 帳簿の不変条件: 残高は負にならない -----------------------------
+-- sample/ledger の overdraft チェックと同じ形。ガードがあるので
+-- 「残高を超える引き出しは起きない」ことが**型として**証明される。
+def safeWithdraw : Nat -> Nat -> NonNeg := \bal amt ->
+    if amt <= bal then bal - amt else bal
+
+-- 入金は増えるだけ
+def credit : Nat -> Nat -> NonNeg := \bal amt -> bal + amt
+
+-- ----- 証明されない例 (そして正しく印が付く) ---------------------------
+
+-- ガードを外すと成り立たない (bal=0, amt=1 で -1)。
+-- 標本検査は通ってしまうが、義務は落ちないので [sampled] と表示される。
+def unsafeWithdraw : Nat -> Nat -> NonNeg := \bal amt -> bal - amt
+
+-- 定義域のはるか外で破綻する古典的な例。標本は 10^9 まで届かない。
+def sneaky : Int -> Pos := \x -> if x == 1000000001 then 0 - 1 else x * x + 1
+
+-- ===========================================================
+-- $ seki --audit examples/41_refinement_types.seki
+--   alwaysPos       the obligation was proved and kernel-checked
+--   credit          the obligation was proved and kernel-checked
+--   safeWithdraw    the obligation was proved and kernel-checked
+--   sneaky          only sampled — the obligation ... was not proved
+--   succ            the obligation was proved and kernel-checked
+--   unsafeWithdraw  only sampled — the obligation ... was not proved
+--
+-- $ seki --strict examples/41_refinement_types.seki
+--   type error: --strict: the type of `unsafeWithdraw` claims `NonNeg` for
+--   every argument, but that was only checked on a sample of the domain,
+--   not proved. ...
+-- ===========================================================

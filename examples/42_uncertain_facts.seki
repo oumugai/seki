@@ -1,0 +1,74 @@
+-- ===========================================================
+-- 42: 確からしい事実からの推論 — 確信度と仮定の逆算
+--
+-- LLM が抽出した事実のように「100% 確実ではないが確率的に正しそう」な
+-- 前提から推論したい場合、seki は次の分担を取ります:
+--
+--   kernel   : 演繹が正しいか (二値。確率は一切入らない)
+--   confidence: その仮定群が結論をどこまで保証するか (kernel の外)
+--
+-- この分離が重要です。確率を kernel に入れると `Sound` が連続量になり、
+-- 「kernel 検証済み」が意味を失います。一方、確率計算が必要とする構造 —
+-- 「この結論はどの仮定に推移的に依存しているか」— は証明項が既に
+-- 持っているので、その上に載せるだけで済みます。
+-- ===========================================================
+
+-- ----- 確からしい仮定 -------------------------------------------------
+-- `with confidence` は下界。`from` は由来 (数字だけでなく出所を残す)。
+
+axiom gold_implies_discount
+  : forall spend in Nat, spend >= 100 => spend / 10 >= 10
+  with confidence 0.9
+  from "LLM extraction 2026-09, opus-5, 200 件のサンプルで precision 0.90"
+
+axiom customer_spend
+  : forall c in Nat, c >= 3 => c * 50 >= 150
+  with confidence 0.8
+  from "同じ抽出パス (相関あり)"
+
+-- ----- 仮定1つ: その確信度がそのまま通る ------------------------------
+theorem single : 150 / 10 >= 10
+  := by apply gold_implies_discount with spend := 150
+
+-- ----- 仮定2つ: Fréchet 下界 (掛け算ではない) --------------------------
+-- 0.9 × 0.8 = 0.72 は独立性を仮定した数字で、同じ抽出パス由来の事実は
+-- 独立ではありません。保証できるのは max(0, 0.9 + 0.8 - 1) = 0.7 です。
+theorem both
+  : (4 * 50) >= 150
+  := by have h : (150 / 10) >= 10 := by apply gold_implies_discount with spend := 150
+     then apply customer_spend with c := 4
+
+-- ===========================================================
+-- $ seki --audit examples/42_uncertain_facts.seki
+--   single   axiom `gold_implies_discount`
+--            confidence >= 9/10 (from `gold_implies_discount` 9/10)
+--   both     axiom `customer_spend`; axiom `gold_implies_discount`
+--            confidence >= 7/10 (from `customer_spend` 4/5, ...)
+--
+-- $ seki --min-confidence 0.85 examples/42_uncertain_facts.seki
+--   proof error: --min-confidence 17/20: `both` is only warranted to 7/10
+--
+-- 含意に付けた確信度に対して Fréchet 境界は**厳密**です:
+--   P(A) >= p, P(A→B) >= q  ⟹  P(B) >= p + q - 1
+-- なので、確からしいルールの連鎖は独立性を一切仮定せずに正しく合成します。
+-- ===========================================================
+
+-- ===========================================================
+-- 仮定の逆算 — 成り立たないとき「何を仮定すれば成り立つか」
+-- ===========================================================
+-- 下の定理は一般には成り立ちません。コメントを外すと:
+--
+--   proof error: by algebra: cannot prove (100 - (200 * r)) > 0 over Real
+--     it would hold given `(r < (1 / 2))` — add it as a hypothesis ...
+--
+-- モデルのパラメータが推定値であるとき、この「どこまでなら成り立つか」は
+-- 証明そのものより有用なことがあります (感度解析)。提案は必ず検証して
+-- から出るので、出た提案は実際に効きます。
+--
+-- theorem npv_unconditional : forall r in Real, (100.0 - 200.0 * r) > 0.0
+--   := by algebra
+
+-- 逆算された条件を仮定に入れれば通り、kernel 検証済みになる
+theorem npv_conditional
+  : forall r in Real, r < 0.5 => (100.0 - 200.0 * r) > 0.0
+  := by algebra

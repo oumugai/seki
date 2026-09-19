@@ -1,6 +1,6 @@
 # 2. 構文 (BNF Grammar)
 
-このページは seki 0.5.0 の構文を **BNF + 操作子優先順位表** で記述します。
+このページは seki 0.10.0 の構文を **BNF + 操作子優先順位表** で記述します。
 
 ## 2.1 プログラム
 
@@ -11,7 +11,9 @@ Decl     := DefDecl | TheoremDecl | AxiomDecl | DataDecl
 
 DefDecl       := 'def' Ident OptTypeAnnot ':=' Expr
 TheoremDecl   := 'theorem' Ident ':' Expr ':=' ProofTerm
-AxiomDecl     := 'axiom' Ident ':' Expr
+AxiomDecl     := 'axiom' Ident ':' Expr Confidence? Provenance?
+Confidence    := 'with' 'confidence' (RealLit | IntLit ('/' IntLit)?)
+Provenance    := 'from' StringLit
 DataDecl      := 'data' Ident TyParam* '=' DataAlt ('|' DataAlt)*
 DataAlt       := Ident TypeArg*
 ClassDecl     := 'class' Ident TyParam 'where' (Ident ':' Type)*

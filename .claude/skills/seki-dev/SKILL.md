@@ -50,10 +50,20 @@ cargo test                       # unit + tests/integration.rs + tests/property_
 3. `/seki-new-libtest` スラッシュコマンドがこの手順をラップしている。
 
 `tests/seki/test_*.seki` を追加しただけでは **`cargo test` に含まれない**
-(明示的な `#[test]` 配線が必要) — 過去に UI ライブラリ (`lib/ui/`) のテスト
-ファイルがこの配線を忘れたまま未コミットで残っていたことがあった。新しい
-`.seki` テストファイルを見つけたら、対応する `#[test]` が
-`tests/integration.rs` にあるか必ず確認する。
+(明示的な `#[test]` 配線が必要)。これは実害を出している: `sigma` が Σ 型の
+キーワードになったとき `lib/probability/{continuous,montecarlo}.seki` が
+パースできなくなったが、`test_probability.seki` が未配線だったため
+数か月気づかれなかった (同時に 3 つの他のテストも未配線だった)。
+
+現在は `every_seki_test_file_is_wired_into_cargo_test` が配線忘れを検出して
+`cargo test` を落とすので、新しい `.seki` テストを置いたら必ず
+`tests/integration.rs` に `run_seki_test_file` を呼ぶ `#[test]` を足すこと。
+
+### Rust 側のテストは `Session` を使う
+
+`tests/integration.rs` の `run()` はかつて宣言駆動ループの**再実装**だった
+(`import` を `panic!` していた)。現在は `seki::session::Session` —
+`seki file.seki` と同じコードパス — を呼ぶ。宣言処理を書き写さないこと。
 
 ## ドキュメントは実装より古くなりがち — 鵜呑みにしない
 
@@ -78,9 +88,10 @@ cargo test                       # unit + tests/integration.rs + tests/property_
 
 ## リポジトリの既知のクセ
 
-- `target/` (Rust のビルド生成物) が誤って git 管理下にあり、ビルドするたびに
-  差分が出る。**`git add` するときは `target/` を含めない** — 明示的にファイル名
-  を指定して `git add` すること (`git add -A` / `git add .` は使わない)。
+- ~~`target/` が誤って git 管理下にある~~ → 0.8.0 で `.gitignore` に
+  `/target` を追加し、`git rm -r --cached target` で追跡から外した
+  (追跡ファイル 1295 → 274)。`dist/` は今も追跡下にある (リリース成果物
+  76 ファイル、バイナリ 2 個を含む) ので、`git add -A` は依然として避ける。
 - リポジトリルート直下に `it_investment_*.seki` のような、処理系本体とは
   無関係なユーザのスクラッチファイルが置かれていることがある。処理系の
   変更作業では触らない。
@@ -105,6 +116,58 @@ seki を任意のディレクトリ/プロジェクトから使えるように�
 ソースを変更したら **`/seki-install`** でグローバル版に反映する
 (release ビルド → テスト → `~/.local/bin/seki` へコピー)。反映を忘れると
 グローバル版のコマンドが古い動作のままになる。
+
+## 評価の上限 (0.8.0〜)
+
+seki は停止性を強制しないので、評価器に 2 つの上限があります:
+
+- `DEFAULT_EVAL_BUDGET` = 5,000 万ステップ (`SEKI_EVAL_BUDGET`)
+  — `eval` と `apply` のループ両方で消費するので末尾再帰の暴走も捕まる
+- `DEFAULT_EVAL_DEPTH` = 2,000 (`SEKI_EVAL_DEPTH`)
+  — 非末尾再帰がネイティブスタックを尽くす前に止める
+
+どちらも宣言ごとに補充されます。コーパス全体は 500 万ステップ・深さ 1,000 の
+内側なので余裕はありますが、**重い計算を stdlib に足すときはこの上限に
+当たっていないか確認すること** (当たっていれば上限を上げるより、
+その計算を見直す方がたいてい正しい)。
+
+テストで上限を変えるときは **`std::env::set_var` を使わないこと** —
+env はプロセス全体なので並行実行中の他のテストに漏れます。
+`tests/integration.rs` の `run_binary_with_env` のように子プロセスに
+限定してください。
+
+## TCB (信頼計算基盤) を意識する
+
+`src/kernel.rs` / `src/unfold.rs` / `src/rewrite.rs` と `algebra.rs` の
+多項式算術 (`Polynomial::{add,sub,mul,scale}`, `expr_to_poly`) は
+**証明の正しさが直接かかっている**。ここを触るときは:
+
+- 新しい原始規則を足したら、`src/kernel.rs` の `forgery_tests` に
+  「その規則を偽造したらどうなるか」のテストを必ず足す
+- kernel は `EvalCtx::finite_only` でしか動かない (サンプリング禁止)。
+  この不変条件を壊さないこと
+- タクティク側 (`prover.rs`) はいくらでも探索してよい。健全性の責任は
+  kernel にある。タクティクのバグは証明を**失敗**させるだけであるべき
+
+## 証明を変更するときは信頼水準を見る
+
+theorem の出力に `[sampled — NOT a proof]` や `[axiomatic]` が付いていたら、
+その証明は無限ドメインの標本検査か未証明の公理に依存している
+(`docs/spec/06-soundness.md` §6.0)。`seki --strict` で `Sound` 以外を拒否できる。
+
+**タクティクや評価器に手を入れたら、コーパス全体の分布が変わっていないか
+確認する**:
+
+```sh
+for f in examples/*.seki lib/*/*.seki tests/seki/*.seki; do
+  ./target/debug/seki "$f" 2>/dev/null | grep -E 'sampled|axiomatic'
+done
+```
+
+`seki --audit <file>` の方が読みやすい。現状は 955 定理中
+**kernel 検証済み 909 / `unchecked` 29 / `sampled` 17**。
+これが悪化していたら、健全だった証明を壊したか、証明項の生成が
+保守的に倒れすぎている。`seki --proof <file> <名前>` で証明項を読める。
 
 ## 関連
 

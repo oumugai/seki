@@ -411,3 +411,50 @@ pub fn tokenize(src: &str) -> SekiResult<Vec<Token>> {
     });
     Ok(out)
 }
+
+/// The source spelling of a keyword token, or `None` for a non-keyword.
+///
+/// Used by the parser to say "`sigma` is a keyword" instead of "expected
+/// Arrow but got LParen" when a keyword turns up where a binder name
+/// belongs.  Kept next to the keyword table above so the two stay in sync.
+pub fn keyword_spelling(t: &Tok) -> Option<&'static str> {
+    match t {
+        Tok::KwDef => Some("def"),
+        Tok::KwLet => Some("let"),
+        Tok::KwIn => Some("in"),
+        Tok::KwWhere => Some("where"),
+        Tok::KwIf => Some("if"),
+        Tok::KwThen => Some("then"),
+        Tok::KwElse => Some("else"),
+        Tok::KwLambda => Some("lambda"),
+        Tok::KwForall => Some("forall"),
+        Tok::KwExists => Some("exists"),
+        Tok::KwSigma => Some("sigma"),
+        Tok::KwTheorem => Some("theorem"),
+        Tok::KwAxiom => Some("axiom"),
+        Tok::KwType => Some("type"),
+        Tok::KwBy => Some("by"),
+        Tok::KwData => Some("data"),
+        Tok::KwMatch => Some("match"),
+        Tok::KwWith => Some("with"),
+        Tok::KwImport => Some("import"),
+        Tok::KwAs => Some("as"),
+        Tok::KwClass => Some("class"),
+        Tok::KwInstance => Some("instance"),
+        Tok::KwTrue => Some("true"),
+        Tok::KwFalse => Some("false"),
+        Tok::KwAnd => Some("and"),
+        Tok::KwOr => Some("or"),
+        Tok::KwNot => Some("not"),
+        Tok::KwSubset => Some("subset"),
+        Tok::KwUnion => Some("union"),
+        Tok::KwIntersect => Some("intersect"),
+        Tok::KwDiff => Some("diff"),
+        Tok::KwTimes => Some("times"),
+        Tok::KwNotin => Some("notin"),
+        Tok::KwMod => Some("mod"),
+        Tok::KwFor => Some("for"),
+        Tok::KwDo => Some("do"),
+        _ => None,
+    }
+}

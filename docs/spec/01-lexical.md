@@ -19,15 +19,31 @@ IdentStart := ASCII-letter | '_'
 IdentCont  := ASCII-letter | ASCII-digit | '_'
 ```
 
-ただし以下のキーワードは識別子にならない:
+ただし以下のキーワードは識別子にならない
+(`src/lexer.rs` の `keyword_spelling` が正本。この一覧はそれと一致させること):
 
 ```
-def let in if then else match with
-forall exists data class instance
-import as theorem axiom by then
+def let in where if then else
+lambda fn
+forall exists sigma
+theorem axiom type by
+data match with
+import as class instance
 true false
-and or not in notin union intersect subset times
-mod
+and or not notin subset union intersect diff times mod
+for do
+```
+
+⚠️ **`sigma` は Σ 型 (`sigma (x : A), B(x)`) のためのキーワード**です。
+以前この一覧に載っておらず、`lib/probability/` が `sigma` を
+ラムダの仮引数名に使っていたため、Σ 型の導入でそれらのモジュールが
+静かにパースできなくなっていた (テストが `cargo test` に配線されて
+いなかったため気づかれなかった)。キーワードを仮引数位置に書くと
+パーサが専用のエラーを出す:
+
+```
+parse error: at 1:23: `sigma` is a keyword and cannot be used as a
+lambda parameter name — rename the parameter
 ```
 
 ### 数値リテラル (Number)

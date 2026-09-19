@@ -1,0 +1,86 @@
+-- ===========================================================
+-- 40: 演繹 — 既存の定理を使って新しい定理を建てる
+--
+-- 0.7.0 まで、証明された事実を再利用する手段は `by simp` (等式のみ) と
+-- `by obtain` (存在命題のみ) しかなかった。含意や不等式 — 数学的事実の
+-- 大半 — は再利用できず、955 定理のうち他の定理を使っていたのは 12 件
+-- だけで、残りはすべて決定手続きでゼロから証明されていた。
+--
+-- `by apply` (modus ponens)、`by have` (カット規則)、`by assumption` が
+-- その穴を埋める。以下はすべて kernel 検証済み — `seki --audit` で確認でき、
+-- `seki --proof <file> <名前>` で証明項そのものを読める。
+-- ===========================================================
+
+-- ----- 土台となる補題 -------------------------------------------------
+-- (証明可能なものは証明し、古典的な仮定だけを axiom にする)
+
+theorem double_mono
+  : forall x in Real, forall y in Real,
+      x <= y => (2.0 * x) <= (2.0 * y)
+  := by algebra
+
+theorem shift_mono
+  : forall x in Real, forall y in Real, forall c in Real,
+      x <= y => (x + c) <= (y + c)
+  := by algebra
+
+-- ----- 補題を具体的な対象に適用する ------------------------------------
+-- 前提 `1.0 <= 3.0` は by algebra が落とす。
+theorem concrete : (2.0 * 1.0) <= (2.0 * 3.0) := by apply double_mono
+
+-- 束縛変数は結論と目標を照合して推論されるので `with` は要らない。
+theorem generic : forall a in Real, forall b in Real,
+      a <= b => (2.0 * a) <= (2.0 * b)
+  := by apply double_mono
+
+-- 結論に現れない変数だけ `with` で与える。
+theorem shifted : forall a in Real, forall b in Real,
+      a <= b => (a + 10.0) <= (b + 10.0)
+  := by apply shift_mono with c := 10.0
+
+-- 推移律: `y` は結論 `x <= z` に現れないので照合では決まらない。
+-- こういう変数だけ `with` で与える (与え忘れるとエラーが何を要求しているか
+-- 名指しで教える)。
+theorem le_trans
+  : forall x in Real, forall y in Real, forall z in Real,
+      (x <= y) and (y <= z) => x <= z
+  := by algebra
+
+theorem chained : forall a in Real, forall c in Real,
+      (a <= 5.0) and (5.0 <= c) => a <= c
+  := by apply le_trans with y := 5.0
+
+-- ----- 前向きに積み上げる (カット規則) ----------------------------------
+-- 中間の事実を立ててから、それを使って結論に至る。
+theorem forward : forall a in Real, a <= 5.0 => (2.0 * a) <= 12.0
+  := by have h : (2.0 * a) <= (2.0 * 5.0) := by apply double_mono
+     then algebra
+
+-- ----- 仮定そのもので閉じる --------------------------------------------
+theorem trivial_hyp : forall p in Real, p > 0.0 => p > 0.0 := by assumption
+
+-- ===========================================================
+-- 区間上の推論 — Farkas 証明書
+-- ===========================================================
+-- 「妥当な範囲のパラメータすべてで結論が成り立つ」は、モデル検証で
+-- 最も言いたい形。by algebra は Fourier-Motzkin で乗数を探し、証明項には
+-- その乗数と緩みが載るので、kernel は掛けて足すだけで検査できる。
+
+-- 仮定のスケーリングが必要な例: λ = 2
+theorem scaled : forall x in Real, x <= 3.0 => (2.0 * x) <= 6.0 := by algebra
+
+-- 緩みが必要な例: λ = 1, slack = 2
+theorem with_slack : forall a in Real, (2.0*a) <= 10.0 => (2.0*a) <= 12.0
+  := by algebra
+
+-- 区間: 割引率 r が 5%〜15% のどこであっても正味現在価値は正
+theorem npv_positive_on_range
+  : forall r in Real, (0.05 <= r) and (r <= 0.15) => (100.0 - 200.0 * r) > 0.0
+  := by algebra
+
+-- 2 パラメータの区間: 割引率と陳腐化速度のどの組合せでも正
+theorem npv_positive_two_params
+  : forall r in Real, forall d in Real,
+      (0.05 <= r) and (r <= 0.15) and (0.0 <= d) and (d <= 0.1)
+      => (100.0 - 200.0 * r - 100.0 * d) > 0.0
+  := by algebra

@@ -15,7 +15,7 @@
 //!  12. atom
 
 use crate::ast::*;
-use crate::lexer::{Tok, Token};
+use crate::lexer::{keyword_spelling, Tok, Token};
 use crate::{SekiError, SekiResult};
 
 struct Parser<'a> {
@@ -520,7 +520,54 @@ impl<'a> Parser<'a> {
         let name = self.eat_ident("axiom name")?;
         self.expect(&Tok::Colon, "':' in axiom")?;
         let prop = self.parse_expr()?;
-        Ok(Decl::Axiom { name, prop })
+        // `with confidence <expr>` and `from "<text>"` — optional, in
+        // either order, for an assumption that is believed rather than
+        // asserted.
+        let mut confidence = None;
+        let mut provenance = None;
+        loop {
+            match self.peek() {
+                Tok::KwWith => {
+                    self.bump();
+                    let kw = self.eat_ident("expected 'confidence'")?;
+                    if kw != "confidence" {
+                        return Err(SekiError::Parse(format!(
+                            "axiom {}: expected 'confidence' after 'with', got '{}'",
+                            name, kw
+                        )));
+                    }
+                    if confidence.is_some() {
+                        return Err(SekiError::Parse(format!(
+                            "axiom {}: `with confidence` given twice",
+                            name
+                        )));
+                    }
+                    // A literal, not a general expression: a confidence is
+                    // a constant, and parsing an expression here would
+                    // swallow a following `from`.
+                    confidence = Some(self.parse_confidence_literal(&name)?);
+                }
+                Tok::Ident(s) if s == "from" => {
+                    self.bump();
+                    match self.peek() {
+                        Tok::Str(text) => {
+                            let text = text.clone();
+                            self.bump();
+                            provenance = Some(text);
+                        }
+                        other => {
+                            return Err(SekiError::Parse(format!(
+                                "axiom {}: `from` takes a string describing where the \
+                                 assumption came from, got {:?}",
+                                name, other
+                            )))
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+        Ok(Decl::Axiom { name, prop, confidence, provenance })
     }
 
     fn parse_proof(&mut self) -> SekiResult<Proof> {
@@ -549,6 +596,93 @@ impl<'a> Parser<'a> {
             }
             _ => Ok(Proof::Term(self.parse_expr()?)),
         }
+    }
+
+    /// Parse the number after `with confidence`.
+    ///
+    /// Accepts `0.85` and the exact form `17/20`.  Restricted to literals on
+    /// purpose: a confidence is a constant, and a general expression would
+    /// swallow the `from "..."` clause that usually follows.
+    fn parse_confidence_literal(&mut self, axiom: &str) -> SekiResult<Expr> {
+        let lit = match self.peek() {
+            Tok::Real(f) => {
+                let f = *f;
+                self.bump();
+                Expr::Real(f)
+            }
+            Tok::Int(n) => {
+                let n = *n;
+                self.bump();
+                Expr::Int(n)
+            }
+            other => {
+                return Err(SekiError::Parse(format!(
+                    "axiom {}: confidence must be a number literal, got {:?}",
+                    axiom, other
+                )))
+            }
+        };
+        // `17/20` — an exact rational, for when a decimal would not be.
+        if matches!(self.peek(), Tok::Slash) {
+            self.bump();
+            let den = match self.peek() {
+                Tok::Int(n) => {
+                    let n = *n;
+                    self.bump();
+                    n
+                }
+                other => {
+                    return Err(SekiError::Parse(format!(
+                        "axiom {}: the denominator of a confidence must be an integer, \
+                         got {:?}",
+                        axiom, other
+                    )))
+                }
+            };
+            return Ok(Expr::BinOp(
+                crate::ast::BinOp::Div,
+                Box::new(lit),
+                Box::new(Expr::Int(den)),
+            ));
+        }
+        Ok(lit)
+    }
+
+    /// Parse a proof that must not swallow a following `then` — the
+    /// sub-proof of `by have`.  See the note at its call site.
+    fn parse_nested_proof(&mut self) -> SekiResult<Proof> {
+        match self.peek() {
+            Tok::KwBy => {
+                self.bump();
+                self.parse_single_tactic()
+            }
+            Tok::Ident(s) if s == "refl" => {
+                self.bump();
+                Ok(Proof::Refl)
+            }
+            _ => Ok(Proof::Term(self.parse_expr()?)),
+        }
+    }
+
+    /// Parse an optional `with x := e, y := f` clause, shared by
+    /// `by obtain` and `by apply`.
+    fn parse_with_clause(&mut self) -> SekiResult<Vec<(String, Expr)>> {
+        let mut substs = Vec::new();
+        if matches!(self.peek(), Tok::KwWith) {
+            self.bump();
+            loop {
+                let name = self.eat_ident("substitution variable name")?;
+                self.expect(&Tok::Assign, "':=' in a `with` substitution")?;
+                let expr = self.parse_expr()?;
+                substs.push((name, expr));
+                if matches!(self.peek(), Tok::Comma) {
+                    self.bump();
+                    continue;
+                }
+                break;
+            }
+        }
+        Ok(substs)
     }
 
     /// Parse exactly one tactic (no `then` composition).  Called from
@@ -592,23 +726,29 @@ impl<'a> Parser<'a> {
                     )));
                 }
                 let lemma = self.eat_ident("lemma/axiom name to obtain from")?;
-                let mut substs = Vec::new();
-                if matches!(self.peek(), Tok::KwWith) {
-                    self.bump();
-                    loop {
-                        let name = self.eat_ident("substitution variable name")?;
-                        self.expect(&Tok::Assign, "':=' in obtain substitution")?;
-                        let expr = self.parse_expr()?;
-                        substs.push((name, expr));
-                        if matches!(self.peek(), Tok::Comma) {
-                            self.bump();
-                            continue;
-                        }
-                        break;
-                    }
-                }
+                let substs = self.parse_with_clause()?;
                 Ok(Proof::Obtain { intro, lemma, substs })
             }
+            "apply" => {
+                let lemma = self.eat_ident("theorem/axiom name to apply")?;
+                let substs = self.parse_with_clause()?;
+                Ok(Proof::Apply { lemma, substs })
+            }
+            "have" => {
+                let name = self.eat_ident("name for the intermediate fact")?;
+                self.expect(&Tok::Colon, "':' in `by have <name> : <prop>`")?;
+                let prop = self.parse_expr()?;
+                self.expect(&Tok::Assign, "':=' in `by have <name> : <prop> := ...`")?;
+                // Deliberately *not* `parse_proof`: a trailing `then`
+                // continues the outer chain, so that
+                //   `by have h : P := by apply L then algebra`
+                // reads the way it looks — establish `h` by applying `L`,
+                // then close the goal by algebra.  A nested proof that
+                // genuinely needs several steps belongs in its own theorem.
+                let proof = self.parse_nested_proof()?;
+                Ok(Proof::Have { name, prop: Box::new(prop), proof: Box::new(proof) })
+            }
+            "assumption" => Ok(Proof::Assumption),
             "simp" => {
                 let lemmas = if matches!(self.peek(), Tok::LBracket) {
                     self.bump();
@@ -717,6 +857,23 @@ impl<'a> Parser<'a> {
         }
         if params.is_empty() {
             return Err(SekiError::Parse("lambda with no parameters".into()));
+        }
+        // A keyword where a parameter name belongs stops the loop above and
+        // then shows up as a baffling "expected Arrow but got LParen".
+        // This actually happened: `sigma` became a keyword when Σ-types
+        // landed, and `\(mu : Real) (sigma : Real) -> ...` in
+        // `lib/probability/continuous.seki` silently stopped parsing.
+        if matches!(self.peek(), Tok::LParen) {
+            if let Some(kw) = keyword_spelling(self.peek_at(1)) {
+                if matches!(self.peek_at(2), Tok::Colon) {
+                    let (l, c) = self.loc();
+                    return Err(SekiError::Parse(format!(
+                        "at {}:{}: `{}` is a keyword and cannot be used as a \
+                         lambda parameter name — rename the parameter",
+                        l, c, kw
+                    )));
+                }
+            }
         }
         self.expect(&Tok::Arrow, "'->' in lambda")?;
         let body = self.parse_expr()?;

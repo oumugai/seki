@@ -3,7 +3,7 @@
 seki は **集合論的セマンティクス** を基盤とする。型 = 集合、命題 = 集合の
 要素ではなく Bool 値、forall/exists は集合上の量化。
 
-このページは seki 0.5.0 の実装に対応する **non-formal な操作意味論** を
+このページは seki 0.10.0 の実装に対応する **non-formal な操作意味論** を
 記述します。完全に形式化された言語意味論 (Wright-Felleisen 型 progress &
 preservation のような) は Phase 8 で `docs/spec/formal/` 配下に整備予定。
 

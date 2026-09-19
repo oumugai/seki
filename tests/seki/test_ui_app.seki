@@ -46,12 +46,21 @@ def counterApp := mkApp 0 update_ view_
 -- ===========================================================
 
 -- Model = Nat なので n >= 0 が常に成り立つ.
+-- 注: これらは `[sampled]` と表示される。`updateMsg` の `match` は
+-- タグ文字列の比較に脱糖されるため `by algebra` が畳めず、`forall n in Nat`
+-- は SAMPLE_BOUND までの標本検査になる。無限ドメイン上の主張としては
+-- **証明ではない** — `--strict` では拒否される (docs/spec/06-soundness.md §6.0)。
 theorem inc_grows  : forall n in Nat, updateMsg MInc   n == n + 1 := by eval
 theorem reset_zero : forall n in Nat, updateMsg MReset n == 0     := by eval
 
--- dec しても 0 未満にならない (if-場合分け + Nat 仮説 を by algebra で閉じる)
+-- dec しても 0 未満にならない。
+-- 注: これは以前 `by algebra` で通っていたが、その証明は**健全ではなかった** —
+-- `match` の脱糖が残す到達不能な `error "non-exhaustive match"` 枝が不透明原子に
+-- なり、`by algebra` が Nat 上で不透明原子を無条件に非負と仮定していたため。
+-- 証明項の導入 (`src/kernel.rs`) でこの仮定が露見し、`polynomial_nonneg` を
+-- 修正した。現在は `by eval` による標本検査で、`[sampled]` と表示される。
 theorem dec_nn : forall n in Nat, updateMsg MDec n >= 0
-  := by unfold updateMsg then algebra
+  := by eval
 
 -- ===========================================================
 -- 階層 2 (動的): assert ベースの単体テスト

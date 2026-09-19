@@ -33,6 +33,8 @@ theorem ff_in_byte   : 255 in Byte := by eval
 -3 in NatP
 forall x in {0, 1, 2, 3, 4, 5}, x in NatP
 
+-- 注: これは `[sampled]` と表示される。`x in Int` は多項式関係ではないので
+-- 集合の定義から判定できず、NatP の標本検査になる。
 theorem natp_subset_of_int : forall x in NatP, x in Int := by eval
 
 -- ----- 有理数 Rat = ℤ × ℕ⁺ ------------------------------
@@ -141,11 +143,11 @@ isOdd  11                                      -- true
 
 theorem sq_def
   : forall n in Int, square n == n * n
-  := by eval
+  := by unfold square then algebra
 
 theorem cube_def
   : forall n in Int, cube n == n * n * n
-  := by eval
+  := by unfold cube then algebra
 
 -- ----- まとめ: stdlib は seki 自身で書かれている ---------------
 -- src/stdlib.seki を読むと、上記のすべての名前 (Pos, Neg, Rat,

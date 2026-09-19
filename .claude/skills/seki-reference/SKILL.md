@@ -34,6 +34,64 @@ sigma (x : A), B            -- 依存ペア型 Σ (B は x を参照可能; 非�
 主なドメイン: `Nat` `Int` `Real` `Bool` `Str` `Unit`、`List T`、`Tree T`、
 `data` で定義した ADT、列挙集合 `{1,2,3}`。
 
+### 予約語 (識別子・仮引数名に使えない)
+
+```
+def let in where if then else
+lambda fn
+forall exists sigma
+theorem axiom type by
+data match with
+import as class instance
+true false
+and or not notin subset union intersect diff times mod
+for do
+```
+
+正本は `src/lexer.rs` の `keyword_spelling`
+(`docs/spec/01-lexical.md` との一致はテストで固定されている)。
+`sigma` `where` `fn` `for` `do` `diff` あたりは変数名に使いがちなので注意
+— 実際 `lib/probability/` が `sigma` を仮引数に使っていて壊れていたことがある。
+キーワードを仮引数位置に書くと専用のエラーが出る。
+
+### `Set` は集合ではない (0.8.0〜)
+
+`Set` は全集合のクラスです。**真のクラスは集合ではない**ので:
+
+- `Set in Set` は `false`
+- `{x in Set | P}` は**エラー** — 新しい集合は既存の集合からしか切り出せない
+  (ZF の分出公理に相当。これが Russell の逆理を塞いでいる)
+
+`forall A in Set, ...` のような**量化**と、型注釈としての `Set` は従来どおり。
+
+### 評価の上限 (0.8.0〜)
+
+停止性は warning なので、評価器に上限があります:
+`SEKI_EVAL_BUDGET` (既定 5,000 万ステップ) と `SEKI_EVAL_DEPTH` (既定 2,000)。
+暴走はハングや abort ではなくエラーになります。
+
+### Int は i64 (0.8.0〜 overflow はエラー)
+
+`Int` は論理上は ℤ だが実行時は `i64`。範囲を出る演算は
+wrapping せず **runtime error** になる (`by eval` と `by algebra` が
+矛盾しないようにするため)。任意精度が必要なら `lib/cas/bigint.seki`。
+
+## CLI フラグ
+
+```sh
+seki <file>                 # 実行 (各宣言の結果を表示)
+seki --check <file>         # 検証のみ (値を表示しない)
+seki --audit <file>         # 各 theorem がどう検証されたかを一覧
+seki --proof <file> <名前>  # その theorem の証明項を表示
+seki --strict <file>        # Sound でない theorem を拒否 (SEKI_STRICT=1 でも可)
+seki --strict-match <file>  # 非網羅的な match をパースエラーに
+seki -e '<expr>'            # 式を1つ評価
+seki -I <dir>               # lib の探索パスを追加 (繰り返し可)
+```
+
+`--strict` は「`[sampled]` / `[axiomatic]` が付く theorem をエラーにする」
+— 詳細は `seki-tactics` skill と `docs/spec/06-soundness.md` §6.0。
+
 ## 組込関数の正確な情報の探し方
 
 `docs/builtins.md` は概要だが、**確実に最新なのはビルド済みバイナリからの

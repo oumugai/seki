@@ -62,7 +62,7 @@ pub fn to_lin(e: &Expr, var: &str) -> Option<Lin> {
     use BinOp as B;
     match e {
         Expr::Int(n) => Some(Lin::constant(*n)),
-        Expr::Var { name: name, .. } if name == var => Some(Lin::variable()),
+        Expr::Var { name, .. } if name == var => Some(Lin::variable()),
         // Free variables that aren't the focus var are treated as opaque —
         // we don't model multi-variable systems here.
         Expr::Var { .. } => None,

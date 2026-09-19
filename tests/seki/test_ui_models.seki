@@ -27,6 +27,10 @@ def counter_update := \a n ->
 def counter_view := \n -> pE nil [Text (intToStr n)]
 def counterApp := mkApp 0 counter_update counter_view
 
+-- 注: 以下2件は `[sampled]` と表示される。`counter_update`/`pos_update` の
+-- 文字列によるディスパッチは `by algebra` が畳めず、`forall n in Int` は
+-- SAMPLE_BOUND までの標本検査になる。無限ドメイン上の主張としては
+-- **証明ではない** — `--strict` では拒否される (docs/spec/06-soundness.md §6.0)。
 theorem counter_inc_int : forall n in Int, counter_update "inc" n == n + 1 := by eval
 
 def t_counter_init   := assertEq 0 (appInit counterApp)

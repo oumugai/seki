@@ -21,6 +21,44 @@ seki は **コンパイラとランタイムが Rust で書かれた言語** で
 
 それ以外はすべて **seki に書く**。
 
+### 8.1.1 系: Rust 側に書くなら「表」にする
+
+原則 1〜5 に該当して Rust 側に置かざるを得ない機能でも、**データ型ごとに
+コードを増やす形にはしない**。
+
+具体例が `src/prover.rs` の構造的エンコーディングです。`stdlib.seki` は
+list と tree を `data` 宣言ではなくタグ付きタプル (`cons x xs = (1, (x, xs))`、
+`node l v r = (3, (l, (v, r)))`) で作るので、帰納法タクティクはその
+エンコーディングを見透かして `head (cons x xs)` を `x` に簡約する必要が
+あります。これは原則 4 (メタレベル) に該当し Rust 側の仕事です。
+
+かつてこれは `simplify_list_ops` と `simplify_tree_ops` という
+ほぼ同一の 80 行の走査が 2 つあり、それぞれ専用の shape 認識器を伴って
+いました — **3 つめのエンコーディングを足すには 3 つめのコピーが必要**
+という形です。現在は走査を 1 回だけ書き、次の表で駆動します:
+
+```rust
+const LIST_ENCODING: Encoding = Encoding {
+    ctors: &[Ctor { name: "nil",  tag: 0, arity: 0 },
+             Ctor { name: "cons", tag: 1, arity: 2 }],
+    projections:    &[Projection { name: "head", ctor: "cons", field: 0 },
+                      Projection { name: "tail", ctor: "cons", field: 1 }],
+    discriminators: &[Discriminator { name: "null", true_for: "nil" }],
+    measures:       &[Measure { name: "length", zero: 0, ctor: "cons",
+                                field: 1, step: 1 }],
+    from_list_literal: true,
+};
+```
+
+新しいエンコーディングを足す作業は `ENCODINGS` への 1 エントリ追加であって、
+新しいコードではありません。副次的に、構成子の単射性・排他性による等式分解
+(`cons a as == cons b bs` ⇒ `a == b and as == bs`) が list 専用だったのが
+tree にも効くようになりました。
+
+**ユーザが `data` で宣言した ADT はここに何も足す必要がありません** —
+`verify_adt_induction` が `globals.data_info` を直接読みます。この表は
+「`data` を使わない stdlib のエンコーディング」専用の抜け道です。
+
 ## 8.2 Rust 層の builtin 分類 (Phase 5 時点、120 個)
 
 ### A. 集合論カーネル (10 個)

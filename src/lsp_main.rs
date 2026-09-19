@@ -33,7 +33,7 @@
 //!     subset we need.  Keeps the zero-dependency promise.
 
 use std::collections::HashMap;
-use std::io::{Read, Write, BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 
 fn main() {
     let mut server = Server::new();
@@ -44,6 +44,9 @@ fn main() {
 struct Document {
     text: String,
     /// Monotonic version counter from the client.
+    /// Last `textDocument/didChange` version seen.  Kept so a future
+    /// stale-response check can compare against it.
+    #[allow(dead_code)]
     version: i64,
 }
 
@@ -268,22 +271,91 @@ struct Diagnostic {
     message: String,
 }
 
-/// Run seki's parser and turn any error into LSP-style diagnostics.
-/// Currently emits at most one diagnostic per parse pass — the parser
-/// fails fast.  Phase 6 could split into multiple by parsing decl-by-decl.
+/// Run seki's parser, then its static shape checker, and turn any error
+/// into LSP-style diagnostics.
+///
+/// The parser fails fast, so a parse error yields exactly one diagnostic.
+/// Shape checking continues past a failing declaration, so a file with
+/// several type errors reports all of them, each at its own declaration.
+///
+/// **Why this stops at the shape checker.** Everything past it — `def`
+/// membership checks, `theorem` verification — requires *evaluating* the
+/// program, and the LSP re-runs this on every keystroke. Evaluating a
+/// half-typed buffer would run its `execShell`, socket and file builtins
+/// for real, and would need the 256 MiB worker stack `src/main.rs` spawns
+/// for deep recursion. Neither belongs in an editor's inner loop; run
+/// `seki --check` for the full verification.
 fn compute_diagnostics(source: &str) -> Vec<Diagnostic> {
-    match seki::parse_program(source) {
-        Ok(_) => Vec::new(),
+    let decls = match seki::parse_program(source) {
+        Ok(d) => d,
         Err(seki::SekiError::Parse(msg)) => {
             // Try to extract line/col from the error message.  seki errors
             // start with "[line:col] " when they have location info.
             let (line, col) = parse_loc_prefix(&msg).unwrap_or((0, 0));
-            vec![Diagnostic { line, col, length: 1, message: msg }]
+            return vec![Diagnostic { line, col, length: 1, message: msg }];
         }
         Err(e) => {
-            vec![Diagnostic { line: 0, col: 0, length: 1, message: format!("{}", e) }]
+            return vec![Diagnostic { line: 0, col: 0, length: 1, message: format!("{}", e) }];
+        }
+    };
+    shape_diagnostics(&decls)
+}
+
+/// Statically shape-check each declaration in order, threading the
+/// environment so later declarations see earlier names.
+fn shape_diagnostics(decls: &[seki::ast::LocatedDecl]) -> Vec<Diagnostic> {
+    use seki::ast::Decl;
+    use seki::typecheck::{check_shape, prelude_shapes, Shape};
+
+    let mut shapes = prelude_shapes();
+    let mut out = Vec::new();
+    let mut report = |ld: &seki::ast::LocatedDecl, e: seki::SekiError| {
+        out.push(Diagnostic {
+            line: ld.line.saturating_sub(1),
+            col: ld.col.saturating_sub(1),
+            length: 1,
+            message: format!("{}", e),
+        });
+    };
+    for ld in decls {
+        match &ld.decl {
+            // The annotation in `def x : T := e` is a *set* expression, so
+            // it says nothing about `x`'s own shape that the body does not
+            // already give; only the body is checked here.
+            Decl::Def { name, value, .. } => {
+                match check_shape(value, &shapes) {
+                    Ok(sh) => {
+                        shapes = shapes.extend(name.clone(), sh);
+                    }
+                    Err(e) => {
+                        report(ld, e);
+                        // Keep going: bind the name as unknown so that
+                        // later declarations do not cascade errors.
+                        shapes = shapes.extend(name.clone(), Shape::Unknown);
+                    }
+                }
+            }
+            Decl::Theorem { name, prop, .. } | Decl::Axiom { name, prop, .. } => {
+                if let Err(e) = check_shape(prop, &shapes) {
+                    report(ld, e);
+                }
+                shapes = shapes.extend(name.clone(), Shape::Bool);
+            }
+            Decl::Expr(e) => {
+                if let Err(err) = check_shape(e, &shapes) {
+                    report(ld, err);
+                }
+            }
+            // `import` pulls in names this pass cannot see without reading
+            // the file; `data` / `class` / `instance` introduce constructors
+            // and methods the same way.  Binding nothing here would make
+            // every later use look undefined, so the shape checker already
+            // treats unknown identifiers as `Shape::Unknown` rather than an
+            // error, and these declarations need no check of their own.
+            _ => {}
         }
     }
+    out
 }
 
 fn parse_loc_prefix(msg: &str) -> Option<(usize, usize)> {
@@ -374,7 +446,7 @@ fn hover_markdown(word: &str, source: &str) -> Option<String> {
                     name, prop, proof
                 ));
             }
-            seki::ast::Decl::Axiom { name, prop } if name == word => {
+            seki::ast::Decl::Axiom { name, prop, .. } if name == word => {
                 return Some(format!("```seki\naxiom {} : {}\n```", name, prop));
             }
             _ => {}

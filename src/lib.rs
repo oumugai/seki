@@ -8,19 +8,36 @@
 //!   eval      — evaluator + builtins (lambda calculus β-reduction)
 //!   typecheck — set-theoretic type checker
 //!   prover    — theorem verification driver
+//!   session   — the declaration driver (runs a program against globals)
+//!   kernel    — proof terms, and the small checker that verifies them
+//!   obligation— what a type annotation asks the prover to establish
+//!   abduce    — what would have to be assumed for a goal to hold
+//!   confidence— how much a conclusion's assumptions warrant it
+//!   unfold    — definitional unfolding (part of the kernel's trusted base)
+//!   rewrite   — equational rewriting (part of the kernel's trusted base)
+//!   trust     — how much a verified theorem is actually worth
 //!
-//! The crate exposes a `run` API used by the binary (REPL / file runner).
+//! The binary (REPL / file runner), the LSP server and the integration
+//! tests all drive programs through [`session::Session`].
 
+pub mod abduce;
 pub mod algebra;
 pub mod ast;
 pub mod builtin_meta;
 pub mod bytecode;
+pub mod confidence;
 pub mod eval;
 pub mod lexer;
 pub mod linarith;
+pub mod obligation;
 pub mod parser;
 pub mod prover;
+pub mod rewrite;
+pub mod session;
+pub mod kernel;
 pub mod termination;
+pub mod unfold;
+pub mod trust;
 pub mod typecheck;
 pub mod value;
 

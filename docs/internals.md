@@ -77,9 +77,22 @@ src/
 ├── prover.rs     Prover::verify (by eval / refl / by algebra / by induction (Nat/List/Tree) /
 │                 by strong_induction / by simp / by unfold / by intros / 証明項 + Seq 合成
 │                 の 9 戦術 + combinator) + run_step (TacOutcome) + unfold_calls +
-│                 simplify_list_ops / simplify_tree_ops +
+│                 simplify_structural_ops (表駆動) +
 │                 SimpRule / collect_simp_rules / simp_rewrite / match_pattern
-└── main.rs       CLI / REPL / ProgramState (decl 駆動ループ + import ローダ
+├── session.rs    Session — decl 駆動ループ + import ローダ + 信頼水準の記録
+│                 (以前は main.rs の中にあり、バイナリ経由でしか到達できな
+│                 かった。統合テストも LSP もそれぞれ別実装を持っていた)
+├── kernel.rs     証明項 (Cert) と、タクティクを呼ばない独立した検査器。
+│                 TCB の中心 (§ docs/spec/06-soundness.md 6.0)
+├── unfold.rs     定義の展開 (TCB)
+├── rewrite.rs    等式書換え・AC 正規化・if 場合分け (TCB)
+├── trust.rs      TrustLevel — kernel の判定から導出される
+│
+│  証明の文脈 (Γ) は独立したオブジェクトではなく、**ゴールそのもの**の
+│  含意の鎖が持つ: `h1 and h2 => C` は 2 つの仮定を持つゴール。
+│  `by have` が鎖を伸ばし、`by apply` / `by assumption` が読む
+│  (prover.rs の goal_hypotheses / under_hypotheses / add_hypothesis)。
+└── main.rs       CLI / REPL (decl 駆動ループは session.rs へ移動
                   + base_dirs スタック + loaded/loading セット + insert_tracker +
                   annotate_error: Decl の line/col を Type/Runtime/Proof エラーに付与)
 ```
@@ -171,7 +184,7 @@ seki 層 (stdlib.seki) に書く
         ▼  parser::parse_program
    Vec<Decl>
         │
-        ▼  main::ProgramState::run_decls (1 件ずつ処理)
+        ▼  session::Session::run_decls (1 件ずつ処理)
         ├─→ Decl::Def     : shape→eval→(membership 検査)→globals 登録
         ├─→ Decl::Theorem : shape→Prover::verify→theorems 登録
         ├─→ Decl::Axiom   : shape→axioms 登録
@@ -405,7 +418,7 @@ Builtin の場合は arity ぶん引数を取って Rust 関数を呼ぶ。
 
 ### `ShapeEnv` の伝播
 
-`main::ProgramState` が宣言ごとに `ShapeEnv` を更新する。`def x : Int := ...` を処理すると `x` の shape を `Int` で env に追加する。後続の宣言は `x` の shape を参照できる。
+`session::Session` が宣言ごとに `ShapeEnv` を更新する。`def x : Int := ...` を処理すると `x` の shape を `Int` で env に追加する。後続の宣言は `x` の shape を参照できる。
 
 ### 軽量な型推論 (`infer_type`)
 
@@ -496,105 +509,27 @@ theorem t : forall a in Int, sq a + 0 == a*a := by intros then unfold sq then al
 | 領域 | 基底 | ステップ |
 |---|---|---|
 | `Nat` | `n := 0` | `n := k+1` を unfold + simplify_ifs |
-| `List T` | `xs := []` | `xs := cons x ys` を unfold + simplify_list_ops |
-| `Tree T` | `t := leaf` | `t := node l v r` を unfold + simplify_tree_ops |
+| `List T` | `xs := []` | `xs := cons x ys` を unfold + simplify_structural_ops(LIST) |
+| `Tree T` | `t := leaf` | `t := node l v r` を unfold + simplify_structural_ops(TREE) |
 
 各モードでステップは `discharge_step(op, lhs_diff, rhs_diff, dom)` に落ちる:
   - `==`: `lp - rp == 0` (純多項式等価)
   - `>=`/`>`: `polynomial_nonneg(lp - rp)` — IH のスラックで `>` が `>=` で済む
   - `<=`/`<`: `polynomial_nonpos(lp - rp)`
 
-`simplify_list_ops` / `simplify_tree_ops` は次の組込簡約則を実装:
-  - `null (cons _ _) → false`、`null nil → true`
-  - `head (cons x _) → x`、`tail (cons _ ys) → ys`
-  - `isLeaf (node _ _ _) → false`、`isLeaf leaf → true`
-  - `treeVal (node _ v _) → v`、`treeLeft (node l _ _) → l`、`treeRight (node _ _ r) → r`
+構造的エンコーディングの簡約 (`simplify_structural_ops`) は**表駆動**:
+`stdlib.seki` が list / tree を `data` 宣言ではなくタグ付きタプルで作るので
+(`cons x xs = (1, (x, xs))`、`node l v r = (3, (l, (v, r)))`)、帰納法タクティクは
+そのエンコーディングを見透かす必要がある。`Encoding` 表に構成子 (名前・タグ・
+アリティ)、射影 (`head`/`tail`/`treeVal`...)、判別子 (`null`/`isLeaf`)、
+再帰測度 (`length`) を宣言し、走査自体は 1 回だけ書かれている。
+`ENCODINGS` に 1 エントリ足せば新しいエンコーディングが扱えるようになる
+(詳細: `docs/spec/08-rust-seki-split.md` §8.1.1)。
 
-これらにより、構造帰納法のステップで `length (cons x ys) → 1 + length ys` のような unfold 後の自然な簡約が成立する。
-
-### `by strong_induction` / `by strong_induction <N>` — 深さ可変の強帰納法 (Nat)
-
-Fibonacci (`N=2`) やそれ以上の多段階漸化式 (tribonacci 型は `N=3`) 向け。
-`N` 省略時は 2 (後方互換)。
-
-1. **基底**: `P(0), ..., P(N-1)` を `by eval` で確認
-2. **ステップ**: `n := k+N` を unfold。再帰呼出し (`f k`, `f (k+1)`, ...) は不透明な原子として現れるため、`PolyDomain::Nat` 上の符号判定 (Nat 域で原子 ≥ 0 とみなす) で直接 `lhs(k+N) op rhs(k+N)` を判定
-3. **健全性ガード** (`contains_var_conditioned_if`, 2026-08 追加): unfold 後に **`k` に依存する未解決の `if`** が残っていないか検査する。`N` が関数の実際の参照深さより小さいと、基底境界を跨ぐ場合分け (`if (k+N) == N then ... else ...` のような、k=0 のときだけ真になる条件) が解決できずに残る。これを検出せず `expr_to_poly` の「不透明項は非負」フォールバックに委ねると、境界のすぐ内側の負のリテラルを一度も検査しないまま偽の命題を証明してしまう実バグがあった (`docs/spec/06-soundness.md` Pattern D 参照)。ガードに引っかかった場合は証明を失敗させ、ユーザに depth を大きくするよう促すエラーを返す。
-
-健全性: 不等式の方向と一致する形で原子を扱うので、`>= 0` 系の不等式が中心。
-
-### `by simp` — 等式書換え戦術
-
-`Globals.theorem_props` および `Globals.axiom_props` に蓄積された等式 theorem / axiom を **方向付き書換え規則** (LHS → RHS) として収集し、目標 (goal) に対して反復的に適用する。
-
-1. **規則収集** (`collect_simp_rules`): 各 prop から先頭の `forall` 束縛子をストリップしてその bound vars を **メタ変数** とし、本体が `lhs == rhs` 形であれば `SimpRule { metavars, lhs, rhs }` を作成。
-2. **書換え** (`simp_rewrite`): goal を bottom-up に走査し、各サブ式に対して `match_pattern(rule.lhs, subexpr, rule.metavars)` で構造マッチを試みる。マッチすれば `apply_subst(rule.rhs, binding)` で置換。
-3. **反復** (`verify_simp`): 不動点まで繰り返す (最大 64 反復)。途中の状態は `seen: Vec<Expr>` に蓄積する。
-4. **成功条件**: 経由した任意の状態で
-  - `Bool(true)` リテラルに reduce、または
-  - `a == b` で `alpha_equiv(a, b)` が成立、または
-  - `ctx.eval(state)` が `Bool(true)` を返す
-
-`seen` 配列を使うのは、対称的規則 (`add_comm` など) が両方向に発火して oscillation を起こすケースで、1-step で `e == e` 形にたどり着く可能性を拾うため。
-
-**マッチング** (`try_match`):
-  - パターンに登場する Var が `metavars` に含まれていれば、初出時はバインディングを記録、再出時は `alpha_equiv` で一貫性チェック。
-  - そうでない Var, Int/Real/Bool/Str リテラルは構造的に同一かを比較。
-  - `App`, `BinOp`, `UnOp`, `Tuple`, `List`, `If` は再帰的に対応する子をマッチ。
-  - `Lambda` は引数名が完全一致するときのみ受理 (alpha-renaming は未対応)。
-
-**既知の限界**:
-  - 対称規則 (e.g., `a + b == b + a`) は単独では oscillation するため、補助的な情報なしには `0 + x == x + 0` のような goal を `simp` のみで通せない。
-  - 条件付き等式 (forall 述語に追加の仮定があるもの) は未対応。
-
-### 戦術別ロジック (既存):
-
-### `Proof::ByEval`
-
-`ctx.eval(prop, env)` を呼び、`Value::Bool(true)` で受理。`false` なら `proof error: proposition reduced to false`。Bool 以外 (Int 等) なら `did not reduce to a Bool`。
-
-### `Proof::Refl`
-
-prop が `BinOp(Eq, a, b)` であることを期待。両辺を評価し `value_eq` で比較。等しければ受理、違えば `refl: lhs ≠ rhs`。
-
-### `Proof::Term(term)`
-
-prop の形に応じて分岐:
-
-- **`Forall { var, domain, body }`**: term を評価してクロージャ/組込関数か確認。domain を列挙。各要素で
-  - `apply(term, [e])` を呼ぶ (副作用検査)
-  - `body[var := e]` を評価して `true` か確認
-  失敗時は具体的な反例を報告 (`counterexample: with x = 3 ...`)。
-
-- **`Exists { var, domain, body }`**: term を評価して値 `w` を得る。`w in domain` を確認、`body[var := w]` を評価して `true` か確認。
-
-- **その他**: term は単に「タグ」として評価し (失敗するとエラー)、prop は通常評価して `true` を期待。
-
-`Forall` では証明項の本体は実質使われない (構造制約: 関数であること、有限列挙が成立すること)。本格的な依存型での `\x -> proof_of_P(x)` のような扱いではない。
-
----
-
-## 8. プレリュードと組込関数
-
-`eval::make_prelude() -> Globals` がプログラム起動時のグローバル環境を作る。
-
-| 名前 | 種類 | 内容 |
-|---|---|---|
-| `Nat`, `Int`, `Bool`, `String`, `Prop`, `Set` | `Set` 値 | `SetVal::Atomic(...)` |
-| `print` / `card` / `id` / `succ` / `pred` | Builtin (1) | 標準出力 / 濃度 / 恒等 / 後者 / 前者 |
-| `fst` / `snd` / `pair` | Builtin (1/1/2) | タプルアクセサ・コンストラクタ |
-| `nil` | List 値 | 空リスト (関数ではない) |
-| `cons` / `head` / `tail` / `null` | Builtin (2/1/1/1) | リスト構築/分解/空判定 |
-| `length` / `append` / `reverse` / `toSet` | Builtin (1/2/1/1) | リスト操作 |
-| `List` | Builtin (1) | `Set -> Set` — 要素集合を渡すとリスト型集合を返す |
-| `leaf` | Tree 値 | 空木 (関数ではない) |
-| `node` | Builtin (3) | `Tree -> A -> Tree -> Tree` — 内部ノード構築 |
-| `isLeaf` / `treeVal` / `treeLeft` / `treeRight` | Builtin (1) | 木のテスト/アクセサ |
-| `Tree` | Builtin (1) | `Set -> Set` — 要素集合から二分木型集合を作る |
-
-組込関数を追加する例 (eval.rs `make_prelude` 内):
-
-```rust
+構成子の**単射性・排他性**による等式分解 (`ctor_equality`) も同じ表を使う:
+`cons a as == cons b bs` を `a == b` と `as == bs` に分解し、`nil == cons ..`
+は「構造的に等しくない」として拒否する。どの綴り (明示的な `cons ..`、
+unfold が残したタグタプル、`[a, b]` リテラル) でも認識する。
 fn b_double(args: &[Value]) -> Result<Value, String> {
     match &args[0] {
         Value::Int(n) => Ok(Value::Int(n * 2)),
@@ -624,12 +559,12 @@ g.defs.insert("double".into(), Value::Builtin(BuiltinFn {
 for f in examples/*.seki; do echo "== $f =="; cargo run -q -- "$f"; done
 ```
 
-### main.rs `ProgramState`
+### session.rs `Session`
 
 REPL とファイル実行で共通に使う状態管理:
 
 ```rust
-struct ProgramState {
+pub struct Session {
     globals: Globals,
     shapes:  ShapeEnv,
 }
@@ -725,7 +660,7 @@ LSP / 構造化テスト診断・将来の機械可読出力向けに用意し�
 `src/ast.rs` に `LocatedDecl { decl: Decl, line: usize, col: usize }`。
 `parser::parse_program` が各トップレベル宣言の **キーワード位置** (`def`/`theorem`/`axiom`/...) を `(line, col)` として記録する。`data` のように複数の `def` を生成する宣言は、すべての派生 `def` で同じ位置を共有する。
 
-`main.rs::run_decl` は `run_decl_inner` の結果を `annotate_error(e, line, col)` でラップし、`Type`/`Runtime`/`Proof` カテゴリのエラー本文に `[line:col] ` プレフィックスを付ける (`Lex`/`Parse` は元から自前で位置情報を持つので素通し)。
+`session.rs::run_decl` は `run_decl_inner` の結果を `annotate_error(e, line, col)` でラップし、`Type`/`Runtime`/`Proof` カテゴリのエラー本文に `[line:col] ` プレフィックスを付ける (`Lex`/`Parse` は元から自前で位置情報を持つので素通し)。
 
 ```
 type error: [12:1] value "purple" is not a member of declared type Color

@@ -74,6 +74,10 @@ def css := strJoin "\n" [
 -- seki ならではの利点: UI コンポーネントの「状態の正しさ」を
 -- 型 (集合) と theorem で保証できる.
 -- ===========================================================
+-- 注: これらは `[sampled]` と表示される。`updateMsg` の `match` は
+-- タグ文字列の比較に脱糖されるため `by algebra` が畳めず、`forall n in Nat`
+-- は SAMPLE_BOUND までの標本検査になる。無限ドメイン上の主張としては
+-- **証明ではない** — `--strict` では拒否される (docs/spec/06-soundness.md §6.0)。
 theorem inc_grows : forall n in Nat, updateMsg MInc n == n + 1
   := by eval
 
@@ -81,9 +85,14 @@ theorem reset_zero : forall n in Nat, updateMsg MReset n == 0
   := by eval
 
 -- Nat 上で「dec しても 0 未満にならない」
--- by algebra の if-場合分け拡張 + Nat 仮説で閉じる
+-- 注: これは以前 `by unfold updateMsg then algebra` で通っていたが、その証明は
+-- **健全ではなかった** — `match` の脱糖が残す到達不能な
+-- `error "non-exhaustive match"` 枝が不透明原子になり、`by algebra` が Nat 上で
+-- 不透明原子を無条件に非負と仮定していたため。証明項の導入 (`src/kernel.rs`) で
+-- この仮定が露見し、`algebra::polynomial_nonneg` を修正した。
+-- 現在は `by eval` による標本検査で、`[sampled]` と表示される。
 theorem dec_keeps_nn : forall n in Nat, updateMsg MDec n >= 0
-  := by unfold updateMsg then algebra
+  := by eval
 
 -- ===========================================================
 -- 起動モード切替

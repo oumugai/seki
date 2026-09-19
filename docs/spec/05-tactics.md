@@ -1,6 +1,6 @@
 # 5. 証明戦術
 
-seki は **12 種類のタクティク + コンビネータ** を持ちます。それぞれの
+seki は **15 種類のタクティク + コンビネータ** を持ちます。それぞれの
 意味論と健全性条件をまとめます。
 
 タクティクは `theorem` の `:=` の後に `by <tactic>` 形式で書きます。
@@ -10,25 +10,123 @@ seki は **12 種類のタクティク + コンビネータ** を持ちます。
 theorem t : P := by tac1 then tac2 then tac3
 ```
 
+> **証明項**: タクティクは証明項 (`crate::kernel::Cert`) を生成し、
+> タクティクを一切呼ばない kernel がそれを原始推論規則から再構成します。
+> **タクティクは信頼されていません** — 探索してよいが、出したものは検査を
+> 通らなければなりません。各定理には kernel の判定から導かれた水準
+> (`Sound` / `Axiomatic` / `Unchecked` / `Sampled`) が付き、引用先に
+> 伝播します。`seki --proof FILE NAME` で証明項そのものを読めます。
+> 詳細は `docs/spec/06-soundness.md` §6.0。以下の各節の「健全性」は
+> この水準のことです。
+
 ## 5.1 `by eval`
 
 **意味**: 命題を完全簡約して `Bool::true` になるか確認する。
 
-**健全性**: 列挙集合 / 内包の有限ドメインに対して健全。
-無限ドメイン上の `forall` は `SAMPLE_BOUND` (200) でのサンプル検査になり
-**健全ではない**。
+**健全性**: 列挙集合 / 内包の有限ドメインに対して健全 (`Sound`)。
+無限ドメイン上の正の位置の `forall` は `SAMPLE_BOUND` (200) でのサンプル
+検査になり **健全ではない** (`Sampled`)。
+
+ただし次の 2 つは無限ドメインでも `Sound` です:
+
+- **定義から決まる場合** — 内包の述語そのもの (またはその連言肢)、および
+  `Nat` / `Int` / `Real` 上の多項式関係は `try_forall_from_definition` が
+  列挙せずに判定します。多変数の入れ子 `forall` も剥がして判定します。
+- **`exists` の witness** — 列挙で `true` になったということは実際に
+  witness を見つけたということなので、ドメインの残りを見ていなくても証明です。
 
 ```seki
-theorem t1 : 1 + 1 == 2 := by eval                    -- ✅
-theorem t2 : forall x in {1,2,3}, x > 0 := by eval     -- ✅
-theorem t3 : forall n in Nat, n + 1 > 0 := by eval     -- 🟡 sampled
+theorem t1 : 1 + 1 == 2 := by eval                    -- ✅ Sound
+theorem t2 : forall x in {1,2,3}, x > 0 := by eval     -- ✅ Sound (有限)
+theorem t3 : forall n in Nat, n + 1 > 0 := by eval     -- ✅ Sound (多項式判定)
+theorem t4 : exists n in Nat, n > 100 := by eval       -- ✅ Sound (witness)
+
+def f := \n -> if n < 300 then 0 else 1
+theorem t5 : forall n in Nat, f n == 0 := by eval      -- 🔴 Sampled (実際に偽)
 ```
+
+## 5.1b 演繹 — `by apply` / `by have` / `by assumption`
+
+0.8.0 まで、証明された事実を再利用する手段は `by simp` (等式のみ) と
+`by obtain` (存在命題のみ) しかありませんでした。含意や不等式 —
+数学的事実の大半 — は再利用できず、全 955 定理のうち他の定理を使って
+いたのは **12 件**だけで、残りはすべて決定手続きでゼロから証明されて
+いました。`lib/` は数学ライブラリではなく、独立した判定結果の集積でした。
+
+この 3 つがその穴を埋めます。
+
+### 証明の文脈 (Γ)
+
+seki は証明の文脈を **ゴールそのものの中**に持ちます。`h1 and h2 => C`
+は「2 つの仮定を持つゴール」です。`by have` がその鎖を伸ばし、
+`by apply` と `by assumption` がそれを読みます。別の文脈オブジェクトは
+ありません。
+
+### `by apply L [with x := e, ...]` — modus ponens
+
+`L` (定理または公理) を具体化し、その前提を落とし、結論をゴールとして
+読み取ります。
+
+```seki
+theorem double_mono
+  : forall x in Real, forall y in Real, x <= y => (2.0*x) <= (2.0*y)
+  := by algebra
+
+-- 束縛変数は結論と目標の照合で推論されるので `with` は要らない
+theorem concrete : (2.0 * 1.0) <= (2.0 * 3.0) := by apply double_mono
+```
+
+前提は **仮定にあればそれで、無ければ `by algebra` で**落とします。
+落とせなければエラーです — 前提を飛ばして適用することはできません。
+
+`with` が要るのは**結論に現れない変数**だけです。推移律がその例で、
+`y` は結論 `x <= z` のどこにも出てきません:
+
+```seki
+theorem le_trans : forall x in Real, forall y in Real, forall z in Real,
+    (x <= y) and (y <= z) => x <= z := by algebra
+
+theorem chained : forall a in Real, forall c in Real,
+    (a <= 5.0) and (5.0 <= c) => a <= c
+  := by apply le_trans with y := 5.0
+```
+
+与え忘れると、何が決まらなかったかを名指しで教えます。
+
+**健全性**: ✅ 証明項は `Cert::Apply` で、kernel が補題の文から具体化を
+やり直し、結論がゴールと一致するか確かめ、**前提をひとつ残らず検査**します。
+公理に依存していればそれも引き継ぎます。
+
+### `by have <name> : <prop> := <proof> then <closer>` — カット規則
+
+中間の事実を立ててから使います。`prop` は**現在の仮定の下で**証明されます。
+
+```seki
+theorem forward : forall a in Real, a <= 5.0 => (2.0 * a) <= 12.0
+  := by have h : (2.0 * a) <= (2.0 * 5.0) := by apply double_mono
+     then algebra
+```
+
+⚠️ 入れ子の証明は **1 タクティク**です。上の `then algebra` は外側の鎖に
+属します (そう読めるように、そう構文解析されます)。複数手順が要る中間
+事実は独立した `theorem` にしてください。
+
+**健全性**: ✅ `Cert::Have`。kernel は `fact` を現在の仮定の下で検査し、
+その後ゴールを `fact` 付きで検査します。
+
+### `by assumption`
+
+ゴールの結論がすでに仮定にあるとき閉じます。場合分けが残す枝の多くが
+この形です。
+
+**健全性**: ✅ `Cert::Assumption`。kernel が仮定の鎖を見て一致を確認します。
 
 ## 5.2 `refl`
 
 **意味**: 命題が `Refl: x == x` 形に構造一致するか。**型項としても使える** (Curry-Howard)。
 
-**健全性**: ✅ 完全に健全 (構造的等価のみ)。
+**健全性**: ✅ 完全に健全 (構造的等価のみ)。証明項は `Refl` (両辺を評価して
+比較) または `SyntacticRefl` (両辺が同じ項) の 1 ステップ。
 
 ```seki
 theorem t : 42 == 42 := refl

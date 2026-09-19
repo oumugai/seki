@@ -10,7 +10,7 @@
 --   def mcExpectation sampler phi n        — E[φ(X)] のモンテカルロ推定
 --   def mcVariance sampler n               — Var[X] の不偏推定
 --   def mcIntegrate f lo hi n              — ∫ f(x) dx の MC 積分 (一様サンプリング)
---   def gaussianSample mu sigma            — Box-Muller で N(μ, σ²) サンプル
+--   def gaussianSample mu sd            — Box-Muller で N(μ, σ²) サンプル (sd = σ)
 --   def lawOfLargeNumbersErr sampler n     — |empirical mean - μ_true| の経験テスト
 -- ===========================================================
 
@@ -70,8 +70,8 @@ def boxMullerStd := \dummy ->
     let safeU1 = if u1 < 0.0000000001 then 0.0000000001 else u1 in
     sqrt (0.0 - 2.0 * (ln safeU1)) * cos (6.283185307179586 * u2)
 
-def gaussianSample := \(mu : Real) (sigma : Real) ->
-    \dummy -> mu + sigma * (boxMullerStd dummy)
+def gaussianSample := \(mu : Real) (sd : Real) ->
+    \dummy -> mu + sd * (boxMullerStd dummy)
 
 -- ----- 大数の法則の経験テスト -----
 -- N 個のサンプル平均と真の平均 mu_true の差を返す

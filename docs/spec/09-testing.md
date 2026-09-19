@@ -180,3 +180,32 @@ seki でテストを書く際の **デフォルト** は:
 `sample/calc/` では `tests.seki` (旧) と `tests_property.seki` (新) が共存し、
 property 版が **同じ性質をより少ない行数 + より広いカバレッジで** 検証している
 ことを示している。
+
+## 9.6 テストファイルの配線 (忘れると静かに腐る)
+
+`tests/seki/test_<name>.seki` を置いただけでは **`cargo test` は実行しません**。
+`tests/integration.rs` に `run_seki_test_file` を呼ぶ `#[test]` を追加して
+初めて回ります (`/seki-new-libtest` がこの手順をラップします)。
+
+これは実害を出しました。`sigma` が Σ 型のキーワードになったとき、
+`lib/probability/{continuous,montecarlo}.seki` は `sigma` をラムダの
+仮引数名に使っていたためパースできなくなりましたが、
+`tests/seki/test_probability.seki` が未配線だったため **数か月気づかれ
+ませんでした**。同時に 3 つの他のテストファイルも未配線でした。
+
+対策として `every_seki_test_file_is_wired_into_cargo_test` を追加してあります
+— `tests/seki/test_*.seki` のうち `tests/integration.rs` から参照されていない
+ものがあれば、そのファイル名を挙げて失敗します。新しいテストファイルを
+置いて配線を忘れると、次の `cargo test` で落ちます。
+
+## 9.7 テストは本物のドライバを通る
+
+`tests/integration.rs` の `run()` ヘルパは、かつて `Session::run_decl_inner`
+を**再実装したコピー**でした。そのコピーは `import` を扱えず (`panic!` して
+いた)、def 時の membership check も終了性 warning も信頼水準の記録も
+通りませんでした。つまり 147 件のテストの大半は**ドライバではなくドライバの
+複製**を検証していたことになります。
+
+現在 `run()` は `seki::session::Session` — `seki file.seki` が通るのと同じ
+コードパス — を呼びます。Rust 側のテストを書くときは `Session` を使い、
+宣言処理を書き写さないこと。

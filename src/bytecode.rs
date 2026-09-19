@@ -372,6 +372,27 @@ pub fn run(bc: &Bytecode, mut locals: Vec<Value>) -> Result<Value, String> {
     macro_rules! pop {
         () => { stack.pop().ok_or_else(|| "VM: stack underflow".to_string())? };
     }
+/// Integer arithmetic for the VM, with the same overflow policy as the
+/// tree-walking evaluator (`eval::overflow_error`): a result outside `i64`
+/// is an error, never a wrapped value.  The two backends must agree —
+/// `vmRun` is meant to be an optimization of `eval`, not a second semantics.
+fn checked_int(
+    op: &str,
+    x: i64,
+    y: i64,
+    f: fn(i64, i64) -> Option<i64>,
+) -> Result<i64, String> {
+    f(x, y).ok_or_else(|| {
+        format!(
+            concat!(
+                "VM: Int overflow in `{} {} {}`: the result leaves the range ",
+                "of a 64-bit integer"
+            ),
+            x, op, y
+        )
+    })
+}
+
     macro_rules! binop_num {
         ($f_ii:expr, $f_rr:expr, $name:expr) => {{
             let b = pop!();
@@ -414,24 +435,24 @@ pub fn run(bc: &Bytecode, mut locals: Vec<Value>) -> Result<Value, String> {
             Op::Load(slot) => stack.push(locals[slot].clone()),
             Op::Store(slot) => { locals[slot] = pop!(); }
             Op::Add => binop_num!(
-                |x: i64, y: i64| -> Result<i64, String> { Ok(x.wrapping_add(y)) },
+                |x: i64, y: i64| -> Result<i64, String> { checked_int("+", x, y, i64::checked_add) },
                 |x: f64, y: f64| x + y,
                 "+"
             ),
             Op::Sub => binop_num!(
-                |x: i64, y: i64| -> Result<i64, String> { Ok(x.wrapping_sub(y)) },
+                |x: i64, y: i64| -> Result<i64, String> { checked_int("-", x, y, i64::checked_sub) },
                 |x: f64, y: f64| x - y,
                 "-"
             ),
             Op::Mul => binop_num!(
-                |x: i64, y: i64| -> Result<i64, String> { Ok(x.wrapping_mul(y)) },
+                |x: i64, y: i64| -> Result<i64, String> { checked_int("*", x, y, i64::checked_mul) },
                 |x: f64, y: f64| x * y,
                 "*"
             ),
             Op::Div => binop_num!(
                 |x: i64, y: i64| -> Result<i64, String> {
                     if y == 0 { Err("VM: division by zero".into()) }
-                    else { Ok(x / y) }
+                    else { checked_int("/", x, y, i64::checked_div) }
                 },
                 |x: f64, y: f64| x / y,
                 "/"
@@ -442,7 +463,8 @@ pub fn run(bc: &Bytecode, mut locals: Vec<Value>) -> Result<Value, String> {
                 match (a, b) {
                     (Value::Int(x), Value::Int(y)) => {
                         if y == 0 { return Err("VM: mod by zero".into()); }
-                        stack.push(Value::Int(x.rem_euclid(y)));
+                        stack.push(Value::Int(checked_int(
+                            "mod", x, y, i64::checked_rem_euclid)?));
                     }
                     (a, b) => return Err(format!(
                         "VM: mod: expected (Int, Int), got ({}, {})",

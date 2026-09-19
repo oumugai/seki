@@ -29,6 +29,21 @@ pub struct Rat {
     pub den: i128,
 }
 
+impl std::fmt::Display for Rat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.den == 1 {
+            return write!(f, "{}", self.num);
+        }
+        // A rational that came from an `f64` literal has a huge power-of-two
+        // denominator; printing it exactly is correct but unreadable, so
+        // show the decimal it stands for and mark it as approximate.
+        if self.den > 1_000_000 {
+            return write!(f, "~{}", self.num as f64 / self.den as f64);
+        }
+        write!(f, "{}/{}", self.num, self.den)
+    }
+}
+
 fn gcd_i128(a: i128, b: i128) -> i128 {
     let (mut a, mut b) = (a.unsigned_abs() as i128, b.unsigned_abs() as i128);
     while b != 0 {
@@ -118,7 +133,7 @@ impl Rat {
 /// non-finite values, subnormals, or magnitudes whose exact representation
 /// would overflow `i128`.  This is the rule that decides whether a `Real`
 /// literal can enter the polynomial fragment.
-fn f64_to_rat(f: f64) -> Option<Rat> {
+pub fn f64_to_rat(f: f64) -> Option<Rat> {
     if !f.is_finite() {
         return None;
     }
@@ -239,6 +254,21 @@ impl Polynomial {
 
     pub fn sub(self, other: Self) -> Self {
         self.add(other.neg())
+    }
+
+    /// Multiply every coefficient by `c`.  Used by `crate::kernel` to
+    /// check a sum-of-squares witness; see that module's trusted-base note.
+    pub fn scale(self, c: Rat) -> Self {
+        if c.is_zero() {
+            return Self::zero();
+        }
+        Self {
+            terms: self
+                .terms
+                .into_iter()
+                .map(|m| Monomial { coeff: m.coeff.mul(c), vars: m.vars })
+                .collect(),
+        }
     }
 
     pub fn mul(self, other: Self) -> Self {
@@ -618,6 +648,21 @@ pub enum PolyDomain {
     Real,
 }
 
+/// Is `name` an opaque placeholder standing for a subexpression
+/// `expr_to_poly` could not translate (a function call, an `if`, a
+/// transcendental)?
+///
+/// This matters for soundness over `Nat`.  "Every coefficient is
+/// non-negative, therefore the polynomial is" needs every *variable* to be
+/// non-negative.  That holds for a variable bound by `forall n in Nat` — it
+/// does **not** hold for an opaque atom, which stands for an arbitrary
+/// expression that may well be negative.  Treating the two alike let
+/// `by algebra` prove `forall n in Nat, f n >= 0` for `f n = -5`; the proof
+/// term checker in `crate::kernel` caught it.
+pub fn is_opaque_atom(name: &str) -> bool {
+    name.starts_with("__atom_")
+}
+
 pub fn polynomial_nonneg(p: &Polynomial, dom: PolyDomain) -> bool {
     if p.terms.is_empty() {
         return true;
@@ -625,8 +670,42 @@ pub fn polynomial_nonneg(p: &Polynomial, dom: PolyDomain) -> bool {
     if let Some(c) = p.as_constant() {
         return c.sign() >= 0;
     }
+    polynomial_nonneg_inner(p, dom, false)
+}
+
+/// As [`polynomial_nonneg`], but additionally willing to assume that opaque
+/// atoms are non-negative.
+///
+/// **Only an inductive step may use this.**  There, an atom like
+/// `__atom_(f k)` stands for the proposition at a smaller argument, which
+/// the induction hypothesis has already granted.  Outside that context the
+/// assumption is simply false — an atom is an arbitrary expression — and
+/// using it there is what let `by algebra` "prove"
+/// `forall n in Nat, f n >= 0` for `f n = -5`.
+///
+/// This residual assumption is exactly why an induction proof's step is
+/// recorded as `Cert::Trusted` and why such theorems report as not fully
+/// kernel-checked; see `crate::kernel`.
+pub fn polynomial_nonneg_under_ih(p: &Polynomial, dom: PolyDomain) -> bool {
+    polynomial_nonneg_inner(p, dom, true)
+}
+
+fn polynomial_nonneg_inner(p: &Polynomial, dom: PolyDomain, ih: bool) -> bool {
+    if p.terms.is_empty() {
+        return true;
+    }
+    if let Some(c) = p.as_constant() {
+        return c.sign() >= 0;
+    }
     match dom {
-        PolyDomain::Nat => p.terms.iter().all(|m| m.coeff.sign() >= 0),
+        PolyDomain::Nat => {
+            // Only genuine `Nat`-bound variables may be assumed
+            // non-negative; an opaque atom may stand for anything.
+            p.terms.iter().all(|m| {
+                m.coeff.sign() >= 0
+                    && (ih || m.vars.keys().all(|v| !is_opaque_atom(v)))
+            })
+        }
         PolyDomain::Int | PolyDomain::Real => {
             let all_even = p.terms.iter().all(|m| m.vars.values().all(|e| e % 2 == 0));
             let all_nn = p.terms.iter().all(|m| m.coeff.sign() >= 0);
@@ -665,6 +744,11 @@ pub fn polynomial_pos(p: &Polynomial, dom: PolyDomain) -> bool {
 
 pub fn polynomial_nonpos(p: &Polynomial, dom: PolyDomain) -> bool {
     polynomial_nonneg(&p.clone().neg(), dom)
+}
+
+/// The `>= 0` counterpart of [`polynomial_nonneg_under_ih`].
+pub fn polynomial_nonpos_under_ih(p: &Polynomial, dom: PolyDomain) -> bool {
+    polynomial_nonneg_under_ih(&p.clone().neg(), dom)
 }
 
 pub fn polynomial_neg(p: &Polynomial, dom: PolyDomain) -> bool {

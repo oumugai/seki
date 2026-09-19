@@ -56,11 +56,92 @@ theorem fib_nn                                     -- 強帰納法 (深さ2)
 - **終了性検査** — 構造的減少 (`n - C`, `n / C` (`C ≥ 2`), `tail`, `snd`, `treeLeft`/`treeRight`) で見える再帰は静的に検証。確認できなければ `warning` を出すが定義は受理する (false positive を許容)。
 - **型クラス** — `class Eq A where eq : A -> A -> Bool` と `instance EqInt : Eq Int where eq = ...` を提供。純粋な desugar で `data EqDict` (辞書 record) と projection 関数に変換し、`eq EqInt 3 3` のように **辞書を明示的に渡す** スタイル。Lean / Haskell のような自動解決はないが静的型なしでも安全。
 - **記号は単語** — `forall`, `exists`, `in`, `notin`, `union`, `intersect`, `subset`, `times`, `lambda`/`\` 等。Unicode 記号は使わない。
-- **9 種類の証明戦術 + 合成**:
+- **証明項 (proof term) と独立した kernel** — タクティクが「証明できた」と言っても、それは証明ではない。タクティクは証明項を**生成**し、タクティクを一切呼ばない小さな **kernel** がそれを原始推論規則から再構成する。探索は難しくバグりうるが、検査は易しく、正しくなければならないのはそこだけ ([docs/spec/06-soundness.md](docs/spec/06-soundness.md) §6.0)。
+
+  ```
+  $ seki --proof examples/13_advanced_tactics.seki abs_int_nonneg
+  theorem abs_int_nonneg : (forall x in Int, ((if (x >= 0) then x else (- x)) >= 0))
+  case split on the goal's first `if`:
+    when the condition holds:
+      the hypotheses [(x >= 0)] add up to `x` - `0` (over Int)
+    when it does not:
+      the hypotheses [(x < 0)] add up to `(- x)` - `0` (over Int)
+
+  kernel verdict: every step re-established from primitives
+  ```
+
+  kernel は `EvalCtx::finite_only` を通して評価するので、**無限ドメインのサンプリングを構造的に受理できない**。TCB は約 9,000 行から約 2,600 行に縮んだ。全 968 定理のうち **925 (95.6%) が kernel 検証済み**で、残りは `--audit` で名前と理由が出る。
+
+  ```
+  $ seki file.seki
+  theorem all_pos ✓ proved
+  theorem f_zero ✓ proved  [sampled — NOT a proof]
+  theorem consequence ✓ proved  [sampled — NOT a proof]   ← 引用先に伝播する
+  theorem gauss ✓ proved  [unchecked — no proof term]
+
+  $ seki --audit file.seki      # 各定理がどう検証されたか
+  $ seki --strict file.seki     # Sound 以外を拒否
+  ```
+
+  導入した日に、kernel は `by algebra` の**実在する健全性バグ**を発見した — `f n = -5` に対して `forall n in Nat, f n >= 0` が証明できていた ([§6.0.4](docs/spec/06-soundness.md))。
+
+- **演繹** — `by apply` (modus ponens)、`by have` (カット規則)、`by assumption`。0.8.0 まで証明済みの事実を再利用する手段は等式 (`by simp`) と存在命題 (`by obtain`) だけで、**含意や不等式は再利用できず**、955 定理のうち他の定理を使っていたのは 12 件だけだった。`lib/` は数学ライブラリではなく独立した判定結果の集積だった。
+
+  ```seki
+  theorem le_trans : forall x in Real, forall y in Real, forall z in Real,
+      (x <= y) and (y <= z) => x <= z := by algebra
+
+  theorem chained : forall a in Real, forall c in Real,
+      (a <= 5.0) and (5.0 <= c) => a <= c
+    := by apply le_trans with y := 5.0
+  ```
+
+  束縛変数は結論と目標の照合で推論されるので、`with` が要るのは結論に現れない変数だけ。前提は「仮定にあるか」「`by algebra` で落ちるか」を確かめてから適用され、飛ばすことはできない。動く例は [`examples/40_deduction.seki`](examples/40_deduction.seki) (13 定理すべて kernel 検証済み)。
+
+- **確からしい事実からの推論** — LLM が抽出した事実のように「100% 確実ではないが確率的に正しそう」な前提を `axiom ... with confidence 0.9 from "..."` と書ける。**確率は kernel に入れない** — 入れると `Sound` が連続量になり「kernel 検証済み」が意味を失う。依存の推移的追跡は証明項が既に持っているので、その上に載せるだけで済む。
+
+  ```
+  $ seki --audit file.seki
+  both   axiom `customer_spend`; axiom `gold_implies_discount`
+         confidence >= 7/10 (from `customer_spend` 4/5, `gold_implies_discount` 9/10)
+  ```
+
+  合成は**掛け算ではなく Fréchet 下界** `max(0, Σpᵢ − (n−1))`。`0.9 × 0.8 = 0.72` は独立性を仮定した数字で、同じ抽出パス由来の事実は独立ではない。しかも含意に付けた確信度に対して Fréchet は**厳密**なので、確からしいルールの連鎖は独立性を仮定せず正しく合成する。`--min-confidence 0.85` で下限を切れる。
+
+- **仮定の逆算** — 証明が失敗するのはたいてい主張が誤っているからではなく仮定が足りないから。seki は**何を仮定すれば成り立つか**を言う:
+
+  ```
+  proof error: by algebra: cannot prove (100 - (200 * r)) > 0 over Real
+    it would hold given `(r < (1 / 2))` — add it as a hypothesis ...
+  ```
+
+  提案は「仮定として足して実際に通るか」を確認してから出るので必ず効きます。パラメータが推定値のモデルでは、この「どこまでなら成り立つか」が証明そのものより有用なことがあります (感度解析)。
+
+- **型注釈も証明される** — `def f : A -> {y in B | Q y}` は「どんな引数でも結果が `Q` を満たす」という主張で、seki はこれを関数の標本適用で検査していた。0.9.0 からは `forall x in A, Q[y := f x]` という**証明義務**として定理と同じ prover・同じ kernel に流す。`sample/ledger` の overdraft 不変条件が型として証明できる:
+
+  ```seki
+  def NonNeg := {x in Int | x >= 0}
+  def safeWithdraw : Nat -> Nat -> NonNeg := \bal amt ->
+      if amt <= bal then bal - amt else bal     -- 証明される
+  def unsafeWithdraw : Nat -> Nat -> NonNeg := \bal amt -> bal - amt
+  --                                            [sampled — NOT a proof]
+  ```
+
+  落とせない義務は標本検査に戻りますが、**そう記録されます** — `--audit` が義務そのものを見せ、`--strict` が拒否します。動く例は [`examples/41_refinement_types.seki`](examples/41_refinement_types.seki)。
+
+- **区間上の推論** — `0.05 <= r <= 0.15` のような範囲の仮定から結論を導く形は、モデル検証で最も言いたい形。`by algebra` は Fourier-Motzkin で乗数を探し、証明項には **Farkas 証明書** が載るので kernel は掛けて足すだけで検査できる。
+
+  ```
+  $ seki --proof examples/40_deduction.seki npv_positive_on_range
+  `(100 - (200 * r))` - `0` = 200·((r <= 0.15)) + ~70 (over Real)
+  kernel verdict: every step re-established from primitives
+  ```
+
+- **12 種類の証明戦術 + 合成**:
 
   | 戦術 | 種別 | 用途 |
   |---|---|---|
-  | `by eval` | closer | 命題を簡約 (有限のみ健全) |
+  | `by eval` | closer | 命題を簡約 (有限ドメイン、または定義から決まる場合のみ健全 — それ以外は `[sampled]` と表示される) |
   | `refl` | closer | 等式の構造的等価 |
   | `by algebra` | closer | 多項式正規化 + 符号解析 + 定数 div/mod + PSD 2次形式 (∞ ✓) |
   | `by induction` | closer | Nat / List / Tree 上の構造帰納法 (∞ ✓) |
@@ -242,7 +323,7 @@ seki/
 
 主要な未対応:
 
-- 依存型の完全検査 (現状はサンプリングのみ — 任意の引数で必ず正しい保証はない)
+- 依存型の完全検査 (現状はサンプリングのみ — 任意の引数で必ず正しい保証はない)。**これが残る最大の sample-based な穴**: theorem 側のサンプリングは信頼水準として記録・拒否できるようになったが、型注釈の member check にはまだ同等の仕組みが無い
 - 依存パラメトリック ADT の専用構文 (`data Vec : Nat -> Set where ...`) — refinement + 既存 ADT で代用可
 - 3 次以上の不等式判定 (2次形式の PSD 判定 (`quadratic_psd`) と偶数次かつ係数非負な単項式の和は扱えるが、一般の3次以上は未対応)
 - 可変除数の **不等式** (`<`, `<=`, `>`, `>=`) と、剰余が0以外になる **mod** (`<expr> mod v == R` で `R != 0`) — `==` かつ剰余0の場合 (`(a*n)/n == a`、`(a*n) mod n == 0` 等の単項キャンセル) は既に健全に対応済み (`ratpoly_equal` / `exact_div_by_var`)
@@ -250,7 +331,9 @@ seki/
 - **相互帰納法** (2つの関数の性質を互いを IH として同時に証明する戦術) — `by unfold f then ...` は相互再帰の呼び出しグラフを検出して1段先をオペーク項として扱う程度で、それより先は未対応 (2026-08、以前あった「相互再帰を非再帰と誤判定して展開が暴走する」バグは修正済み)
 - 真のスコープ分離されたモジュール (現状はフラットな名前空間に prefix 追加)
 - AST span (Expr 単位の位置情報) — エラーは decl 単位の `[line:col]` まで
-- LSP の completion / インタラクティブなタクティクモード (goal-stack) — diagnostics 配信・簡易 hover・goto-definition (組込関数のメタデータ + トップレベル `def`/`theorem`/`axiom` 名、テキストベースでスコープ非対応) は実装済み (2026-08)
+- `by induction` のステップの証明項 — 基底ケースは kernel が検証するが、ステップ (後者側を展開して多項式の差を比べる正規化) には witness 形式がまだ無い。`[unchecked]` 23 件のうち 20 件がこれ
+- 引数位置の refinement (`(amt : {a in Nat | a <= bal}) -> ...`) はまだサンプリング — 返り値位置は 0.9.0 で証明義務になった
+- LSP の completion / インタラクティブなタクティクモード (goal-stack) — diagnostics 配信 (パース + **静的 shape 検査**、宣言ごとに継続するので複数のエラーを同時に報告)・簡易 hover・goto-definition (組込関数のメタデータ + トップレベル `def`/`theorem`/`axiom` 名、テキストベースでスコープ非対応) は実装済み。証明検証は LSP では行わない — キー入力ごとに書きかけのバッファを**評価**することになり、`execShell` やソケットが実際に走ってしまうため (`seki --check` を使う)
 
 ※ `by simp` の対称規則 (`add_comm` 等) は AC-canonicalization により解消済み ([docs/spec/05-tactics.md](docs/spec/05-tactics.md))。`by decide` は型クラス無しの直接評価版として実装済み (`Decidable` 型クラスへの一般化は未対応)。
 

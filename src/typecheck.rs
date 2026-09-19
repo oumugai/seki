@@ -88,7 +88,7 @@ pub fn infer_shape(e: &Expr, env: &ShapeEnv) -> Shape {
         Expr::Real(_) => Shape::Real,
         Expr::Bool(_) => Shape::Bool,
         Expr::Str(_) => Shape::Str,
-        Expr::Var { name: name, .. } => env.lookup(name).cloned().unwrap_or(Shape::Unknown),
+        Expr::Var { name, .. } => env.lookup(name).cloned().unwrap_or(Shape::Unknown),
         Expr::Lambda { .. } => Shape::Fn,
         Expr::App { .. } => Shape::Unknown,
         Expr::Let { name, value, body, .. } => {
@@ -145,7 +145,7 @@ pub fn check_shape(e: &Expr, env: &ShapeEnv) -> SekiResult<Shape> {
         Expr::Real(_) => Ok(Shape::Real),
         Expr::Bool(_) => Ok(Shape::Bool),
         Expr::Str(_) => Ok(Shape::Str),
-        Expr::Var { name: name, .. } => Ok(env.lookup(name).cloned().unwrap_or(Shape::Unknown)),
+        Expr::Var { name, .. } => Ok(env.lookup(name).cloned().unwrap_or(Shape::Unknown)),
         Expr::Lambda { params, body } => {
             let mut env2 = env.clone();
             for p in params {
@@ -495,7 +495,7 @@ pub fn infer_type(e: &Expr, env: &TypeEnv) -> Option<Expr> {
         Expr::Real(_) => Some(Expr::Var { name: "Real".into(), line: 0, col: 0 }),
         Expr::Bool(_) => Some(Expr::Var { name: "Bool".into(), line: 0, col: 0 }),
         Expr::Str(_) => Some(Expr::Var { name: "String".into(), line: 0, col: 0 }),
-        Expr::Var { name: name, .. } => env.lookup(name).cloned(),
+        Expr::Var { name, .. } => env.lookup(name).cloned(),
         Expr::Lambda { params, body } => {
             // Build env extended with each param's annotated type (or Set
             // wildcard if none) and recursively infer the body's type.

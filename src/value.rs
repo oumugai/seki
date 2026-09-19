@@ -657,9 +657,41 @@ pub struct Globals {
     /// the theorem statement.  Without this, re-checking would have to
     /// re-search via portfolio every time.
     pub theorem_proofs: HashMap<String, crate::ast::Proof>,
+    /// How much each verified theorem is actually worth — see
+    /// `crate::trust`.  A theorem proved by sampling an infinite domain, or
+    /// one that leans on an `axiom`, is recorded here as such so that later
+    /// proofs which cite it inherit the weaker level instead of silently
+    /// laundering it into a "proof".
+    pub theorem_trust: HashMap<String, crate::trust::TrustLevel>,
+    /// What `crate::kernel` concluded when it checked each theorem's proof
+    /// term.  A theorem that cites another inherits its verdict, so an
+    /// unchecked step cannot be laundered by a second theorem that merely
+    /// quotes the first.
+    pub theorem_verdicts: HashMap<String, crate::kernel::Verdict>,
+    /// The proof term each theorem was accepted on.  Kept so the checker
+    /// can be re-run, and so `:why` can show *how* a theorem was proved
+    /// rather than just that it was.
+    pub theorem_certs: HashMap<String, crate::kernel::Cert>,
+    /// For each `def` whose annotation carried a refinement, what became of
+    /// the resulting proof obligation: `Sound` when the prover discharged it
+    /// and the kernel accepted the proof, `Sampled` when it fell back on
+    /// applying the function to a sample of its domain.
+    ///
+    /// The refinement check used to be sampling and nothing else, which made
+    /// it the last part of seki where "checked" meant "spot-checked".
+    pub def_trust: HashMap<String, crate::trust::TrustLevel>,
+    /// The obligation each such `def` generated, and the proof term that
+    /// discharged it when one was found.
+    pub def_obligations: HashMap<String, (crate::ast::Expr, Option<crate::kernel::Cert>)>,
     /// Axiom propositions, in AST form.  Axioms can be used by `by simp` as
     /// trusted rewrite rules.
     pub axiom_props: HashMap<String, Expr>,
+    /// `axiom name : P with confidence c` — how much of the time the
+    /// assumption is believed to hold, as a lower bound.  See
+    /// `crate::confidence`; an axiom without one is asserted outright.
+    pub axiom_confidence: HashMap<String, crate::algebra::Rat>,
+    /// `axiom name : P from "..."` — where the assumption came from.
+    pub axiom_provenance: HashMap<String, String>,
     /// Map from a class method name (e.g. "eq") to the class it belongs
     /// to (e.g. "Eq").  Populated by `Decl::ClassMeta`.  Used at eval
     /// time to recognize a call to a class method and trigger automatic
@@ -687,7 +719,14 @@ impl Globals {
             inferred_types: HashMap::new(),
             theorem_props: HashMap::new(),
             theorem_proofs: HashMap::new(),
+            theorem_trust: HashMap::new(),
+            theorem_verdicts: HashMap::new(),
+            theorem_certs: HashMap::new(),
+            def_trust: HashMap::new(),
+            def_obligations: HashMap::new(),
             axiom_props: HashMap::new(),
+            axiom_confidence: HashMap::new(),
+            axiom_provenance: HashMap::new(),
             class_methods: HashMap::new(),
             class_ctor: HashMap::new(),
             instances: HashMap::new(),
@@ -714,7 +753,14 @@ impl Globals {
             inferred_types: self.inferred_types.clone(),
             theorem_props: self.theorem_props.clone(),
             theorem_proofs: self.theorem_proofs.clone(),
+            theorem_trust: self.theorem_trust.clone(),
+            theorem_verdicts: self.theorem_verdicts.clone(),
+            theorem_certs: self.theorem_certs.clone(),
+            def_trust: self.def_trust.clone(),
+            def_obligations: self.def_obligations.clone(),
             axiom_props: self.axiom_props.clone(),
+            axiom_confidence: self.axiom_confidence.clone(),
+            axiom_provenance: self.axiom_provenance.clone(),
             class_methods: self.class_methods.clone(),
             class_ctor: self.class_ctor.clone(),
             instances: self.instances.clone(),

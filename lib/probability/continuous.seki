@@ -5,8 +5,8 @@
 -- analysis/integ.seki の Simpson 法を利用する。
 --
 -- 公開する名前:
---   def normalPdf mu sigma x         — 正規分布の pdf
---   def normalCdf mu sigma x         — 正規分布の cdf (Simpson 数値積分)
+--   def normalPdf mu sd x         — 正規分布の pdf (sd = 標準偏差 σ)
+--   def normalCdf mu sd x         — 正規分布の cdf (Simpson 数値積分)
 --   def expPdf rate x                — 指数分布の pdf
 --   def expCdf rate x                — 指数分布の cdf (解析的)
 --   def uniformPdf a b x             — 一様分布の pdf
@@ -21,17 +21,17 @@ def twoPi := 6.283185307179586
 
 -- ----- 正規分布 N(μ, σ²) -----
 -- pdf(x) = exp(-(x-μ)² / (2σ²)) / (σ √(2π))
-def normalPdf := \(mu : Real) (sigma : Real) (x : Real) ->
-    let z = (x - mu) / sigma in
-    let coef = 1.0 / (sigma * sqrt twoPi) in
+def normalPdf := \(mu : Real) (sd : Real) (x : Real) ->
+    let z = (x - mu) / sd in
+    let coef = 1.0 / (sd * sqrt twoPi) in
     coef * exp (0.0 - 0.5 * z * z)
 
 -- cdf(x) = P(X ≤ x) を Simpson 積分で近似
 -- 注意: 解析的には erf 関数だが、本実装は数値積分で十分実用
-def normalCdf := \(mu : Real) (sigma : Real) (x : Real) ->
+def normalCdf := \(mu : Real) (sd : Real) (x : Real) ->
     -- 積分範囲: μ - 8σ から x まで (左裾は十分小さい)
-    let lo = mu - 8.0 * sigma in
-    let pdf := \(t : Real) -> normalPdf mu sigma t in
+    let lo = mu - 8.0 * sd in
+    let pdf := \(t : Real) -> normalPdf mu sd t in
     if x <= lo then 0.0
     else integSimpson 200 pdf lo x
 
