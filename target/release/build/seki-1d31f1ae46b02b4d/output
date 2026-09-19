@@ -1,3 +1,0 @@
-cargo:rerun-if-changed=build.rs
-cargo:rerun-if-changed=.git/HEAD
-cargo:rustc-env=SEKI_GIT_SHA=7d4dbcb425
