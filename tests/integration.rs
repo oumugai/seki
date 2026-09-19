@@ -3328,3 +3328,46 @@ fn the_uncertain_facts_example_reports_the_frechet_bound() {
     assert!(stdout.contains("confidence >= 7/10"), "{}", stdout);
     assert!(stdout.contains("confidence >= 9/10"), "{}", stdout);
 }
+
+#[test]
+fn overflowed_exact_arithmetic_cannot_prove_a_false_equation() {
+    // Found while building a probabilistic-reasoning demo.  Rational
+    // arithmetic saturated on overflow, so `0.1 * 0.2 * 0.3` evaluated to
+    // exactly `1` inside `by algebra` — and the kernel accepted
+    // `0.1 * 0.2 * 0.3 == 1.0` as "kernel-checked from primitives".
+    // Polynomial arithmetic is part of what the kernel trusts, so a wrong
+    // number there is a wrong proof.
+    let err = run_err("theorem bad : (0.1 * 0.2 * 0.3) == 1.0 := by algebra");
+    assert!(err.is_proof_error(), "{:?}", err);
+    // And the evaluator's own answer is nowhere near 1.
+    let g = run("def v := 0.1 * 0.2 * 0.3");
+    match g.defs.get("v") {
+        Some(Value::Real(r)) => assert!((*r - 0.006).abs() < 1e-9, "got {}", r),
+        other => panic!("expected a Real, got {:?}", other.map(|v| v.type_name())),
+    }
+}
+
+#[test]
+fn exact_rationals_still_work_where_decimals_overflow() {
+    // The same model written with exact rationals goes through, which is
+    // the workaround the limitation leaves open.
+    let g = run("theorem t : ((1.0/10.0) * (2.0/10.0) * (3.0/10.0)) == (6.0/1000.0) := by algebra");
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+}
+
+#[test]
+fn the_probabilistic_reasoning_examples_report_their_bounds() {
+    for (file, expect) in [
+        ("examples/43_medical_diagnosis.seki", "confidence >= 4/5"),
+        ("examples/44_business_decision.seki", "confidence >= 1/4"),
+    ] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+            .arg("--audit")
+            .arg(file)
+            .output()
+            .expect("run seki --audit");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{}: {}", file, stdout);
+        assert!(stdout.contains(expect), "{} should report {}:\n{}", file, expect, stdout);
+    }
+}

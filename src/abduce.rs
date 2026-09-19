@@ -49,10 +49,13 @@ pub fn missing_assumptions(prover: &Prover, prop: &Expr, env: &Env) -> Vec<Sugge
         if crate::ast::alpha_equiv(&var.assumption, &conclusion) {
             continue;
         }
-        // And only offer what actually works.
+        // And only offer what actually works.  The candidates come in
+        // decreasing readability, so the first that verifies is the one to
+        // show; the rest say the same thing less clearly.
         let candidate = with_assumption(prop, var.assumption.clone());
         if prover.verify_algebra_raw(&candidate, env).is_ok() {
             out.push(var);
+            break;
         }
     }
     out
@@ -126,31 +129,80 @@ fn single_variable_bounds(diff: &Polynomial, strict: bool) -> Vec<Suggestion> {
     let Some(bound) = constant.neg().div(coeff) else {
         return Vec::new();
     };
-    let op = match (coeff.sign() > 0, strict) {
-        (true, false) => BinOp::Ge,
-        (true, true) => BinOp::Gt,
-        (false, false) => BinOp::Le,
-        (false, true) => BinOp::Lt,
+    let upper = coeff.sign() < 0;
+    let op = match (upper, strict) {
+        (false, false) => BinOp::Ge,
+        (false, true) => BinOp::Gt,
+        (true, false) => BinOp::Le,
+        (true, true) => BinOp::Lt,
     };
-    vec![Suggestion {
-        assumption: Expr::BinOp(
-            op,
-            Box::new(Expr::Var { name: var.to_string(), line: 0, col: 0 }),
-            Box::new(rat_to_expr(bound)),
-        ),
-        variable: Some(var.to_string()),
-    }]
+    // A bound derived from decimal literals is exact but unreadable —
+    // `0.99` is not ninety-nine hundredths as an `f64`, so dividing by it
+    // yields something like `3602879701896397 / 17834254524387164`.  Offer
+    // rounded forms first, erring towards the *stronger* assumption so they
+    // still imply the goal, and let the caller's verification decide.
+    readable_bounds(bound, upper)
+        .into_iter()
+        .map(|b| Suggestion {
+            assumption: Expr::BinOp(
+                op.clone(),
+                Box::new(Expr::Var { name: var.to_string(), line: 0, col: 0 }),
+                Box::new(b),
+            ),
+            variable: Some(var.to_string()),
+        })
+        .collect()
 }
 
-fn rat_to_expr(r: Rat) -> Expr {
-    if r.den == 1 {
-        return Expr::Int(r.num as i64);
+/// Ways of writing a bound, most readable first.
+///
+/// Rounding goes towards the stronger assumption — down for an upper bound,
+/// up for a lower one — so a rounded form still implies what the exact one
+/// did.  Each is checked by the caller before being offered, so a rounding
+/// that goes too far is simply dropped.
+fn readable_bounds(bound: Rat, upper: bool) -> Vec<Expr> {
+    let mut out = Vec::new();
+    let exact = bound.num as f64 / bound.den as f64;
+    for places in [2u32, 3, 4, 6] {
+        let scale = 10f64.powi(places as i32);
+        let rounded = if upper {
+            (exact * scale).floor() / scale
+        } else {
+            (exact * scale).ceil() / scale
+        };
+        if let Some(r) = crate::confidence::rational_from_decimal(rounded) {
+            if let Some(e) = small_rational_expr(r) {
+                if !out.iter().any(|prev| format!("{}", prev) == format!("{}", e)) {
+                    out.push(e);
+                }
+            }
+        }
     }
-    Expr::BinOp(
+    // The exact bound last, when it can be written down at all.
+    if let Some(e) = small_rational_expr(bound) {
+        out.push(e);
+    }
+    out
+}
+
+/// A rational as an expression, when its parts fit in the `Int` the
+/// language actually has.  A ratio of 17-digit numbers is not a bound
+/// anybody can act on, and casting it would silently truncate.
+fn small_rational_expr(r: Rat) -> Option<Expr> {
+    let num = i64::try_from(r.num).ok()?;
+    let den = i64::try_from(r.den).ok()?;
+    if den == 1 {
+        return Some(Expr::Int(num));
+    }
+    // Beyond this a "bound" is noise rather than information.
+    if den.abs() > 100_000 {
+        return None;
+    }
+    Some(Expr::BinOp(
         BinOp::Div,
-        Box::new(Expr::Int(r.num as i64)),
-        Box::new(Expr::Int(r.den as i64)),
-    )
+        Box::new(Expr::Int(num)),
+        Box::new(Expr::Int(den)),
+    ))
 }
 
 /// `prop` with one more hypothesis, keeping its binders outside.

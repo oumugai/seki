@@ -1,0 +1,54 @@
+-- ===========================================================
+-- 医療診断: 2種類の不確実性を分けて扱う
+--
+--   偶然的 (aleatory) : 患者が罹患しているかどうか。ベイズの定理で計算する
+--                       → 普通の算術。kernel が検証する
+--   認識的 (epistemic): 有病率や感度の推定値そのものが正しいか
+--                       → `with confidence` が追跡する
+--
+-- この2つを混ぜないことが重要です。「陽性的中率 17%」は世界についての
+-- 確率、「有病率の推定が正しい確率 80%」は我々の仮定についての確率で、
+-- 掛け合わせる意味がありません。
+-- ===========================================================
+
+-- ----- 偶然的: ベイズの計算 (具体値、kernel 検証済み) ------------------
+def prevalence  := 1.0 / 100.0
+def sensitivity := 99.0 / 100.0
+def specificity := 95.0 / 100.0
+
+def true_positive  := sensitivity * prevalence
+def false_positive := (1.0 - specificity) * (1.0 - prevalence)
+def ppv := true_positive / (true_positive + false_positive)
+
+-- 「99% 正確な検査」でも陽性的中率は 17% 程度 (base rate fallacy)
+theorem ppv_is_low  : ppv < (1.0 / 5.0) := by eval
+theorem ppv_is_not_tiny : ppv > (1.0 / 7.0) := by eval
+
+-- ----- 有病率が未知のときの一般的な境界 -------------------------------
+-- 陽性的中率 < 1/5  ⟺  0.99p < (1/5)(0.99p + 0.05(1-p))   (分母 > 0)
+-- 有病率が 1% 以下であるかぎり成り立つ。
+theorem ppv_below_20pct_when_rare
+  : forall p in Real,
+      (0.0 <= p) and (p <= (1.0 / 100.0))
+      => ((99.0/100.0) * p)
+         < ((1.0/5.0) * (((99.0/100.0) * p) + ((1.0/20.0) * (1.0 - p))))
+  := by algebra
+
+-- ----- 認識的: 有病率の推定そのものが不確実 ---------------------------
+axiom prevalence_estimate
+  : (0.0 <= prev) and (prev <= (1.0 / 100.0))
+  with confidence 0.8
+  from "文献3件のメタ分析 (n=12,400)。地域差により上振れの可能性あり"
+
+axiom test_spec_as_labelled
+  : (0.0 <= prev) and (prev <= (1.0 / 100.0))
+  with confidence 0.95
+  from "メーカー公称値。第三者検証は1件のみ"
+
+-- この集団において陽性的中率は 20% 未満、と言えるか
+theorem ppv_low_here
+  : ((99.0/100.0) * prev)
+    < ((1.0/5.0) * (((99.0/100.0) * prev) + ((1.0/20.0) * (1.0 - prev))))
+  := by have h : (0.0 <= prev) and (prev <= (1.0 / 100.0))
+              := by apply prevalence_estimate
+     then algebra

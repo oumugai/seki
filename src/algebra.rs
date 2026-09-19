@@ -58,12 +58,40 @@ impl Rat {
     pub const ZERO: Rat = Rat { num: 0, den: 1 };
     pub const ONE: Rat = Rat { num: 1, den: 1 };
 
+    /// The result of an arithmetic step that left the range of `i128`.
+    ///
+    /// Rational arithmetic used to saturate on overflow, which silently
+    /// returned a *wrong* number that looked perfectly ordinary:
+    /// `0.1 * 0.2 * 0.3` came out as `1`, and `by algebra` duly "proved"
+    /// `0.1 * 0.2 * 0.3 == 1.0` — with the kernel accepting it, because
+    /// polynomial arithmetic is part of what the kernel trusts.
+    ///
+    /// A poisoned value propagates through every operation and is treated
+    /// conservatively by every predicate: it is never zero, and its sign is
+    /// negative, so a claim resting on it fails rather than passes.
+    /// `expr_to_poly` refuses an expression that produces one, so the
+    /// tactics simply report the goal as outside the polynomial fragment.
+    pub const POISON: Rat = Rat { num: 1, den: 0 };
+
+    /// Did an arithmetic step overflow on the way to this value?
+    pub fn is_poison(self) -> bool {
+        self.den == 0
+    }
+
     pub fn new(num: i128, den: i128) -> Self {
-        assert!(den != 0, "Rat::new with denominator 0");
+        if den == 0 {
+            return Rat::POISON;
+        }
         let (mut n, mut d) = (num, den);
         if d < 0 {
-            n = -n;
-            d = -d;
+            n = match n.checked_neg() {
+                Some(v) => v,
+                None => return Rat::POISON,
+            };
+            d = match d.checked_neg() {
+                Some(v) => v,
+                None => return Rat::POISON,
+            };
         }
         let g = gcd_i128(n, d);
         Rat { num: n / g, den: d / g }
@@ -73,8 +101,10 @@ impl Rat {
         Rat { num: n, den: 1 }
     }
 
+    /// Never true for a poisoned value: an overflowed result must not be
+    /// mistaken for an exact zero, which is what a `==` proof turns on.
     pub fn is_zero(self) -> bool {
-        self.num == 0
+        !self.is_poison() && self.num == 0
     }
 
     pub fn is_int(self) -> bool {
@@ -82,17 +112,36 @@ impl Rat {
     }
 
     pub fn neg(self) -> Self {
-        Rat { num: -self.num, den: self.den }
+        if self.is_poison() {
+            return Rat::POISON;
+        }
+        match self.num.checked_neg() {
+            Some(n) => Rat { num: n, den: self.den },
+            None => Rat::POISON,
+        }
     }
 
+    // Every operation below uses *checked* arithmetic and poisons on
+    // overflow.  Saturating here, as this used to, returns a wrong number
+    // that looks ordinary — see `Rat::POISON`.
     pub fn add(self, other: Rat) -> Rat {
+        if self.is_poison() || other.is_poison() {
+            return Rat::POISON;
+        }
         let g = gcd_i128(self.den, other.den);
         let d_step = other.den / g;
-        let new_num = self
-            .num
-            .saturating_mul(d_step)
-            .saturating_add(other.num.saturating_mul(self.den / g));
-        let new_den = self.den.saturating_mul(d_step);
+        let Some(left) = self.num.checked_mul(d_step) else {
+            return Rat::POISON;
+        };
+        let Some(right) = other.num.checked_mul(self.den / g) else {
+            return Rat::POISON;
+        };
+        let Some(new_num) = left.checked_add(right) else {
+            return Rat::POISON;
+        };
+        let Some(new_den) = self.den.checked_mul(d_step) else {
+            return Rat::POISON;
+        };
         Rat::new(new_num, new_den)
     }
 
@@ -101,25 +150,37 @@ impl Rat {
     }
 
     pub fn mul(self, other: Rat) -> Rat {
-        // reduce cross-pairs before multiplying to avoid overflow
+        if self.is_poison() || other.is_poison() {
+            return Rat::POISON;
+        }
+        // reduce cross-pairs before multiplying, which keeps ordinary
+        // values well clear of the boundary
         let g1 = gcd_i128(self.num, other.den);
         let g2 = gcd_i128(other.num, self.den);
-        let n = (self.num / g1).saturating_mul(other.num / g2);
-        let d = (self.den / g2).saturating_mul(other.den / g1);
+        let Some(n) = (self.num / g1).checked_mul(other.num / g2) else {
+            return Rat::POISON;
+        };
+        let Some(d) = (self.den / g2).checked_mul(other.den / g1) else {
+            return Rat::POISON;
+        };
         Rat::new(n, d)
     }
 
     /// Divide by a nonzero rational.  Returns `None` only when `other == 0`.
     pub fn div(self, other: Rat) -> Option<Rat> {
-        if other.num == 0 {
+        if other.is_poison() || other.num == 0 {
             return None;
         }
         Some(self.mul(Rat::new(other.den, other.num)))
     }
 
     /// Sign: -1, 0, +1.
+    /// A poisoned value reports itself negative, so that every
+    /// `sign() >= 0` test in the prover and the kernel *fails* on it
+    /// instead of waving it through.  There is no right sign for a number
+    /// that overflowed; the only safe answer is the one that loses.
     pub fn sign(self) -> i32 {
-        if self.num < 0 {
+        if self.is_poison() || self.num < 0 {
             -1
         } else if self.num > 0 {
             1
@@ -258,6 +319,15 @@ impl Polynomial {
 
     /// Multiply every coefficient by `c`.  Used by `crate::kernel` to
     /// check a sum-of-squares witness; see that module's trusted-base note.
+    /// Did exact arithmetic overflow anywhere in building this polynomial?
+    ///
+    /// Checked by `crate::kernel` before any claim is believed: a poisoned
+    /// coefficient means the numbers stopped being the numbers they were
+    /// supposed to be.
+    pub fn has_overflow(&self) -> bool {
+        self.terms.iter().any(|m| m.coeff.is_poison())
+    }
+
     pub fn scale(self, c: Rat) -> Self {
         if c.is_zero() {
             return Self::zero();
@@ -388,6 +458,17 @@ fn normalize(mut terms: Vec<Monomial>) -> Polynomial {
 /// handled at this opaque level; the top-level prover's `verify_algebra`
 /// case-splits on `if` first so each branch arrives here as a polynomial.
 pub fn expr_to_poly(e: &Expr) -> Option<Polynomial> {
+    let p = expr_to_poly_inner(e)?;
+    // An expression whose coefficients overflowed exact arithmetic is not
+    // in the polynomial fragment as far as anything downstream is
+    // concerned — better to say so than to reason with a wrong number.
+    if p.has_overflow() {
+        return None;
+    }
+    Some(p)
+}
+
+fn expr_to_poly_inner(e: &Expr) -> Option<Polynomial> {
     match e {
         Expr::Int(n) => Some(Polynomial::from_const(*n as i128)),
         Expr::Real(f) => f64_to_rat(*f).map(Polynomial::from_rat),
@@ -1251,5 +1332,52 @@ mod tests {
         assert!(!poly_is_affine(&diff));
         let (_, diff) = diff_of("x > 0");
         assert!(poly_is_affine(&diff));
+    }
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+
+    #[test]
+    fn arithmetic_poisons_instead_of_saturating() {
+        // Saturating here returned a wrong number that looked ordinary.
+        let big = Rat::new(i128::MAX / 3, 1);
+        assert!(big.mul(big).is_poison());
+        assert!(big.add(big).add(big).add(big).is_poison());
+        assert!(Rat::new(i128::MIN, 1).neg().is_poison());
+    }
+
+    #[test]
+    fn three_decimal_literals_multiplied_overflow_exact_arithmetic() {
+        // This is not adversarial — it is what a model of percentages looks
+        // like.  `0.1 * 0.2 * 0.3` used to come out as exactly `1`.
+        let a = f64_to_rat(0.1).unwrap();
+        let b = f64_to_rat(0.2).unwrap();
+        let c = f64_to_rat(0.3).unwrap();
+        assert!(a.mul(b).mul(c).is_poison());
+    }
+
+    #[test]
+    fn a_poisoned_value_loses_every_test_it_is_put_to() {
+        let p = Rat::POISON;
+        assert!(!p.is_zero(), "must not pass for an exact zero");
+        assert!(p.sign() < 0, "must fail every `sign() >= 0` check");
+        assert!(p.add(Rat::ONE).is_poison(), "must propagate");
+        assert!(p.mul(Rat::ONE).is_poison());
+        assert!(Rat::ONE.div(p).is_none());
+    }
+
+    #[test]
+    fn an_overflowed_expression_is_not_in_the_polynomial_fragment() {
+        // `expr_to_poly` refusing it is what makes every tactic and the
+        // kernel report the goal as out of range rather than reason with a
+        // wrong number.
+        let decls = crate::parse_program("0.1 * 0.2 * 0.3").expect("parse");
+        let e = match decls.into_iter().next().unwrap().decl {
+            crate::ast::Decl::Expr(e) => e,
+            other => panic!("expected an expression, got {:?}", other),
+        };
+        assert!(expr_to_poly(&e).is_none());
     }
 }

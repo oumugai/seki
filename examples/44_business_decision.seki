@@ -1,0 +1,31 @@
+-- ===========================================================
+-- ビジネス判断: 不確実な前提からの投資意思決定
+-- ===========================================================
+
+-- 来期の売上 R、コスト C、競合の値下げ幅 D — まだ分からない量。
+-- 手元にあるのは、それらについての「確からしい」信念だけ。
+
+axiom revenue_forecast : R >= 115.0
+  with confidence 0.75
+  from "市場調査会社A の予測。過去5年の的中率 15/20"
+
+axiom cost_ceiling : C <= 55.0
+  with confidence 0.9
+  from "調達契約による上限。契約破棄リスクを 10% と見積もり"
+
+axiom competitor_discount : D <= 8.0
+  with confidence 0.6
+  from "LLM による決算説明会テキストの抽出。根拠は弱い"
+
+-- ----- 判断1: 黒字になるか (前提2つ) ----------------------------------
+theorem profitable : R - C > 0.0
+  := by have h1 : R >= 115.0 := by apply revenue_forecast
+     then have h2 : C <= 55.0 := by apply cost_ceiling
+     then algebra
+
+-- ----- 判断2: 競合の値下げを織り込んでも黒字か (前提3つ) --------------
+theorem profitable_after_discount : R - C - D > 0.0
+  := by have h1 : R >= 115.0 := by apply revenue_forecast
+     then have h2 : C <= 55.0 := by apply cost_ceiling
+     then have h3 : D <= 8.0 := by apply competitor_discount
+     then algebra

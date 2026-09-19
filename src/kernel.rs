@@ -727,7 +727,8 @@ impl Checker<'_, '_> {
                     let qp = self.to_poly(q)?;
                     acc = acc.add(qp.clone().mul(qp).scale(*c));
                 }
-                if acc.sub(diff).terms.is_empty() {
+                let residual = self.exact(acc.sub(diff))?;
+                if residual.terms.is_empty() {
                     Ok(Verdict::sound())
                 } else {
                     err("the sum of squares does not add up to the difference")
@@ -762,7 +763,7 @@ impl Checker<'_, '_> {
                     acc = acc.add(self.difference(a, b)?.scale(*lambda));
                 }
                 let diff = self.difference(lhs, rhs)?;
-                if acc.sub(diff).terms.is_empty() {
+                if self.exact(acc.sub(diff))?.terms.is_empty() {
                     Ok(Verdict::sound())
                 } else {
                     err("the combination of equations does not reproduce the goal")
@@ -799,7 +800,7 @@ impl Checker<'_, '_> {
                         strict_available = true;
                     }
                 }
-                if !acc.sub(diff).terms.is_empty() {
+                if !self.exact(acc.sub(diff))?.terms.is_empty() {
                     return err(
                         "the weighted hypotheses do not add up to the goal's difference",
                     );
@@ -868,12 +869,31 @@ impl Checker<'_, '_> {
     }
 
     fn difference(&self, lhs: &Expr, rhs: &Expr) -> KResult<Polynomial> {
-        Ok(self.to_poly(lhs)?.sub(self.to_poly(rhs)?))
+        self.exact(self.to_poly(lhs)?.sub(self.to_poly(rhs)?))
+    }
+
+    /// Refuse a polynomial whose coefficients overflowed exact arithmetic.
+    ///
+    /// Polynomial arithmetic is part of what this kernel trusts, so a
+    /// silently wrong number here is a silently wrong proof — which is
+    /// exactly what happened while `Rat` saturated instead of poisoning:
+    /// `0.1 * 0.2 * 0.3` came out as `1`, and the equality
+    /// `0.1 * 0.2 * 0.3 == 1.0` was accepted.
+    fn exact(&self, p: Polynomial) -> KResult<Polynomial> {
+        if p.has_overflow() {
+            return err(
+                "exact rational arithmetic overflowed while checking this claim, so \
+                 the coefficients are no longer the numbers they should be; the proof \
+                 is refused rather than believed",
+            );
+        }
+        Ok(p)
     }
 
     fn to_poly(&self, e: &Expr) -> KResult<Polynomial> {
-        expr_to_poly(e)
-            .ok_or_else(|| KernelError(format!("`{}` is outside the polynomial fragment", e)))
+        let p = expr_to_poly(e)
+            .ok_or_else(|| KernelError(format!("`{}` is outside the polynomial fragment", e)))?;
+        self.exact(p)
     }
 
     /// Turn `a >= b` / `a > b` (and the flipped forms) into the polynomial
