@@ -2407,6 +2407,16 @@ pub fn make_builtin_prelude() -> Globals {
         unary_real_fn(args, "exp", f64::exp)
     }
     fn b_ln(args: &[Value]) -> Result<Value, String> {
+        // `ln` has its own body rather than going through `unary_real_fn`,
+        // so it needs its own interval case — without it an enclosure
+        // argument fell through to "expected numeric".
+        if let Value::Interval(i) = &args[0] {
+            let out = i.ln();
+            if out.is_poison() {
+                return Err(format!("ln: no enclosure for {}", i));
+            }
+            return Ok(Value::Interval(out));
+        }
         let x = match &args[0] {
             Value::Real(r) => *r,
             Value::Int(n) => *n as f64,

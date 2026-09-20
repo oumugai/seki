@@ -4148,3 +4148,26 @@ fn a_file_that_does_not_run_is_a_finding_not_a_gap() {
     assert!(stdout.contains("unrunnable:  1"), "{}", stdout);
     assert!(!out.status.success(), "{}", stdout);
 }
+
+#[test]
+fn an_operating_envelope_through_a_transcendental_is_proved() {
+    // "for every resistance in this band, the converted temperature is in
+    // spec" — a range carried through a logarithm.  `ln` has its own body
+    // rather than going through `unary_real_fn`, and without an interval
+    // case of its own an enclosure argument fell through to "expected
+    // numeric".
+    let g = run(
+        "def rToTemp := \\r -> 1.0 / (0.00335 + 0.000257 * (ln (r / 10000.0)))\n\
+         def rBand := interval 8000.0 12000.0\n\
+         theorem in_spec : (rToTemp rBand >= 270.0) and (rToTemp rBand <= 310.0) \
+         := by eval\n",
+    );
+    assert_eq!(g.theorem_trust["in_spec"], TrustLevel::Sound);
+    // A band that leaves the spec is refused, so the claim is not vacuous.
+    assert!(run_err(
+        "def rToTemp := \\r -> 1.0 / (0.00335 + 0.000257 * (ln (r / 10000.0)))\n\
+         def rOpen := interval 40000.0 60000.0\n\
+         theorem bad : rOpen >= 0.0 and (rToTemp rOpen >= 270.0) := by eval\n"
+    )
+    .is_proof_error());
+}
