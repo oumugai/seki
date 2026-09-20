@@ -1360,7 +1360,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_cmp(&mut self) -> SekiResult<Expr> {
-        let lhs = self.parse_set_additive()?;
+        let lhs = self.parse_interval()?;
         let op = match self.peek() {
             Tok::Eq => Some(BinOp::Eq),
             Tok::Neq => Some(BinOp::Neq),
@@ -1375,10 +1375,48 @@ impl<'a> Parser<'a> {
         };
         if let Some(op) = op {
             self.bump();
-            let rhs = self.parse_set_additive()?;
+            let rhs = self.parse_interval()?;
             Ok(Expr::BinOp(op, Box::new(lhs), Box::new(rhs)))
         } else {
             Ok(lhs)
+        }
+    }
+
+    /// `a .. b` and `a +- t` — a value standing for every real in a band.
+    ///
+    /// Both are sugar for `interval lo hi`, desugared here rather than
+    /// carried as new AST nodes: the kernel, the type checker and every
+    /// tactic then see exactly what they saw before, and the notation costs
+    /// nothing outside this function.
+    ///
+    /// Binding is looser than arithmetic and tighter than comparison, so
+    /// `1.0 + 2.0 .. 5.0` is the band from three to five, and
+    /// `x .. y >= 0.0` compares the band.
+    fn parse_interval(&mut self) -> SekiResult<Expr> {
+        let lhs = self.parse_set_additive()?;
+        let call = |lo: Expr, hi: Expr| Expr::App {
+            func: Box::new(Expr::Var { name: "interval".into(), line: 0, col: 0 }),
+            args: vec![lo, hi],
+        };
+        match self.peek() {
+            Tok::DotDot => {
+                self.bump();
+                let hi = self.parse_set_additive()?;
+                Ok(call(lhs, hi))
+            }
+            Tok::PlusMinus => {
+                self.bump();
+                let tol = self.parse_set_additive()?;
+                // The centre appears on both sides, so it is evaluated
+                // twice.  Every expression seki puts here is pure, and the
+                // alternative — a `let` — would change what the printed
+                // goal looks like for no gain.
+                Ok(call(
+                    Expr::BinOp(BinOp::Sub, Box::new(lhs.clone()), Box::new(tol.clone())),
+                    Expr::BinOp(BinOp::Add, Box::new(lhs), Box::new(tol)),
+                ))
+            }
+            _ => Ok(lhs),
         }
     }
 

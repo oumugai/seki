@@ -76,6 +76,7 @@ pub fn prelude_shapes() -> ShapeEnv {
         "fst", "snd", "pair",
         "List", "Tree",
         "intToReal", "floor", "ceil", "round", "sqrt", "pow", "interval",
+        "lo", "hi", "width", "mid",
     ] {
         e.map.insert(n.into(), Shape::Fn);
     }

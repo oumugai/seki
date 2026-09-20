@@ -4129,7 +4129,7 @@ fn a_claim_is_counted_where_it_is_declared() {
         .output()
         .expect("run seki --audit on a directory");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("14 claims across 5 file(s)"), "{}", stdout);
+    assert!(stdout.contains("15 claims across 5 file(s)"), "{}", stdout);
 }
 
 #[test]
@@ -4170,4 +4170,76 @@ fn an_operating_envelope_through_a_transcendental_is_proved() {
          theorem bad : rOpen >= 0.0 and (rToTemp rOpen >= 270.0) := by eval\n"
     )
     .is_proof_error());
+}
+
+// ---------------------------------------------------------------------------
+// Writing an interval.  `interval lo hi` is a function call; specifications
+// are written as a centre and a tolerance, or as a band, so seki reads both.
+
+#[test]
+fn a_band_can_be_written_two_ways() {
+    // `a .. b` and `a +- t` are sugar for the same call, desugared in the
+    // parser, so nothing downstream — kernel included — sees a new form.
+    let g = run("def a := 8000.0 .. 12000.0\n\
+                 def b := 10000.0 +- 2000.0\n\
+                 theorem same_lo : lo a == lo b := by eval\n\
+                 theorem same_hi : hi a == hi b := by eval\n\
+                 theorem two_wide : width (1.0 +- 1.0) == 2.0 := by eval\n");
+    for t in ["same_lo", "same_hi", "two_wide"] {
+        assert_eq!(g.theorem_trust[t], TrustLevel::Sound, "for: {}", t);
+    }
+}
+
+#[test]
+fn the_band_notation_binds_looser_than_arithmetic() {
+    // `1.0 + 2.0 .. 5.0` is the band from three to five, not `1 + (2..5)`.
+    let g = run("theorem t : lo (1.0 + 2.0 .. 5.0) == 3.0 := by eval\n");
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+}
+
+#[test]
+fn how_wide_an_enclosure_came_out_is_a_claim_you_can_make() {
+    // Without this the only symptom of a widened enclosure is a claim that
+    // will not settle.  `width` turns staying tight into something the
+    // kernel checks.
+    let g = run("def step := \\x -> 0.9 * x + 0.1\n\
+                 def run_ := \\n x -> if n <= 0 then x else run_ (n - 1) (step x)\n\
+                 def x0 := 5.0 +- 1.0\n\
+                 theorem contracts : width (run_ 20 x0) < 0.25 := by eval\n\
+                 theorem centred : absR (mid (run_ 200 x0) - 1.0) < 0.0001 := by eval\n\
+                 theorem capped : hi (run_ 10 x0) < 2.8 := by eval\n");
+    for t in ["contracts", "centred", "capped"] {
+        assert_eq!(g.theorem_trust[t], TrustLevel::Sound, "for: {}", t);
+    }
+}
+
+#[test]
+fn a_widened_enclosure_says_so_and_says_how_wide() {
+    // Newton's iteration mentions `x` three times, so the enclosure grows
+    // where the real iteration contracts.  The failure has to read as "this
+    // method did not settle it", with the width, rather than as a crash or
+    // as a refutation.
+    let err = run_err(
+        "def f := \\x -> x - (x * x * x - 8.0) / (3.0 * x * x)\n\
+         def g_ := \\n x -> if n <= 0 then x else g_ (n - 1) (f x)\n\
+         def start := 2.0 +- 0.5\n\
+         theorem tight : absR (g_ 6 start - 2.0) < 0.0000001 := by eval\n",
+    );
+    assert!(err.is_proof_error(), "got {:?}", err);
+    assert!(
+        err.message().contains("interval arithmetic does not settle"),
+        "{}",
+        err.message()
+    );
+    assert!(
+        err.message().contains("appears more than once"),
+        "the message should name the cause: {}",
+        err.message()
+    );
+    // And a comparison that merely overlaps reports the width.
+    let err = run_err(
+        "def s := 4.0 .. 6.0\n\
+         theorem t : absR (s - 5.0) < 0.5 := by eval\n",
+    );
+    assert!(err.message().contains("wide"), "{}", err.message());
 }

@@ -205,6 +205,16 @@ pub fn builtin_meta(name: &str) -> Option<BuiltinMeta> {
                   Arithmetic carries the whole range; a comparison answers \
                   only when the range settles it. Errors if low > high.",
         },
+        "lo" | "hi" | "width" | "mid" => BuiltinMeta {
+            name: "interval part",
+            signature: "lo | hi | width | mid : Real -> Real",
+            domain: "Real",
+            codomain: "Real",
+            effect: Effect::PartialPure,
+            properties: &["exact"],
+            doc: "The ends, width or centre of an enclosure. A plain number \
+                  is a band of zero width, so these apply to it too.",
+        },
         "sqrt" => BuiltinMeta {
             name: "sqrt",
             signature: "sqrt : {x in Real | x >= 0} -> Real",
@@ -1231,6 +1241,7 @@ pub fn all_documented_names() -> &'static [&'static str] {
     &[
         "fst", "snd", "pair", "card", "List", "Tree", "IO",
         "intToReal", "floor", "ceil", "round", "sqrt", "pow", "interval",
+        "lo", "hi", "width", "mid",
         "bitAnd", "bitOr", "bitXor", "bitNot", "bitShl", "bitShr", "popcount",
         "strLen", "strConcat", "strIndexOf", "strReplace", "strSplit",
         "substring", "strToUpper", "strToLower", "strTrim", "strChars",

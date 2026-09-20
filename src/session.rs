@@ -244,9 +244,10 @@ impl Session {
                 // it produced neither establishes the claim nor refutes it.
                 if e.message().contains(crate::interval::UNDECIDED) {
                     return SekiError::Proof(format!(
-                        "the guaranteed enclosure does not settle this claim \
-                         ({}) — it straddles the bound, so it proves neither \
-                         that the claim holds nor that it fails",
+                        "interval arithmetic does not settle this claim \
+                         ({}). An enclosure widens wherever a value appears \
+                         more than once, so this shows neither that the claim \
+                         holds nor that it fails",
                         e.message()
                             .replace(crate::interval::UNDECIDED, "")
                             .trim_start_matches([':', ' '])

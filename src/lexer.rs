@@ -73,6 +73,11 @@ pub enum Tok {
     Bar,       // |
     Arrow,     // ->
     FatArrow,  // =>
+    /// `..` — an interval between two bounds: `8000.0 .. 12000.0`.
+    DotDot,
+    /// `+-` — an interval as a centre and a tolerance: `10000.0 +- 2000.0`.
+    /// Engineering specifications are written this way, so seki reads it.
+    PlusMinus,
     Assign,    // :=
     Eq,        // ==
     Neq,       // !=
@@ -361,6 +366,8 @@ pub fn tokenize(src: &str) -> SekiResult<Vec<Token>> {
             ('!', _) if two_eq('!', '=') => (Tok::Neq, 2),
             ('<', _) if two_eq('<', '=') => (Tok::Le, 2),
             ('>', _) if two_eq('>', '=') => (Tok::Ge, 2),
+            ('.', _) if two_eq('.', '.') => (Tok::DotDot, 2),
+            ('+', _) if two_eq('+', '-') => (Tok::PlusMinus, 2),
             ('(', _) => (Tok::LParen, 1),
             (')', _) => (Tok::RParen, 1),
             ('{', _) => (Tok::LBrace, 1),

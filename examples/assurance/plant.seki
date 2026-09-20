@@ -1,7 +1,8 @@
 -- ===========================================================
 -- プラント — 初期状態の「範囲全体」からの到達可能性
 --
--- `interval lo hi` は lo と hi の間の**すべての実数**を表す値。
+-- `lo .. hi` (または `中心 +- 許容差`) は、その間の**すべての実数**を
+-- 表す値。
 -- 演算は範囲を丸ごと運び、比較は範囲全体が決めたときだけ答える。
 -- したがってここで証明されることは、範囲内のどの初期状態についても
 -- 成り立つ。
@@ -14,7 +15,7 @@ def plantStep := \x -> 0.9 * x + 2.0
 def evolve := \n x -> if n <= 0 then x else evolve (n - 1) (plantStep x)
 
 -- 起動時の温度は 15〜30°C のどこか (environment.seki の仮定より)。
-def startup := interval 15.0 30.0
+def startup := 22.5 +- 7.5          -- 15〜30°C (仕様書の書き方に合わせる)
 
 -- **範囲内のどの初期温度からでも**、10 ステップ後は 25°C を超えない。
 theorem never_overheats_in_10_steps
@@ -31,3 +32,7 @@ theorem never_freezes
 -- 全区間を通じて定格内にとどまる (最初の 5 ステップ)。
 theorem stays_in_band
   : (evolve 5 startup >= 14.0) and (evolve 5 startup <= 26.0) := by eval
+
+-- 囲いが広がっていないことも主張できる。反復のたびに区間は縮むはずで、
+-- 縮まなくなったらそれ自体が所見になる。
+theorem enclosure_stays_tight : width (evolve 50 startup) < 0.2 := by eval

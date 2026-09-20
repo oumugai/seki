@@ -801,9 +801,11 @@ impl<'a> EvalCtx<'a> {
                         lv, rv
                     )));
                 }
-                if self.interval_mode
-                    && (contains_interval(&lv) || contains_interval(&rv))
-                {
+                // Whenever an enclosure is involved — not only inside the
+                // kernel — equality is the three-valued one.  Structural
+                // equality would call `width x` and `2.0` different because
+                // one is a band and the other a number.
+                if contains_interval(&lv) || contains_interval(&rv) {
                     return match interval_structural_eq(&lv, &rv) {
                         Some(v) => Ok(Value::Bool(
                             if matches!(op, BinOp::Eq) { v } else { !v },
@@ -1193,9 +1195,15 @@ fn arith(
             }
         };
         if out.is_poison() {
+            // Marked like an undecided comparison, because it is the same
+            // situation: the enclosure grew until it could no longer be
+            // used, which settles nothing either way.
             return Err(SekiError::Runtime(format!(
-                "the enclosure of `{} {} {}` could not be established",
-                a, op, b
+                "{}: the enclosure of `{} {} {}` could not be established",
+                crate::interval::UNDECIDED,
+                a,
+                op,
+                b
             )));
         }
         return Ok(Value::Interval(out));
@@ -1250,6 +1258,24 @@ fn arith_mod(lv: Value, rv: Value) -> SekiResult<Value> {
 
 
 
+/// A note on how wide the enclosures are, appended to a comparison that
+/// could not be settled.
+///
+/// The width *is* the diagnosis.  A claim that fails because an enclosure
+/// grew — the dependency problem, where a variable appearing twice makes
+/// the arithmetic forget the two are the same — looks exactly like a claim
+/// that is false, until you see the number.
+fn widths_note(a: crate::interval::Interval, b: crate::interval::Interval) -> String {
+    let w = |i: crate::interval::Interval| i.hi.sub(i.lo);
+    let (wa, wb) = (w(a), w(b));
+    match (wa.is_zero(), wb.is_zero()) {
+        (true, true) => String::new(),
+        (false, true) => format!(" — the left enclosure is {} wide", wa),
+        (true, false) => format!(" — the right enclosure is {} wide", wb),
+        (false, false) => format!(" — the enclosures are {} and {} wide", wa, wb),
+    }
+}
+
 /// Does this value have an enclosure anywhere inside it?
 ///
 /// A list of coefficients is a tuple of tuples, so a polynomial compared
@@ -1299,11 +1325,10 @@ fn interval_structural_eq(a: &Value, b: &Value) -> Option<bool> {
             }
             all_equal.then_some(true)
         }
-        // A rounded `f64` on either side means the two are represented
-        // differently, not that they differ.  One definition may have been
-        // re-evaluated as an enclosure and the other left alone, and
-        // reporting that as a difference would reject a true equality.
-        (Value::Real(_), _) | (_, Value::Real(_)) => None,
+        // Note there is no special case for a bare `f64` here: inside the
+        // kernel one never reaches this, because `eval_binop` refuses the
+        // comparison outright (a rounded number cannot take part in an
+        // enclosure), and outside it a literal is simply the number it is.
         _ => {
             let (Some(x), Some(y)) = (as_interval(a), as_interval(b)) else {
                 // Not numeric on both sides — a tag string, a unit — so
@@ -1384,6 +1409,23 @@ fn interval_builtin(name: &str, args: &[Value]) -> SekiResult<Option<Value>> {
                 other.type_name()
             ))),
         },
+        // Reading an enclosure's own ends is exact.
+        "lo" | "hi" | "width" | "mid" => {
+            let i = need(&args[0])?;
+            let out = match name {
+                "lo" => Interval::exact(i.lo),
+                "hi" => Interval::exact(i.hi),
+                "width" => Interval::exact(i.hi.sub(i.lo)),
+                _ => match i.lo.add(i.hi).div(crate::algebra::Rat::from_int(2)) {
+                    Some(m) => Interval::exact(m),
+                    None => return Err(SekiError::Runtime("mid: no midpoint".into())),
+                },
+            };
+            if out.is_poison() {
+                return Err(SekiError::Runtime(format!("{}: unusable enclosure", name)));
+            }
+            Ok(Some(Value::Interval(out)))
+        }
         // Verified by squaring — see `Interval::sqrt`.
         "sqrt" => {
             let s = need(&args[0])?.sqrt();
@@ -1506,10 +1548,11 @@ fn cmp(
         return match answer {
             Some(v) => Ok(Value::Bool(v)),
             None => Err(SekiError::Runtime(format!(
-                "{}: {} and {} do not settle this comparison",
+                "{}: {} and {} overlap{}",
                 crate::interval::UNDECIDED,
                 a,
-                b
+                b,
+                widths_note(a, b)
             ))),
         };
     }
@@ -2309,6 +2352,59 @@ pub fn make_builtin_prelude() -> Globals {
             return Err(format!("interval: the low end {} is above the high end {}", lo, hi));
         }
         Ok(Value::Interval(crate::interval::Interval::new(lo, hi)))
+    }
+
+    /// `lo x` / `hi x` / `width x` / `mid x` — what an enclosure actually
+    /// came out as.
+    ///
+    /// Without these a widened enclosure is invisible: the only symptom is
+    /// a claim that will not settle, with no way to say how far off it was
+    /// or to *assert* that a computation stays tight.  `width` in
+    /// particular turns "my enclosure blew up" into a checkable claim:
+    ///
+    /// ```seki
+    /// theorem stays_tight : width (run 50 x0) < 0.01 := by eval
+    /// ```
+    ///
+    /// A plain number is a band of zero width, so these work on it too.
+    fn interval_part(args: &[Value], which: &str) -> Result<Value, String> {
+        let i = match &args[0] {
+            Value::Interval(i) => *i,
+            Value::Int(n) => crate::interval::Interval::from_int(*n as i128),
+            Value::Real(r) => match crate::algebra::decimal_to_rat(*r) {
+                Some(q) => crate::interval::Interval::exact(q),
+                None => return Err(format!("{}: {} has no exact form", which, r)),
+            },
+            v => return Err(format!("{}: expected a number, got {}", which, v.type_name())),
+        };
+        let out = match which {
+            "lo" => crate::interval::Interval::exact(i.lo),
+            "hi" => crate::interval::Interval::exact(i.hi),
+            "width" => crate::interval::Interval::exact(i.hi.sub(i.lo)),
+            _ => {
+                let two = crate::algebra::Rat::from_int(2);
+                match i.lo.add(i.hi).div(two) {
+                    Some(m) => crate::interval::Interval::exact(m),
+                    None => return Err("mid: no midpoint".into()),
+                }
+            }
+        };
+        if out.is_poison() {
+            return Err(format!("{}: the enclosure is not usable", which));
+        }
+        Ok(Value::Interval(out))
+    }
+    fn b_lo(args: &[Value]) -> Result<Value, String> {
+        interval_part(args, "lo")
+    }
+    fn b_hi(args: &[Value]) -> Result<Value, String> {
+        interval_part(args, "hi")
+    }
+    fn b_width(args: &[Value]) -> Result<Value, String> {
+        interval_part(args, "width")
+    }
+    fn b_mid(args: &[Value]) -> Result<Value, String> {
+        interval_part(args, "mid")
     }
 
     fn b_sqrt(args: &[Value]) -> Result<Value, String> {
@@ -4251,6 +4347,10 @@ pub fn make_builtin_prelude() -> Globals {
     g.defs.insert("round".into(), bi("round", 1, b_round));
     g.defs.insert("sqrt".into(), bi("sqrt", 1, b_sqrt));
     g.defs.insert("interval".into(), bi("interval", 2, b_interval));
+    g.defs.insert("lo".into(), bi("lo", 1, b_lo));
+    g.defs.insert("hi".into(), bi("hi", 1, b_hi));
+    g.defs.insert("width".into(), bi("width", 1, b_width));
+    g.defs.insert("mid".into(), bi("mid", 1, b_mid));
     g.defs.insert("pow".into(), bi("pow", 2, b_pow));
     // Transcendental Real builtins
     g.defs.insert("exp".into(), bi("exp", 1, b_exp));

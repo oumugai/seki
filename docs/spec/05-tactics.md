@@ -149,6 +149,46 @@ theorem lin_cont : forall eps in Real, eps > 0.0 =>
 から検査します。証明書が選べるのは項だけで、それが何を証明する義務を
 生むかは選べません。
 
+## 5.1c 区間 — 「この範囲のすべての値について」
+
+`lo .. hi` と `中心 +- 許容差` は、その間の**すべての実数**を表す値を作ります
+(どちらも `interval lo hi` への糖衣で、パーサで展開されるので、カーネルも
+型検査もタクティクも今までどおりのものしか見ません)。
+
+```seki
+def rBand := 8000.0 .. 12000.0
+def startup := 22.5 +- 7.5        -- 仕様書の書き方に合わせる
+
+theorem in_spec : (rToTemp rBand >= 270.0) and (rToTemp rBand <= 310.0) := by eval
+```
+
+演算は範囲を丸ごと運び、比較は**範囲全体が決めたときだけ**答えます。
+したがってここで証明されることは範囲内のどの値についても成り立ちます —
+再帰・条件分岐・`exp`/`ln`/`sin`/`cos` を含む任意の計算を通して。
+
+結合は算術より緩く比較より強いので、`1.0 + 2.0 .. 5.0` は 3 から 5 の帯です。
+
+### `lo` / `hi` / `width` / `mid`
+
+囲いがどう出たかを読む関数。ただの数は幅ゼロの帯なので、そちらにも使えます。
+
+```seki
+theorem contracts : width (run 20 x0) < 0.25 := by eval
+```
+
+`width` が重要なのは、**囲いが広がっていないことを主張できる**からです。
+区間演算は同じ値が式に複数回現れると広がります (依存性)。Newton 法の
+`x - (x³-8)/(3x²)` は `x` が 3 回出るので、実数の反復が縮む場面で囲いは
+広がります。そうなったとき失敗は
+
+```
+interval arithmetic does not settle this claim (... — the left enclosure is 2 wide).
+An enclosure widens wherever a value appears more than once, so this shows
+neither that the claim holds nor that it fails
+```
+
+と出ます — 「偽である」ではなく「この方法では決まらない」です。
+
 ## 5.2 `refl`
 
 **意味**: 命題が `Refl: x == x` 形に構造一致するか。**型項としても使える** (Curry-Howard)。
