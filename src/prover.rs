@@ -32,7 +32,7 @@ use crate::rewrite::{
 use crate::unfold::{collect_free_var_names, unfold_definition};
 use crate::eval::{enumerate_set, EvalCtx};
 use crate::value::{value_eq, AtomicSet, Env, SetVal, Value};
-use crate::kernel::{Cert, PolyClaim, TrustReason};
+use crate::kernel::{Cert, Generator, PolyClaim, TrustReason};
 use crate::trust::TrustLevel;
 use crate::{SekiError, SekiResult};
 use std::collections::BTreeSet;
@@ -818,6 +818,26 @@ impl<'a> Prover<'a> {
             && try_fm_prove(hyps, &diff, &op)
         {
             return Ok(Value::Bool(true));
+        }
+        // Positivstellensatz: non-negative weights on the hypotheses *and
+        // their products*.  This is what reaches past linear arithmetic —
+        // `0 ≤ a ≤ 1 ⊢ a² ≤ 1` needs `(1-a)·(1+a)`, which no sum of the
+        // hypotheses alone provides.  The search lives in `find_farkas`, so
+        // the tactic and the certificate agree about what is reachable.
+        if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+            let goal_diff = match op {
+                BinOp::Le | BinOp::Lt => diff.clone().neg(),
+                _ => diff.clone(),
+            };
+            let strict = matches!(op, BinOp::Lt | BinOp::Gt);
+            let hyp_exprs: Vec<Expr> = hyps
+                .iter()
+                .filter(|(_, truth)| *truth)
+                .map(|(h, _)| h.clone())
+                .collect();
+            if self.find_farkas(&hyp_exprs, &goal_diff, strict).is_some() {
+                return Ok(Value::Bool(true));
+            }
         }
         Err(SekiError::Proof(format!(
             "by algebra: cannot prove {} {} {} over {:?}",
@@ -2352,21 +2372,27 @@ impl<'a> Prover<'a> {
         Some(used)
     }
 
-    /// Find Farkas multipliers: non-negative rationals `λᵢ` and a
-    /// non-negative slack `k` with `Σ λᵢ·hypᵢ + k = diff`.
+    /// Find a Positivstellensatz certificate: non-negative weights on
+    /// products of the goal's hypotheses, plus a non-negative slack, adding
+    /// up to the goal's difference.
     ///
-    /// This is the search half of linear arithmetic.  Matching coefficients
-    /// monomial by monomial turns it into a linear system, which is solved
-    /// exactly over the rationals; the kernel then only has to multiply and
-    /// add.  It strictly subsumes the equal-weights subset search it
-    /// replaces — `x <= 3 ⊢ 2x <= 6` needs `λ = 2`, and `2a <= 10 ⊢ 2a <= 12`
-    /// needs a slack of 2, and neither was reachable before.
+    /// This is the search half of non-linear arithmetic.  Generators are the
+    /// hypotheses themselves and their pairwise products — a product of
+    /// non-negative quantities is non-negative, so each is a legitimate
+    /// thing to add.  Matching coefficients monomial by monomial turns the
+    /// weights into a linear system, solved exactly over the rationals; the
+    /// kernel then only multiplies out and compares.
+    ///
+    /// Products are what take this past linear arithmetic.  `0 ≤ a ≤ 1 ⊢
+    /// a² ≤ 1` cannot be reached by any sum of `a` and `1 - a`, but
+    /// `(1-a)·(1+a) = 1 - a²` settles it at once — and `1 + a` is itself
+    /// `a ≥ 0` shifted, so both factors are hypotheses.
     fn find_farkas(
         &self,
         hyps: &[Expr],
         diff: &crate::algebra::Polynomial,
         goal_strict: bool,
-    ) -> Option<(Vec<(Expr, bool, Rat)>, Rat)> {
+    ) -> Option<(Vec<Generator>, Rat)> {
         // Normalize each usable hypothesis to a polynomial asserted `>= 0`.
         let mut usable: Vec<(Expr, bool, crate::algebra::Polynomial)> = Vec::new();
         for h in hyps {
@@ -2386,41 +2412,80 @@ impl<'a> Prover<'a> {
         if usable.is_empty() {
             return None;
         }
-        // Solving with *every* hypothesis as a column leaves free variables,
-        // and setting those to zero can miss the solution: for an interval
-        // `0.05 <= r <= 0.15` the answer uses only the upper bound, but the
-        // elimination may pivot on the lower one.  Searching subsets makes
-        // each system determined, and going smallest-first yields the
-        // simplest certificate.
-        const MAX_HYPS: usize = 10;
+        const MAX_HYPS: usize = 8;
         if usable.len() > MAX_HYPS {
             usable.truncate(MAX_HYPS);
         }
-        let n = usable.len();
-        let mut subsets: Vec<u32> = (1u32..(1u32 << n)).collect();
-        subsets.sort_by_key(|m| m.count_ones());
-        for mask in subsets {
-            let chosen: Vec<usize> = (0..n).filter(|i| mask & (1 << i) != 0).collect();
-            let polys: Vec<crate::algebra::Polynomial> =
-                chosen.iter().map(|&i| usable[i].2.clone()).collect();
-            let Some((lambdas, slack)) = solve_nonneg_combination(&polys, diff) else {
+
+        // Generators: each hypothesis, then each pairwise product
+        // (including a hypothesis squared).  Singles come first so that a
+        // linear goal still yields the simplest certificate.
+        let mut generators: Vec<Generator> = Vec::new();
+        let mut polys: Vec<crate::algebra::Polynomial> = Vec::new();
+        for (h, strict, p) in &usable {
+            generators.push(Generator {
+                factors: vec![h.clone()],
+                strict: *strict,
+                coeff: Rat::from_int(1),
+            });
+            polys.push(p.clone());
+        }
+        for i in 0..usable.len() {
+            for j in i..usable.len() {
+                let product = usable[i].2.clone().mul(usable[j].2.clone());
+                if product.has_overflow() {
+                    continue;
+                }
+                generators.push(Generator {
+                    factors: vec![usable[i].0.clone(), usable[j].0.clone()],
+                    strict: usable[i].1 && usable[j].1,
+                    coeff: Rat::from_int(1),
+                });
+                polys.push(product);
+            }
+        }
+
+        // Search subsets smallest-first, so the certificate that comes back
+        // is the simplest one that works.  Solving over every generator at
+        // once leaves free variables, and zeroing those can miss the answer.
+        let n = generators.len();
+        let mut subsets: Vec<Vec<usize>> = Vec::new();
+        for i in 0..n {
+            subsets.push(vec![i]);
+        }
+        for i in 0..n {
+            for j in (i + 1)..n {
+                subsets.push(vec![i, j]);
+            }
+        }
+        for i in 0..n {
+            for j in (i + 1)..n {
+                for k in (j + 1)..n {
+                    subsets.push(vec![i, j, k]);
+                }
+            }
+        }
+        for chosen in subsets {
+            let chosen_polys: Vec<crate::algebra::Polynomial> =
+                chosen.iter().map(|&i| polys[i].clone()).collect();
+            let Some((weights, slack)) = solve_nonneg_combination(&chosen_polys, diff) else {
                 continue;
             };
             if goal_strict {
                 let strict_ok = slack.sign() > 0
                     || chosen
                         .iter()
-                        .zip(&lambdas)
-                        .any(|(&i, l)| usable[i].1 && l.sign() > 0);
+                        .zip(&weights)
+                        .any(|(&i, w)| generators[i].strict && w.sign() > 0);
                 if !strict_ok {
                     continue;
                 }
             }
-            let used: Vec<(Expr, bool, Rat)> = chosen
+            let used: Vec<Generator> = chosen
                 .iter()
-                .zip(&lambdas)
-                .filter(|(_, l)| !l.is_zero())
-                .map(|(&i, l)| (usable[i].0.clone(), usable[i].1, *l))
+                .zip(&weights)
+                .filter(|(_, w)| !w.is_zero())
+                .map(|(&i, w)| Generator { coeff: *w, ..generators[i].clone() })
                 .collect();
             if used.is_empty() {
                 // A constant goal needs no hypotheses; leave that to the

@@ -236,25 +236,68 @@ pub enum PolyClaim {
         used: Vec<(Expr, Rat)>,
     },
 
-    /// A *Farkas certificate*: `lhs - rhs = Σ λᵢ·hypᵢ + slack` with every
-    /// multiplier and the slack non-negative, so the difference is too.
+    /// A *Positivstellensatz certificate*: `lhs - rhs = Σ λ_g·g + slack`,
+    /// where every `g` is a product of the goal's own hypotheses and every
+    /// multiplier and the slack is non-negative — so the difference is too.
     ///
-    /// This is the standard witness for linear arithmetic, and the reason
-    /// `by linarith` can be untrusted: finding the multipliers takes
-    /// Fourier-Motzkin elimination or a simplex, while *checking* them is
-    /// multiplying each hypothesis by a rational and adding up.
+    /// With single-hypothesis generators this is the classical Farkas
+    /// certificate for linear arithmetic, and the reason `by linarith` need
+    /// not be trusted: finding the multipliers takes Fourier-Motzkin or a
+    /// simplex, while *checking* them is multiplying each hypothesis by a
+    /// rational and adding up.
+    ///
+    /// Allowing a generator to be a *product* extends the same idea to the
+    /// non-linear fragment, which is where most constraints about
+    /// quantities actually live: `0 <= a <= 1 ⊢ a² <= 1` needs
+    /// `(1-a)·(1+a)`, and no sum of the hypotheses alone will do it.  The
+    /// check is still only multiplication and addition — `p ≥ 0` and
+    /// `q ≥ 0` give `pq ≥ 0` with nothing further assumed.
     ///
     /// `goal_strict` records that the goal is a strict inequality, which
-    /// needs either a positive slack or a strict hypothesis with a positive
-    /// multiplier.
+    /// needs either a positive slack or a strictly positive generator with
+    /// a positive multiplier.
     Farkas {
         lhs: Expr,
         rhs: Expr,
-        /// `(hypothesis, is_strict, multiplier)` for each one used.
-        used: Vec<(Expr, bool, Rat)>,
+        used: Vec<Generator>,
         slack: Rat,
         goal_strict: bool,
     },
+}
+
+/// One non-negative quantity a Positivstellensatz certificate is built
+/// from: a product of hypotheses the goal already assumes.
+///
+/// A single factor is an ordinary Farkas term.  Two or more is what makes
+/// the certificate reach past linear arithmetic.
+#[derive(Debug, Clone)]
+pub struct Generator {
+    /// The hypotheses multiplied together; each must be one the goal
+    /// assumes, which is what the kernel checks.
+    pub factors: Vec<Expr>,
+    /// Whether every factor is a strict inequality — only then is the
+    /// product strictly positive.
+    pub strict: bool,
+    /// Its non-negative weight.
+    pub coeff: Rat,
+}
+
+impl Generator {
+    /// Render as `λ·(h₁)·(h₂)`, or just `(h)` when the weight is one and
+    /// there is a single factor.
+    fn describe(&self) -> String {
+        let body = self
+            .factors
+            .iter()
+            .map(|f| format!("({})", f))
+            .collect::<Vec<_>>()
+            .join("·");
+        if self.coeff == Rat::from_int(1) {
+            body
+        } else {
+            format!("{}·{}", self.coeff, body)
+        }
+    }
 }
 
 // -- checking ---------------------------------------------------------------
@@ -784,42 +827,59 @@ impl Checker<'_, '_> {
                 if slack.sign() < 0 {
                     return err("the slack of a Farkas certificate must be non-negative");
                 }
-                // Each cited hypothesis must really be assumed by the goal —
-                // either written as a premise, or imposed by a binder's
-                // domain.
+                // Every factor of every generator must really be assumed by
+                // the goal — as a premise, or imposed by a binder's domain.
                 let mut available = goal_hypotheses(prop);
                 available.extend(domain_hypotheses(prop, self.ctx, &self.env));
                 let mut acc = Polynomial::from_rat(*slack);
                 let mut strict_available = false;
-                for (h, strict, lambda) in used {
-                    if lambda.sign() < 0 {
+                for g in used {
+                    if g.coeff.sign() < 0 {
                         return err(format!(
-                            "the multiplier on `{}` is negative, which reverses the \
+                            "the multiplier on {} is negative, which reverses the \
                              inequality instead of preserving it",
-                            h
+                            g.describe()
                         ));
                     }
-                    if !available.iter().any(|a| crate::ast::alpha_equiv(a, h)) {
+                    if g.factors.is_empty() {
+                        return err("a generator must be built from at least one hypothesis");
+                    }
+                    // A product of non-negative quantities is non-negative,
+                    // and strictly positive only when every factor is.
+                    let mut product = Polynomial::from_rat(Rat::from_int(1));
+                    let mut all_strict = true;
+                    for h in &g.factors {
+                        if !available.iter().any(|a| crate::ast::alpha_equiv(a, h)) {
+                            return err(format!(
+                                "`{}` is used as a hypothesis but the goal does not assume it",
+                                h
+                            ));
+                        }
+                        let (hp, hp_strict) = self.nonneg_form_of(h)?;
+                        all_strict &= hp_strict;
+                        product = self.exact(product.mul(hp))?;
+                    }
+                    if g.strict && !all_strict {
                         return err(format!(
-                            "`{}` is used as a hypothesis but the goal does not assume it",
-                            h
+                            "{} is recorded as strictly positive, but not every factor \
+                             is a strict inequality",
+                            g.describe()
                         ));
                     }
-                    let hp = self.nonneg_form(h, *strict)?;
-                    acc = acc.add(hp.scale(*lambda));
-                    if *strict && lambda.sign() > 0 {
+                    acc = self.exact(acc.add(product.scale(g.coeff)))?;
+                    if g.strict && all_strict && g.coeff.sign() > 0 {
                         strict_available = true;
                     }
                 }
                 if !self.exact(acc.sub(diff))?.terms.is_empty() {
                     return err(
-                        "the weighted hypotheses do not add up to the goal's difference",
+                        "the weighted generators do not add up to the goal's difference",
                     );
                 }
                 if *goal_strict && !strict_available && slack.sign() <= 0 {
                     return err(
-                        "a strict goal needs either a positive slack or a strict \
-                         hypothesis with a positive multiplier",
+                        "a strict goal needs either a positive slack or a strictly \
+                         positive generator with a positive multiplier",
                     );
                 }
                 Ok(Verdict::sound())
@@ -905,6 +965,25 @@ impl Checker<'_, '_> {
         let p = expr_to_poly(e)
             .ok_or_else(|| KernelError(format!("`{}` is outside the polynomial fragment", e)))?;
         self.exact(p)
+    }
+
+    /// The polynomial a hypothesis asserts is non-negative, and whether it
+    /// asserts it strictly.
+    fn nonneg_form_of(&self, h: &Expr) -> KResult<(Polynomial, bool)> {
+        let (op, l, r) = match h {
+            Expr::BinOp(op, l, r) if is_relation(op) => (op, l.as_ref(), r.as_ref()),
+            other => return err(format!("`{}` is not a relation", other)),
+        };
+        let (a, b) = match op {
+            BinOp::Ge | BinOp::Gt => (l, r),
+            BinOp::Le | BinOp::Lt => (r, l),
+            BinOp::Eq => (l, r),
+            other => return err(format!("`{}` cannot be used as a bound", op_name(other))),
+        };
+        Ok((
+            self.difference(a, b)?,
+            matches!(op, BinOp::Gt | BinOp::Lt),
+        ))
     }
 
     /// Turn `a >= b` / `a > b` (and the flipped forms) into the polynomial
@@ -1707,11 +1786,7 @@ impl PolyClaim {
                 lhs,
                 rhs,
                 used.iter()
-                    .map(|(h, _, l)| if *l == Rat::from_int(1) {
-                        format!("({})", h)
-                    } else {
-                        format!("{}·({})", l, h)
-                    })
+                    .map(|g| g.describe())
                     .collect::<Vec<_>>()
                     .join(" + "),
                 if slack.is_zero() {
@@ -1867,7 +1942,11 @@ mod forgery_tests {
             claim: PolyClaim::Farkas {
                 lhs: parse_prop("x"),
                 rhs: Expr::Int(0),
-                used: vec![(parse_prop("x >= 0"), false, Rat::from_int(1))],
+                used: vec![Generator {
+                    factors: vec![parse_prop("x >= 0")],
+                    strict: false,
+                    coeff: Rat::from_int(1),
+                }],
                 slack: Rat::from_int(0),
                 goal_strict: false,
             },
@@ -1887,7 +1966,11 @@ mod forgery_tests {
             claim: PolyClaim::Farkas {
                 lhs: parse_prop("x"),
                 rhs: Expr::Int(0),
-                used: vec![(parse_prop("x <= 3"), false, Rat::from_int(-1))],
+                used: vec![Generator {
+                    factors: vec![parse_prop("x <= 3")],
+                    strict: false,
+                    coeff: Rat::from_int(-1),
+                }],
                 slack: Rat::from_int(3),
                 goal_strict: false,
             },
@@ -1904,13 +1987,81 @@ mod forgery_tests {
             claim: PolyClaim::Farkas {
                 lhs: parse_prop("2 * x"),
                 rhs: Expr::Int(0),
-                used: vec![(parse_prop("x >= 0"), false, Rat::from_int(1))],
+                used: vec![Generator {
+                    factors: vec![parse_prop("x >= 0")],
+                    strict: false,
+                    coeff: Rat::from_int(1),
+                }],
                 slack: Rat::from_int(0),
                 goal_strict: false,
             },
         };
         let err = check_in(&g, "forall x in Int, x >= 0 => 2 * x >= 0", &wrong).unwrap_err();
         assert!(err.0.contains("do not add up"), "{}", err.0);
+    }
+
+    #[test]
+    fn a_product_generator_may_only_use_hypotheses_the_goal_assumes() {
+        // `x <= 1` alone does not bound `x²`; pretending the goal also
+        // assumes `x >= 0` is exactly the move a wrong certificate makes.
+        let g = make_prelude();
+        let forged = Cert::Poly {
+            dom: PolyDomain::Real,
+            claim: PolyClaim::Farkas {
+                lhs: Expr::Int(1),
+                rhs: parse_prop("x * x"),
+                used: vec![
+                    Generator {
+                        factors: vec![parse_prop("x <= 1")],
+                        strict: false,
+                        coeff: Rat::from_int(1),
+                    },
+                    Generator {
+                        factors: vec![parse_prop("0 <= x"), parse_prop("x <= 1")],
+                        strict: false,
+                        coeff: Rat::from_int(1),
+                    },
+                ],
+                slack: Rat::from_int(0),
+                goal_strict: false,
+            },
+        };
+        let err = check_in(&g, "forall x in Real, x <= 1 => (x * x) <= 1", &forged)
+            .unwrap_err();
+        assert!(err.0.contains("does not assume it"), "{}", err.0);
+        // With both bounds assumed, the same certificate is legitimate.
+        assert!(check_in(
+            &g,
+            "forall x in Real, (0 <= x) and (x <= 1) => (x * x) <= 1",
+            &forged
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_product_is_only_strictly_positive_when_every_factor_is() {
+        let g = make_prelude();
+        let forged = Cert::Poly {
+            dom: PolyDomain::Real,
+            claim: PolyClaim::Farkas {
+                lhs: parse_prop("x * y"),
+                rhs: Expr::Int(0),
+                used: vec![Generator {
+                    factors: vec![parse_prop("x > 0"), parse_prop("y >= 0")],
+                    strict: true,
+                    coeff: Rat::from_int(1),
+                }],
+                slack: Rat::from_int(0),
+                goal_strict: true,
+            },
+        };
+        let err = check_in(
+            &g,
+            "forall x in Real, forall y in Real, (x > 0) and (y >= 0) => (x * y) > 0",
+            &forged,
+        )
+        .unwrap_err();
+        assert!(err.0.contains("not every factor"), "{}", err.0);
     }
 
     #[test]

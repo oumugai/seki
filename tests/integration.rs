@@ -3434,3 +3434,69 @@ fn a_named_set_is_recognised_as_its_underlying_domain() {
     );
     assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
 }
+
+// -- non-linear arithmetic --------------------------------------------------
+//
+// Farkas adds hypotheses with non-negative weights, which cannot reach
+// `0 <= a <= 1 ⊢ a² <= 1`.  Products of hypotheses can: `p >= 0` and
+// `q >= 0` give `pq >= 0` with nothing further assumed, so a product is
+// another legitimate thing to add.
+
+#[test]
+fn a_square_is_bounded_by_its_interval() {
+    let g = run(
+        "theorem t : forall a in Real, (0.0 <= a) and (a <= 1.0) => (a * a) <= 1.0 \
+         := by algebra",
+    );
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+    // The certificate names the product it used.
+    let text = g.theorem_certs["t"].render();
+    assert!(text.contains('·'), "expected a product generator: {}", text);
+}
+
+#[test]
+fn products_and_boxes_and_am_gm_all_go_through() {
+    for src in [
+        "theorem t : forall a in Real, forall b in Real, (a >= 0.0) and (b >= 0.0) \
+         => (a * b) >= 0.0 := by algebra",
+        "theorem t : forall x in Real, forall y in Real, (0.0 <= x) and (x <= 2.0) \
+         and (0.0 <= y) and (y <= 3.0) => (x * y) <= 6.0 := by algebra",
+        "theorem t : forall a in Real, forall b in Real, (a >= 0.0) and (b >= 0.0) \
+         => (a + b) * (a + b) >= (4.0 * a * b) := by algebra",
+    ] {
+        let g = run(src);
+        assert_eq!(g.theorem_trust["t"], TrustLevel::Sound, "for: {}", src);
+    }
+}
+
+#[test]
+fn a_non_linear_refinement_type_is_proved() {
+    let g = run(
+        "def Unit01 := {x in Real | (0.0 <= x) and (x <= 1.0)}\n\
+         def square : Unit01 -> Unit01 := \\x -> x * x\n\
+         def multiply : Unit01 -> Unit01 -> Unit01 := \\x y -> x * y\n\
+         def doubled : Unit01 -> Unit01 := \\x -> x * 2.0",
+    );
+    assert_eq!(g.def_trust["square"], TrustLevel::Sound);
+    assert_eq!(g.def_trust["multiply"], TrustLevel::Sound);
+    assert_eq!(g.def_trust["doubled"], TrustLevel::Sampled);
+}
+
+#[test]
+fn a_false_non_linear_claim_is_still_refused() {
+    // `a <= 1` alone does not bound `a²` — `a = -5` breaks it.
+    assert!(run_err("theorem bad : forall a in Real, a <= 1.0 => (a * a) <= 1.0 := by algebra")
+        .is_proof_error());
+}
+
+#[test]
+fn the_nonlinear_example_is_kernel_checked() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--audit")
+        .arg("examples/45_nonlinear.seki")
+        .output()
+        .expect("run seki --audit");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", stdout);
+    assert!(stdout.contains("sound:     7"), "{}", stdout);
+}

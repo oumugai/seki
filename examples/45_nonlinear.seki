@@ -1,0 +1,56 @@
+-- ===========================================================
+-- 45: 非線形の制約充足 — 仮定の積 (Positivstellensatz)
+--
+-- 線形算術 (Farkas) は「仮定を非負の重みで足す」ことしかできません。
+-- `0 <= a <= 1 ⊢ a² <= 1` は、`a` と `1-a` をどう足しても届きません。
+--
+-- 届く道具は **仮定の積** です。`p >= 0` かつ `q >= 0` なら `pq >= 0` は
+-- 何も追加で仮定せずに成り立つので、積もまた足してよい非負量です:
+--
+--     1 - a² = (1 - a) + a·(1 - a)
+--
+-- 探索 (どの積をどの重みで使うか) は難しく、検査 (掛けて足して比べる) は
+-- 易しい — 証明項の設計そのままです。
+-- ===========================================================
+
+-- ----- 区間上の非線形な主張 -------------------------------------------
+theorem square_bounded
+  : forall a in Real, (0.0 <= a) and (a <= 1.0) => (a * a) <= 1.0
+  := by algebra
+
+theorem product_nonneg
+  : forall a in Real, forall b in Real,
+      (a >= 0.0) and (b >= 0.0) => (a * b) >= 0.0
+  := by algebra
+
+-- 区間の積は区間の積に収まる
+theorem box_bound
+  : forall x in Real, forall y in Real,
+      (0.0 <= x) and (x <= 2.0) and (0.0 <= y) and (y <= 3.0)
+      => (x * y) <= 6.0
+  := by algebra
+
+-- 相加相乗平均 (2変数)
+theorem am_gm_two
+  : forall a in Real, forall b in Real,
+      (a >= 0.0) and (b >= 0.0) => (a + b) * (a + b) >= (4.0 * a * b)
+  := by algebra
+
+-- ----- 非線形な refinement 型 -----------------------------------------
+-- 「単位区間を単位区間に写す」が型として証明される
+def Unit01 := {x in Real | (0.0 <= x) and (x <= 1.0)}
+
+def square   : Unit01 -> Unit01 := \x -> x * x
+def multiply : Unit01 -> Unit01 -> Unit01 := \x y -> x * y
+def halve    : Unit01 -> Unit01 := \x -> x / 2.0
+
+-- 区間を出るものは印が付く
+def doubled : Unit01 -> Unit01 := \x -> x * 2.0
+
+-- ===========================================================
+-- $ seki --proof examples/45_nonlinear.seki square_bounded
+--   `1` - `(a * a)` = ((a <= 1)) + ((0 <= a))·((a <= 1)) (over Real)
+--   kernel verdict: every step re-established from primitives
+--
+-- 届かないもの: 次数3以上 (`a³ <= 1`) は3つ組の積が要るため未対応。
+-- ===========================================================
