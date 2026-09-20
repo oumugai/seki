@@ -15,6 +15,47 @@ seki は **pre-1.0** です。これは次を意味します:
 
 ## [Unreleased]
 
+## [0.10.2] — 2026-09-20
+
+追加のみ。応用例を書こうとして当たった4点の修正です。
+
+### 区間 refinement 型が証明できるようになった
+
+```seki
+def Unit01 := {x in Real | (0.0 <= x) and (x <= 1.0)}
+def halve      : Unit01 -> Unit01 := \x -> x / 2.0      -- 証明される
+def complement : Unit01 -> Unit01 := \x -> 1.0 - x      -- 証明される
+def escapes    : Unit01 -> Unit01 := \x -> x + 0.5      -- [sampled]
+```
+
+「この関数は単位区間を単位区間に写す」が**型として**機械検証されます。
+これを塞いでいたのは次の3つでした。
+
+- **連言の結論が扱えなかった** — `{x | a <= x and x <= b}` という
+  **最も普通の refinement 型**の証明義務は連言なので、`by algebra` が
+  「関係式ではない」と言って終わっていました。連言肢ごとに証明し、
+  kernel が分割を自分で導出して突き合わせる `Cert::AndIntro` を追加。
+- **内包をドメインに持つ束縛の述語が仮定として使われていなかった** —
+  `forall x in {y in Real | 0 <= y and y <= 1}` は `0 <= x and x <= 1` を
+  自由に使えるはず (集合の定義から全ての元が満たす) ですが、その制約は
+  どのタクティクも読まない場所にありました。`kernel::domain_hypotheses`
+  が prover と kernel の両方に供給します。
+- **集合の名前が元のドメインとして認識されなかった** — `forall x in Unit01`
+  が `Int` 上と報告され (綴りしか見ていなかった)、`Real` について何も
+  証明できませんでした。
+
+### 形状推論が割り算で `Int` を決め打ちしていた
+
+```seki
+def f := \a b -> if a <= b then a / b else 1.0
+-- type error: if branches have different shapes: Int vs Real
+```
+
+型注釈のない引数は shape が `Unknown` ですが、`a / b` を `Int` と
+決め打ちしていたため、正しく型の付く関数が**型エラー**になっていました。
+両辺が `Int` と分かっているときだけ `Int`、それ以外は `Unknown` に。
+
+
 ## [0.10.1] — 2026-09-19
 
 ### 健全性の修正: 厳密有理数演算の桁あふれ (TCB 内)

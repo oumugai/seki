@@ -3371,3 +3371,66 @@ fn the_probabilistic_reasoning_examples_report_their_bounds() {
         assert!(stdout.contains(expect), "{} should report {}:\n{}", file, expect, stdout);
     }
 }
+
+// -- what trying to write an application surfaced ---------------------------
+
+#[test]
+fn dividing_operands_of_unknown_shape_is_not_guessed_to_be_an_integer() {
+    // `\a b -> if a <= b then a / b else 1.0` is perfectly well typed, but
+    // the shape checker called `a / b` an `Int` and rejected the `if` for
+    // having branches of different shapes.
+    let g = run("def f := \\a b -> if a <= b then a / b else 1.0");
+    assert!(g.defs.contains_key("f"));
+}
+
+#[test]
+fn a_conjunctive_goal_is_proved_conjunct_by_conjunct() {
+    // Interval refinement types are conjunctions — `{x | 0 <= x and x <= 1}`
+    // — so without this the most ordinary refinement there is could never
+    // be discharged.
+    let g = run("theorem t : forall x in Nat, (x >= 0) and (x + 1 >= 1) := by algebra");
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+    let text = g.theorem_certs["t"].render();
+    assert!(text.contains("each of the 2 conjuncts"), "{}", text);
+    // And a conjunction with a false half is still refused.
+    assert!(run_err("theorem bad : forall x in Nat, (x >= 0) and (x >= 1) := by algebra")
+        .is_proof_error());
+}
+
+#[test]
+fn a_binder_over_a_comprehension_carries_its_predicate() {
+    // `forall x in {y in Real | 0 <= y and y <= 1}` may use those bounds:
+    // they are true of every member by definition of the set.  They used
+    // to sit in a place no tactic read.
+    let g = run(
+        "def Unit01 := {x in Real | (0.0 <= x) and (x <= 1.0)}\n\
+         theorem t : forall a in Unit01, (1.0 - a) >= 0.0 := by algebra",
+    );
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+}
+
+#[test]
+fn an_interval_refinement_type_is_proved() {
+    // "this function maps the unit interval into itself", as a type.
+    let g = run(
+        "def Unit01 := {x in Real | (0.0 <= x) and (x <= 1.0)}\n\
+         def halve : Unit01 -> Unit01 := \\x -> x / 2.0\n\
+         def complement : Unit01 -> Unit01 := \\x -> 1.0 - x\n\
+         def escapes : Unit01 -> Unit01 := \\x -> x + 0.5",
+    );
+    assert_eq!(g.def_trust["halve"], TrustLevel::Sound);
+    assert_eq!(g.def_trust["complement"], TrustLevel::Sound);
+    assert_eq!(g.def_trust["escapes"], TrustLevel::Sampled);
+}
+
+#[test]
+fn a_named_set_is_recognised_as_its_underlying_domain() {
+    // `forall x in Unit01` was reported as being over `Int` — the stricter
+    // reading — because only the spelling of the domain was looked at, so
+    // nothing about `Real` could be proved under it.
+    let g = run(
+        "def Small := {x in Real | (0.0 <= x) and (x <= 2.0)}\n\
+         theorem t : forall a in Small, (a * a) >= 0.0 := by algebra",
+    );
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+}

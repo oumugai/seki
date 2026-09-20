@@ -568,7 +568,7 @@ impl<'a> Prover<'a> {
     /// `by algebra` without the hint — the form `crate::abduce` calls while
     /// checking whether a suggested assumption actually works.
     pub fn verify_algebra_raw(&self, prop: &Expr, _env: &Env) -> SekiResult<Value> {
-        let dom = detect_domain(prop);
+        let dom = detect_domain_with(prop, Some(self.ctx));
         let body = strip_foralls(prop).clone();
         // Inject implicit non-negativity hypotheses for every `forall x in
         // Nat` binder.  This is sound (each such x really is ≥ 0) and lets
@@ -576,6 +576,11 @@ impl<'a> Prover<'a> {
         // `(50 + k) < 50` when `k in Nat`.
         let mut initial_hyps: Vec<(Expr, bool)> = Vec::new();
         collect_nat_hyps(prop, &mut initial_hyps);
+        // A binder over a comprehension carries its predicate: every member
+        // of `{y in Real | 0 <= y and y <= 1}` satisfies those bounds.
+        for h in crate::kernel::domain_hypotheses(prop, self.ctx, _env) {
+            initial_hyps.push((h, true));
+        }
         // Also handle a top-level implication `premise -> conclusion`:
         // turn the premise into a hypothesis and continue with the
         // conclusion as the goal.
@@ -585,6 +590,19 @@ impl<'a> Prover<'a> {
                 initial_hyps.push(h);
             }
             initial_hyps.push((p, true));
+        }
+        // A conjunctive conclusion is proved conjunct by conjunct.  This
+        // is not an exotic case: `{x in Real | 0.0 <= x and x <= 1.0}` is
+        // the most ordinary refinement type there is, and its proof
+        // obligation is a conjunction — without this, an interval
+        // refinement could never be discharged.
+        let mut conjuncts = Vec::new();
+        flatten_conjuncts_expr(&conclusion, &mut conjuncts);
+        if conjuncts.len() > 1 {
+            for c in conjuncts {
+                self.prove_algebra_rel(c, dom, &initial_hyps)?;
+            }
+            return Ok(Value::Bool(true));
         }
         self.prove_algebra_rel(&conclusion, dom, &initial_hyps)
     }
@@ -2121,9 +2139,31 @@ impl<'a> Prover<'a> {
     /// route that has no witness form yet, that is recorded explicitly
     /// instead of being passed off as checked.
     fn algebra_cert(&self, prop: &Expr, _env: &Env) -> Cert {
-        let dom = detect_domain(prop);
+        let dom = detect_domain_with(prop, Some(self.ctx));
         let body = strip_foralls(prop);
-        let (conclusion, hyps) = peel_implications(body);
+        let (mut conclusion, mut hyps) = peel_implications(body);
+        hyps.extend(crate::kernel::domain_hypotheses(prop, self.ctx, _env));
+        let _ = &mut conclusion;
+        // Mirror the tactic: a conjunctive goal is certified conjunct by
+        // conjunct, and the kernel re-derives the split itself.
+        let mut conjuncts = Vec::new();
+        flatten_conjuncts_expr(&conclusion, &mut conjuncts);
+        if conjuncts.len() > 1 {
+            let subs: Vec<Cert> = conjuncts
+                .iter()
+                .map(|c| {
+                    let sub = rebuild_foralls_of(prop, under_hypotheses(&hyps, (*c).clone()));
+                    self.algebra_cert(&sub, _env)
+                })
+                .collect();
+            if subs.iter().all(|c| !matches!(c, Cert::Trusted { .. })) {
+                return Cert::AndIntro { parts: subs };
+            }
+            return self.no_witness(
+                "by algebra",
+                "one conjunct of the goal has no witness form",
+            );
+        }
         let (op, gl, gr) = match &conclusion {
             Expr::BinOp(op, l, r) if is_relation(op) => {
                 (op.clone(), (**l).clone(), (**r).clone())
@@ -3173,6 +3213,12 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+/// Put `prop`'s leading `forall` binders back around a reshaped body.
+fn rebuild_foralls_of(prop: &Expr, inner: Expr) -> Expr {
+    let (binders, _) = crate::rewrite::peel_binders(prop);
+    crate::rewrite::rebuild_binders(&binders, inner)
+}
+
 /// The hypotheses a goal currently assumes, read off its premise chain.
 ///
 /// seki keeps the proof context *in the goal*: `h1 and h2 => C` is a goal
@@ -3303,16 +3349,52 @@ fn is_relation(op: &BinOp) -> bool {
     )
 }
 
+/// The `PolyDomain` a set denotes, seeing through comprehensions.
+fn atomic_poly_domain(s: &SetVal) -> Option<PolyDomain> {
+    match s {
+        SetVal::Atomic(AtomicSet::Nat) => Some(PolyDomain::Nat),
+        SetVal::Atomic(AtomicSet::Int) => Some(PolyDomain::Int),
+        SetVal::Atomic(AtomicSet::Real) => Some(PolyDomain::Real),
+        SetVal::Comp { domain, .. } => atomic_poly_domain(domain),
+        _ => None,
+    }
+}
+
 /// Decide whether free variables in `prop` should be treated as Nat (≥ 0),
 /// Int, or Real.  Heuristic over the binder chain:
 ///   - every domain is `Nat` ⇒ `Nat`
 ///   - any domain is `Real` ⇒ `Real` (the unsigned-coefficient analyses still
 ///     apply, since rationals embed into ℝ)
 ///   - otherwise ⇒ `Int` (the conservative default)
+#[cfg(test)]
 fn detect_domain(prop: &Expr) -> PolyDomain {
-    fn looks_like(e: &Expr, name: &str) -> bool {
-        matches!(e, Expr::Var { name: s, .. } if s == name)
-    }
+    detect_domain_with(prop, None)
+}
+
+fn detect_domain_with(prop: &Expr, ctx: Option<&EvalCtx>) -> PolyDomain {
+    // A binder's domain is often a *name* for a set rather than the set
+    // itself — `forall x in Unit01` where `Unit01 = {y in Real | ...}`.
+    // Looking only at the spelling reported such a goal as being over
+    // `Int`, which is both wrong and the stricter reading, so nothing
+    // about `Real` could be proved.
+    let resolve = |e: &Expr| -> Option<PolyDomain> {
+        let ctx = ctx?;
+        match ctx.eval(e, &Env::new()) {
+            Ok(Value::Set(s)) => atomic_poly_domain(&s),
+            _ => None,
+        }
+    };
+    let looks_like = |e: &Expr, name: &str| -> bool {
+        if matches!(e, Expr::Var { name: s, .. } if s == name) {
+            return true;
+        }
+        match (resolve(e), name) {
+            (Some(PolyDomain::Nat), "Nat") => true,
+            (Some(PolyDomain::Int), "Int") => true,
+            (Some(PolyDomain::Real), "Real") => true,
+            _ => false,
+        }
+    };
     let mut cur = prop;
     let mut all_nat = true;
     let mut saw_real = false;

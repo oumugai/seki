@@ -110,8 +110,10 @@ pub fn infer_shape(e: &Expr, env: &ShapeEnv) -> Shape {
                 let rs = infer_shape(r, env);
                 if matches!(ls, Shape::Real) || matches!(rs, Shape::Real) {
                     Shape::Real
-                } else {
+                } else if matches!(ls, Shape::Int) && matches!(rs, Shape::Int) {
                     Shape::Int
+                } else {
+                    Shape::Unknown
                 }
             }
             BinOp::Mod => Shape::Int,
@@ -211,12 +213,22 @@ pub fn check_shape(e: &Expr, env: &ShapeEnv) -> SekiResult<Shape> {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
                     needs_numeric(&ls, "arithmetic lhs")?;
                     needs_numeric(&rs, "arithmetic rhs")?;
-                    // Result shape: Real if either operand is Real, else Int.
-                    Ok(if matches!(ls, Shape::Real) || matches!(rs, Shape::Real) {
-                        Shape::Real
-                    } else {
-                        Shape::Int
-                    })
+                    // Real if either side is known to be; `Int` only when
+                    // both sides are known to be.  Guessing `Int` for an
+                    // operand of unknown shape made
+                    // `\a b -> if a <= b then a / b else 1.0` a *type
+                    // error*: `a / b` was called `Int` and clashed with the
+                    // `Real` in the other branch, for a function that is
+                    // perfectly well typed.
+                    Ok(
+                        if matches!(ls, Shape::Real) || matches!(rs, Shape::Real) {
+                            Shape::Real
+                        } else if matches!(ls, Shape::Int) && matches!(rs, Shape::Int) {
+                            Shape::Int
+                        } else {
+                            Shape::Unknown
+                        },
+                    )
                 }
                 BinOp::Mod => {
                     needs_compat(&ls, Shape::Int, "mod lhs")?;

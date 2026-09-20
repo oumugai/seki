@@ -1,6 +1,6 @@
 [package]
 name = "seki"
-version = "0.10.1"
+version = "0.10.2"
 edition = "2021"
 rust-version = "1.70"
 description = "A set-theory based theorem prover and programming language"

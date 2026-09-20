@@ -136,6 +136,12 @@ pub enum Cert {
     /// The goal's conclusion is one of the hypotheses it already assumes.
     Assumption,
 
+    /// A conjunctive conclusion, proved conjunct by conjunct.
+    ///
+    /// The kernel splits the goal itself and pairs the parts up in order,
+    /// so a certificate cannot prove two easy conjuncts and call it three.
+    AndIntro { parts: Vec<Cert> },
+
     /// *Modus ponens.*  Instantiate `lemma` with `substs`, discharge each
     /// of its premises, and read off its conclusion as the goal.
     ///
@@ -383,6 +389,7 @@ impl Checker<'_, '_> {
             }
             Cert::Cite { name } => self.check_cite(prop, name),
             Cert::Assumption => self.check_assumption(prop),
+            Cert::AndIntro { parts } => self.check_and_intro(prop, parts),
             Cert::Apply { lemma, substs, premises } => {
                 self.check_apply(prop, lemma, substs, premises)
             }
@@ -742,7 +749,8 @@ impl Checker<'_, '_> {
                     ));
                 }
                 self.same_relation(gl, gr, lhs, rhs)?;
-                let available = goal_hypotheses(prop);
+                let mut available = goal_hypotheses(prop);
+                available.extend(domain_hypotheses(prop, self.ctx, &self.env));
                 let mut acc = Polynomial::zero();
                 for (h, lambda) in used {
                     if !available.iter().any(|a| crate::ast::alpha_equiv(a, h)) {
@@ -776,8 +784,11 @@ impl Checker<'_, '_> {
                 if slack.sign() < 0 {
                     return err("the slack of a Farkas certificate must be non-negative");
                 }
-                // Each cited hypothesis must really be assumed by the goal.
-                let available = goal_hypotheses(prop);
+                // Each cited hypothesis must really be assumed by the goal —
+                // either written as a premise, or imposed by a binder's
+                // domain.
+                let mut available = goal_hypotheses(prop);
+                available.extend(domain_hypotheses(prop, self.ctx, &self.env));
                 let mut acc = Polynomial::from_rat(*slack);
                 let mut strict_available = false;
                 for (h, strict, lambda) in used {
@@ -1071,6 +1082,30 @@ impl Checker<'_, '_> {
                     .join(", ")
             }
         ))
+    }
+
+    /// A conjunctive conclusion.
+    fn check_and_intro(&self, prop: &Expr, parts: &[Cert]) -> KResult<Verdict> {
+        let (binders, inner) = crate::rewrite::peel_binders(prop);
+        let (concl, hyps) = split_implications(inner);
+        let mut conjuncts = Vec::new();
+        flatten_conjuncts(&concl, &mut conjuncts);
+        if conjuncts.len() != parts.len() {
+            return err(format!(
+                "the goal's conclusion has {} conjunct(s) but the certificate proves {}",
+                conjuncts.len(),
+                parts.len()
+            ));
+        }
+        let mut verdict = Verdict::sound();
+        for (c, cert) in conjuncts.iter().zip(parts) {
+            let sub = crate::rewrite::rebuild_binders(
+                &binders,
+                under_hypotheses(&hyps, (*c).clone()),
+            );
+            verdict = verdict.merge(self.check(&sub, cert)?);
+        }
+        Ok(verdict)
     }
 
     /// Modus ponens against an accepted theorem or axiom.
@@ -1409,6 +1444,37 @@ fn add_hypothesis(prop: &Expr, fact: Expr) -> Expr {
     crate::rewrite::rebuild_binders(&binders, extended)
 }
 
+/// The constraints a goal's own binders impose on their variables.
+///
+/// `forall x in {y in Real | 0 <= y and y <= 1}, P(x)` may use
+/// `0 <= x and x <= 1` freely: every member of a comprehension satisfies its
+/// predicate, by definition of the set.  Without this an interval
+/// refinement type — the most ordinary kind there is — states its
+/// constraint in a place no tactic reads, and its proof obligation looks
+/// unprovable.
+///
+/// Used by `crate::prover` to prove and by the kernel to check, so that the
+/// two agree on what a goal assumes.
+pub fn domain_hypotheses(prop: &Expr, ctx: &EvalCtx, env: &Env) -> Vec<Expr> {
+    let mut out = Vec::new();
+    let mut cur = prop;
+    while let Expr::Forall { var, domain, body } = cur {
+        // A domain that mentions an enclosing binder will not evaluate
+        // here; skipping it only loses information, never adds any.
+        if let Ok(Value::Set(s)) = ctx.eval(domain, env) {
+            if let SetVal::Comp { var: cv, pred, .. } = &*s {
+                let here = Expr::Var { name: var.clone(), line: 0, col: 0 };
+                let instantiated = subst(pred, cv, &here);
+                let mut parts = Vec::new();
+                flatten_conjuncts(&instantiated, &mut parts);
+                out.extend(parts.into_iter().cloned());
+            }
+        }
+        cur = body;
+    }
+    out
+}
+
 /// Peel `(not P) or Q` / `P -> Q` chains into the final conclusion and the
 /// premises collected along the way.
 fn split_implications(body: &Expr) -> (Expr, Vec<Expr>) {
@@ -1536,6 +1602,16 @@ impl Cert {
             }
             Cert::Assumption => {
                 out.push_str(&format!("{}this is one of the hypotheses in scope\n", pad))
+            }
+            Cert::AndIntro { parts } => {
+                out.push_str(&format!(
+                    "{}each of the {} conjuncts:\n",
+                    pad,
+                    parts.len()
+                ));
+                for p in parts {
+                    p.render_into(out, depth + 1);
+                }
             }
             Cert::Apply { lemma, substs, premises } => {
                 let inst = if substs.is_empty() {
