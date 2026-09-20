@@ -1224,30 +1224,6 @@ impl Checker<'_, '_> {
         ))
     }
 
-    /// Turn `a >= b` / `a > b` (and the flipped forms) into the polynomial
-    /// that the hypothesis asserts is non-negative (resp. positive).
-    fn nonneg_form(&self, h: &Expr, strict: bool) -> KResult<Polynomial> {
-        let (op, l, r) = match h {
-            Expr::BinOp(op, l, r) if is_relation(op) => (op, l.as_ref(), r.as_ref()),
-            other => return err(format!("`{}` is not a relation", other)),
-        };
-        let (a, b) = match op {
-            BinOp::Ge | BinOp::Gt => (l, r),
-            BinOp::Le | BinOp::Lt => (r, l),
-            BinOp::Eq => (l, r),
-            other => return err(format!("`{}` cannot be used as a bound", op_name(other))),
-        };
-        let claimed_strict = matches!(op, BinOp::Gt | BinOp::Lt);
-        if strict != claimed_strict {
-            return err(format!(
-                "`{}` is recorded as {}strict but is {}strict",
-                h,
-                if strict { "" } else { "non-" },
-                if claimed_strict { "" } else { "non-" }
-            ));
-        }
-        self.difference(a, b)
-    }
 
     // -- structural rules ---------------------------------------------------
 
