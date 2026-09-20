@@ -1,0 +1,42 @@
+-- ===========================================================
+-- 系全体の安全性 — 証明・計算・仮定の合成
+--
+-- ここにある主張は環境についての仮定に**乗っている**。
+-- `--audit` が結論ごとにどの仮定に乗っているか、確度の下界はいくつかを
+-- 示すので、審査員は「何を信じればこの結論が成り立つか」を読める。
+-- ===========================================================
+
+import "environment.seki"
+import "sensor.seki"
+import "controller.seki"
+
+-- ----- 仮定に乗る主張 --------------------------------------------------
+
+-- 表示温度は真の温度から 0.5°C 以内 (センサドリフトの仮定より)。
+theorem displayed_temperature_is_trustworthy
+  : driftC <= 0.5
+  := by have d : driftC <= 0.5 := by apply sensor_drift_bounded
+     then algebra
+
+-- 外乱を含めても、必要な制御量は定格 (2.0) を超えない。
+theorem control_effort_within_rating
+  : forall kp in Real, forall err in Real,
+      (kp >= 0.0) and (kp <= 2.0) and (err >= 0.0) and (err <= 1.0)
+      => (kp * err + disturbC) <= 4.0
+  := by have e : (disturbC >= 0.0) and (disturbC <= 2.0)
+          := by apply disturbance_bounded
+     then algebra
+
+-- 起動温度の仮定と合わせて、初回の誤差は 10°C 以内。
+theorem startup_error_is_bounded
+  : (startupC - 20.0 <= 10.0) and (20.0 - startupC <= 5.0)
+  := by have s : (startupC >= 15.0) and (startupC <= 30.0)
+          := by apply startup_range
+     then algebra
+
+-- ----- 仮定に乗らない主張 ----------------------------------------------
+-- 純粋に制御則の性質なので、環境について何も仮定しない。
+
+theorem actuator_never_saturates_upward
+  : forall kp in Real, forall err in Real, control kp err <= 1.0
+  := by unfold control then unfold clampU then algebra

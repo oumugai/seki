@@ -1,0 +1,33 @@
+-- ===========================================================
+-- プラント — 初期状態の「範囲全体」からの到達可能性
+--
+-- `interval lo hi` は lo と hi の間の**すべての実数**を表す値。
+-- 演算は範囲を丸ごと運び、比較は範囲全体が決めたときだけ答える。
+-- したがってここで証明されることは、範囲内のどの初期状態についても
+-- 成り立つ。
+-- ===========================================================
+
+def absR := \r -> if r < 0.0 then 0.0 - r else r
+
+-- 1次系の離散化: 目標 20°C へ時定数つきで近づく。
+def plantStep := \x -> 0.9 * x + 2.0
+def evolve := \n x -> if n <= 0 then x else evolve (n - 1) (plantStep x)
+
+-- 起動時の温度は 15〜30°C のどこか (environment.seki の仮定より)。
+def startup := interval 15.0 30.0
+
+-- **範囲内のどの初期温度からでも**、10 ステップ後は 25°C を超えない。
+theorem never_overheats_in_10_steps
+  : evolve 10 startup <= 25.0 := by eval
+
+-- 50 ステップ後には目標の 20°C の ±0.1 に入る。
+theorem settles_near_setpoint
+  : absR (evolve 50 startup - 20.0) < 0.1 := by eval
+
+-- 下限も守る: 凍結域 (0°C) には決して入らない。
+theorem never_freezes
+  : evolve 10 startup >= 0.0 := by eval
+
+-- 全区間を通じて定格内にとどまる (最初の 5 ステップ)。
+theorem stays_in_band
+  : (evolve 5 startup >= 14.0) and (evolve 5 startup <= 26.0) := by eval

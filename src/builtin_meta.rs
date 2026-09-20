@@ -194,6 +194,17 @@ pub fn builtin_meta(name: &str) -> Option<BuiltinMeta> {
             properties: &["total"],
             doc: "Round to nearest integer (half away from zero).",
         },
+        "interval" => BuiltinMeta {
+            name: "interval",
+            signature: "interval : Real -> Real -> Real",
+            domain: "Real, Real",
+            codomain: "Real",
+            effect: Effect::PartialPure,
+            properties: &["encloses", "outward-rounded"],
+            doc: "A value standing for every real between the two bounds. \
+                  Arithmetic carries the whole range; a comparison answers \
+                  only when the range settles it. Errors if low > high.",
+        },
         "sqrt" => BuiltinMeta {
             name: "sqrt",
             signature: "sqrt : {x in Real | x >= 0} -> Real",
@@ -1219,7 +1230,7 @@ pub fn builtin_meta(name: &str) -> Option<BuiltinMeta> {
 pub fn all_documented_names() -> &'static [&'static str] {
     &[
         "fst", "snd", "pair", "card", "List", "Tree", "IO",
-        "intToReal", "floor", "ceil", "round", "sqrt", "pow",
+        "intToReal", "floor", "ceil", "round", "sqrt", "pow", "interval",
         "bitAnd", "bitOr", "bitXor", "bitNot", "bitShl", "bitShr", "popcount",
         "strLen", "strConcat", "strIndexOf", "strReplace", "strSplit",
         "substring", "strToUpper", "strToLower", "strTrim", "strChars",

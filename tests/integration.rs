@@ -4008,3 +4008,120 @@ fn re_evaluating_a_definition_never_re_runs_its_effects() {
                  theorem u : (readRef c2) == 3.0 := by eval\n");
     assert_eq!(g.theorem_trust["u"], TrustLevel::Approximate);
 }
+
+// ---------------------------------------------------------------------------
+// Interval values in the source, and the project-level assurance report.
+//
+// These are what make "the audit is the deliverable" real: a claim can be
+// about a *set* of initial states, and a report can be about a system
+// rather than a file.
+
+#[test]
+fn a_claim_can_be_about_a_whole_range_of_inputs() {
+    // `interval 4.0 6.0` stands for every real in the band.  Ten steps of
+    // a contraction, carried out on the whole range at once, is a
+    // reachability proof — not a simulation from one point.
+    let g = run("def absR := \\r -> if r < 0.0 then 0.0 - r else r\n\
+                 def step := \\x -> 0.9 * x + 0.1\n\
+                 def run_ := \\n x -> if n <= 0 then x else run_ (n - 1) (step x)\n\
+                 def x0 := interval 4.0 6.0\n\
+                 theorem reach : absR (run_ 50 x0 - 1.0) < 0.05 := by eval\n");
+    assert_eq!(g.theorem_trust["reach"], TrustLevel::Sound);
+}
+
+#[test]
+fn a_range_claim_that_some_member_breaks_is_refused() {
+    // After three steps the band is [3.187, 4.645]; a bound of 4.4 holds
+    // for the low end and not the high one, so it is not proved.
+    assert!(run_err(
+        "def absR := \\r -> if r < 0.0 then 0.0 - r else r\n\
+         def step := \\x -> 0.9 * x + 0.1\n\
+         def run_ := \\n x -> if n <= 0 then x else run_ (n - 1) (step x)\n\
+         def x0 := interval 4.0 6.0\n\
+         theorem bad : absR (run_ 3 x0) < 4.4 := by eval\n"
+    )
+    .is_proof_error());
+}
+
+#[test]
+fn an_interval_with_its_ends_the_wrong_way_round_is_rejected() {
+    // `interval 6.0 4.0` names no set of reals, so it is an error rather
+    // than an empty or silently swapped band.
+    let err = run_err("def x := interval 6.0 4.0\ntheorem t : x > 0.0 := by eval\n");
+    assert!(
+        err.message().contains("interval"),
+        "should say which value is wrong: {}",
+        err.message()
+    );
+}
+
+#[test]
+fn the_project_audit_reports_a_system_as_one_argument() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--audit")
+        .arg("examples/assurance")
+        .output()
+        .expect("run seki --audit on a directory");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Claims that are not kernel proofs come first — that is the list a
+    // reviewer works through.
+    assert!(
+        stdout.contains("claims resting on something other than a kernel proof"),
+        "{}",
+        stdout
+    );
+    // Each of them says what its assumptions warrant.
+    assert!(stdout.contains("confidence >= 4/5"), "{}", stdout);
+    // And every assumption is listed with where it came from.
+    assert!(stdout.contains("assumed without proof"), "{}", stdout);
+    assert!(stdout.contains("SOP-114"), "{}", stdout);
+    // A project with anything unproved fails, so a build can gate on it.
+    assert!(!out.status.success(), "{}", stdout);
+}
+
+#[test]
+fn a_project_of_only_proofs_passes() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--audit")
+        .arg("lib/control")
+        .output()
+        .expect("run seki --audit on a directory");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("every claim in this project was re-established by the kernel"),
+        "{}",
+        stdout
+    );
+    assert!(out.status.success(), "{}", stdout);
+}
+
+#[test]
+fn a_claim_is_counted_where_it_is_declared() {
+    // Importing a module registers its theorems too; counting them again
+    // in every importer would make the report claim more than the project
+    // does.  `examples/assurance` has 14 claims across 5 files.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--audit")
+        .arg("examples/assurance")
+        .output()
+        .expect("run seki --audit on a directory");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("14 claims across 5 file(s)"), "{}", stdout);
+}
+
+#[test]
+fn a_file_that_does_not_run_is_a_finding_not_a_gap() {
+    let dir = std::env::temp_dir().join("seki_audit_broken");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(dir.join("a.seki"), "theorem bad : 1 == 2 := by eval\n").expect("write");
+    std::fs::write(dir.join("b.seki"), "theorem good : 1 == 1 := by eval\n").expect("write");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--audit")
+        .arg(&dir)
+        .output()
+        .expect("run seki --audit on a directory");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("files that did not run"), "{}", stdout);
+    assert!(stdout.contains("unrunnable:  1"), "{}", stdout);
+    assert!(!out.status.success(), "{}", stdout);
+}

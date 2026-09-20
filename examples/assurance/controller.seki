@@ -1,0 +1,39 @@
+-- ===========================================================
+-- 制御則 — パラメータの箱についての証明
+--
+-- 「ゲインを許された範囲のどこに設定しても」成り立つこと。
+-- 代表値での確認ではなく、範囲全体の証明。
+-- ===========================================================
+
+def absR := \r -> if r < 0.0 then 0.0 - r else r
+
+-- 出力を [0, 1] に飽和させた比例制御。
+def clampU := \u -> if u < 0.0 then 0.0 else if u > 1.0 then 1.0 else u
+def control := \kp err -> clampU (kp * err)
+
+-- 出力は常にアクチュエータの定格内。
+theorem output_within_actuator_limits
+  : forall kp in Real, forall err in Real,
+      (control kp err >= 0.0) and (control kp err <= 1.0)
+  := by unfold control then unfold clampU then algebra
+
+-- ゲインが許容範囲なら、1ステップの制御量は誤差の 2 倍を超えない。
+theorem gain_envelope
+  : forall kp in Real, forall err in Real,
+      (kp >= 0.0) and (kp <= 2.0) and (err >= 0.0) and (err <= 1.0)
+      => kp * err <= 2.0
+  := by algebra
+
+-- 安定条件: ステップ幅 h とゲイン L の積が 1 以下なら誤差は増幅しない。
+theorem step_does_not_amplify
+  : forall e in Real, forall h in Real, forall bigL in Real,
+      (e >= 0.0) and (h >= 0.0) and (bigL >= 0.0) and (h * bigL <= 1.0)
+      => (h * bigL) * e <= e
+  := by algebra
+
+-- 縮小率が 1 未満なら定常誤差は 0 しかありえない。
+theorem no_steady_state_error
+  : forall e in Real, forall k in Real,
+      (k >= 0.0) and (k < 1.0) and (absR e <= k * absR e)
+      => e == 0.0
+  := by unfold absR then algebra

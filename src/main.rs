@@ -13,6 +13,8 @@ use seki::session::Session;
 use seki::typecheck::check_shape;
 use seki::value::{Env, Globals, SetVal, Value};
 use seki::{parse_program, parser, SekiError};
+use seki::trust::TrustLevel;
+use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -111,8 +113,11 @@ fn real_main() -> ExitCode {
         }
         "--audit" => {
             if args.len() < 2 {
-                eprintln!("--audit requires a file");
+                eprintln!("--audit requires a file or directory");
                 return ExitCode::from(2);
+            }
+            if Path::new(&args[1]).is_dir() {
+                return audit_project(&args[1], extra_libs);
             }
             audit_file(&args[1], extra_libs, user_args)
         }
@@ -211,6 +216,7 @@ fn print_help() {
             seki -e <expr> [-- args...]   evaluate one expression\n  \
             seki -I <dir>                 add <dir> to the lib path (repeatable)\n  \
             seki --audit FILE             run FILE and report how each theorem was verified\n  \
+            seki --audit DIR              audit every .seki under DIR as one assurance report\n  \
             seki --proof FILE NAME        print the proof term the kernel accepted for NAME\n  \
             seki --min-confidence R ...   reject conclusions their assumptions warrant less than R\n  \
             seki --strict ...             reject theorems that are only sampled or axiom-dependent (or set SEKI_STRICT)\n  \
@@ -447,6 +453,258 @@ fn audit_file(path: &str, extra_libs: Vec<PathBuf>, prog_args: Vec<String>) -> E
         println!("\nevery claim in this file was re-established by the kernel.");
     }
     ExitCode::SUCCESS
+}
+
+/// Audit every `.seki` file under `dir` as one report.
+///
+/// A single file's audit answers "how was this theorem verified".  A system
+/// is not one file, and the question a reviewer actually asks is about the
+/// whole of it: what does this system claim, and on what grounds?  That
+/// report — every claim sorted by how strong its evidence is, and every
+/// assumption with its source — is the deliverable, not the program.
+///
+/// Files are audited independently, which is what makes the tally
+/// meaningful: a claim is counted where it is stated.  A file that fails to
+/// run is itself a finding and is listed rather than skipped silently.
+fn audit_project(dir: &str, extra_libs: Vec<PathBuf>) -> ExitCode {
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_seki_files(Path::new(dir), &mut files);
+    files.sort();
+    if files.is_empty() {
+        eprintln!("no .seki files under {}", dir);
+        return ExitCode::from(2);
+    }
+
+    // `(level, name, file, detail)` for every claim, plus the assumptions.
+    // `(level, name, file, how it was verified, what its assumptions warrant)`
+    let mut claims: Vec<(TrustLevel, String, String, String, Option<String>)> =
+        Vec::new();
+    let mut assumptions: Vec<(String, String, String)> = Vec::new();
+    let mut broken: Vec<(String, String)> = Vec::new();
+    let mut per_file: Vec<(String, BTreeMap<TrustLevel, usize>)> = Vec::new();
+
+    for path in &files {
+        let rel = path.strip_prefix(dir).unwrap_or(path).display().to_string();
+        let mut state = Session::new();
+        for p in &extra_libs {
+            state.lib_paths.insert(0, p.clone());
+        }
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                state.base_dirs.clear();
+                state.base_dirs.push(parent.to_path_buf());
+            }
+        }
+        let src = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                broken.push((rel, format!("cannot read: {}", e)));
+                continue;
+            }
+        };
+        if let Err(e) = state.run_source(&src, true) {
+            broken.push((rel, first_line(&format!("{}", e))));
+            continue;
+        }
+        // Only what this file *declares*.  Importing a module registers
+        // its theorems too, and counting them again in every importer
+        // would make the tally say more than the project claims.
+        let (declared, declared_axioms) = declared_names(&src);
+        let mut counts: BTreeMap<TrustLevel, usize> = BTreeMap::new();
+        let mut names: Vec<&String> = state
+            .globals
+            .theorem_trust
+            .keys()
+            .filter(|n| declared.contains(*n))
+            .collect();
+        names.sort();
+        for name in names {
+            let trust = state.globals.theorem_trust[name];
+            *counts.entry(trust).or_insert(0) += 1;
+            let detail = match state.globals.theorem_verdicts.get(name) {
+                Some(v) if v.fully_checked && v.assumptions.is_empty() => {
+                    "kernel-checked from primitives".to_string()
+                }
+                Some(v) => {
+                    let mut parts = v.assumptions.clone();
+                    parts.sort();
+                    parts.dedup();
+                    first_line(&parts.join("; "))
+                }
+                None => "no verdict recorded".to_string(),
+            };
+            // What the assumptions behind it warrant, when any of them
+            // carries a confidence.  This is the number a reviewer acts on.
+            let warrant = state.globals.theorem_verdicts.get(name).and_then(|v| {
+                let c = seki::confidence::of_verdict(v, &state.globals);
+                match c {
+                    seki::confidence::Confidence::Unqualified => None,
+                    other => Some(other.describe()),
+                }
+            });
+            claims.push((trust, name.clone(), rel.clone(), detail, warrant));
+        }
+        for (name, prop) in &state.globals.axiom_props {
+            let _ = prop;
+            if !declared_axioms.contains(name) {
+                continue;
+            }
+            let confidence = state
+                .globals
+                .axiom_confidence
+                .get(name)
+                .map(|c| format!("{}", c))
+                .unwrap_or_else(|| "asserted outright".to_string());
+            let source = state
+                .globals
+                .axiom_provenance
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
+            if !assumptions.iter().any(|(n, _, _)| n == name) {
+                assumptions.push((name.clone(), confidence, source));
+            }
+        }
+        per_file.push((rel, counts));
+    }
+
+    // ---- the report ----------------------------------------------------
+    // Built into a string and printed at the end: the audited programs run
+    // for real, and anything they print would otherwise land in the middle
+    // of the report.  The report is the artifact; it has to be contiguous.
+    let mut out = String::new();
+    use std::fmt::Write as _;
+    let _ = writeln!(out, "assurance report for {}", dir);
+    let _ = writeln!(out, "{}", "=".repeat(78));
+    out.push('\n');
+
+    // Everything that is *not* fully proved, first: that is the list a
+    // reviewer works through, and burying it under the good news would be
+    // the wrong way round.
+    let mut weak: Vec<&(TrustLevel, String, String, String, Option<String>)> =
+        claims.iter().filter(|(t, ..)| !t.is_sound()).collect();
+    weak.sort_by_key(|(t, n, ..)| (std::cmp::Reverse(*t), n.clone()));
+    if weak.is_empty() {
+        let _ = writeln!(out, "every claim in this project was re-established by the kernel.");
+    } else {
+        let _ = writeln!(out, "claims resting on something other than a kernel proof");
+        let _ = writeln!(out, "{}", "-".repeat(78));
+        for (trust, name, file, detail, warrant) in &weak {
+            let _ = writeln!(out, "  {:<11} {}  ({})", format!("{}", trust), name, file);
+            let _ = writeln!(out, "              {}", detail);
+            if let Some(w) = warrant {
+                let _ = writeln!(out, "              {}", w);
+            }
+        }
+    }
+    out.push('\n');
+
+    if !assumptions.is_empty() {
+        assumptions.sort();
+        let _ = writeln!(out, "assumed without proof");
+        let _ = writeln!(out, "{}", "-".repeat(78));
+        for (name, confidence, source) in &assumptions {
+            if source.is_empty() {
+                let _ = writeln!(out, "  {:<30} {}", name, confidence);
+            } else {
+                let _ = writeln!(out, "  {:<30} {} — {}", name, confidence, source);
+            }
+        }
+        out.push('\n');
+    }
+
+    if !broken.is_empty() {
+        let _ = writeln!(out, "files that did not run");
+        let _ = writeln!(out, "{}", "-".repeat(78));
+        for (file, why) in &broken {
+            let _ = writeln!(out, "  {:<30} {}", file, why);
+        }
+        out.push('\n');
+    }
+
+    let _ = writeln!(out, "by file");
+    let _ = writeln!(out, "{}", "-".repeat(78));
+    for (file, counts) in &per_file {
+        let summary: Vec<String> = counts
+            .iter()
+            .map(|(l, n)| format!("{} {}", n, l))
+            .collect();
+        let _ = writeln!(out, 
+            "  {:<44} {}",
+            file,
+            if summary.is_empty() {
+                "no claims".to_string()
+            } else {
+                summary.join(", ")
+            }
+        );
+    }
+    out.push('\n');
+
+    let mut totals: BTreeMap<TrustLevel, usize> = BTreeMap::new();
+    for (t, ..) in &claims {
+        *totals.entry(*t).or_insert(0) += 1;
+    }
+    let _ = writeln!(out, "{}", "=".repeat(78));
+    let _ = writeln!(out, 
+        "{} claims across {} file(s), {} assumption(s)",
+        claims.len(),
+        files.len(),
+        assumptions.len()
+    );
+    for (level, n) in &totals {
+        let _ = writeln!(out, "  {:<12} {}", format!("{}:", level), n);
+    }
+    if !broken.is_empty() {
+        let _ = writeln!(out, "  {:<12} {}", "unrunnable:", broken.len());
+    }
+
+    println!();
+    print!("{}", out);
+
+    // A project with nothing weak and nothing broken is the only clean
+    // outcome; anything else should fail a build that asked for this.
+    if weak.is_empty() && broken.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// The theorem and axiom names a file declares itself, as opposed to the
+/// ones it inherits by importing.
+fn declared_names(src: &str) -> (Vec<String>, Vec<String>) {
+    let mut theorems = Vec::new();
+    let mut axioms = Vec::new();
+    if let Ok(decls) = parse_program(src) {
+        for ld in decls {
+            match ld.decl {
+                Decl::Theorem { name, .. } => theorems.push(name),
+                Decl::Axiom { name, .. } => axioms.push(name),
+                _ => {}
+            }
+        }
+    }
+    (theorems, axioms)
+}
+
+fn collect_seki_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_seki_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "seki") {
+            out.push(path);
+        }
+    }
+}
+
+/// Error messages carry a source excerpt; a table wants the first line.
+fn first_line(s: &str) -> String {
+    s.lines().next().unwrap_or("").trim().to_string()
 }
 
 /// Print the proof term the kernel accepted for one theorem.

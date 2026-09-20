@@ -238,7 +238,26 @@ impl Session {
             let ctx = EvalCtx::new(&self.globals);
             let env = Env::new();
             // The tactic searches, and hands back a proof term.
-            let cert = Prover::new(&ctx).certify(prop, proof, &env)?;
+            let cert = Prover::new(&ctx).certify(prop, proof, &env).map_err(|e| {
+                // An enclosure too wide to settle the claim is a *proof*
+                // failure, not a crash: the computation ran fine, and what
+                // it produced neither establishes the claim nor refutes it.
+                if e.message().contains(crate::interval::UNDECIDED) {
+                    return SekiError::Proof(format!(
+                        "the guaranteed enclosure does not settle this claim \
+                         ({}) — it straddles the bound, so it proves neither \
+                         that the claim holds nor that it fails",
+                        e.message()
+                            .replace(crate::interval::UNDECIDED, "")
+                            .trim_start_matches([':', ' '])
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                    ));
+                }
+                e
+            })?;
             // The kernel then re-establishes that proof term from
             // primitives, in a context that cannot be talked into sampling
             // an infinite domain.  Nothing here calls back into a tactic.

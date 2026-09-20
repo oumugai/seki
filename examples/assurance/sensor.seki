@@ -1,0 +1,24 @@
+-- ===========================================================
+-- センサ較正 — 全入力についての証明
+--
+-- 「どんな生値が来ても出力は仕様の範囲に入る」。
+-- これは入力の集合全体についての主張で、テストでは言えない。
+-- ===========================================================
+
+def clampS := \lo hi x -> if x < lo then lo else if x > hi then hi else x
+
+-- 生値 → 摂氏。飽和つき。
+def calibrate := \raw -> clampS (0.0 - 40.0) 125.0 (raw * 0.0625 - 40.0)
+
+theorem calibration_stays_in_spec
+  : forall raw in Real,
+      (calibrate raw >= 0.0 - 40.0) and (calibrate raw <= 125.0)
+  := by unfold calibrate then unfold clampS then algebra
+
+-- 飽和は範囲内では恒等 — 正常域で値を歪めない。
+theorem calibration_is_faithful_in_band
+  : forall raw in Real,
+      ((raw * 0.0625 - 40.0) >= (0.0 - 40.0))
+        and ((raw * 0.0625 - 40.0) <= 125.0)
+      => calibrate raw == raw * 0.0625 - 40.0
+  := by unfold calibrate then unfold clampS then algebra

@@ -340,7 +340,7 @@ impl<'a> EvalCtx<'a> {
                     // or the other, so the hull of the two encloses it.
                     // `absR x` with `x` straddling zero is exactly this,
                     // and it is what every tolerance check goes through.
-                    Err(e) if self.interval_mode && is_undecided(&e) => {
+                    Err(e) if is_undecided(&e) => {
                         let t = self.eval(then_branch, env)?;
                         let f = self.eval(else_branch, env)?;
                         return hull_values(&t, &f);
@@ -665,7 +665,7 @@ impl<'a> EvalCtx<'a> {
                         // loop has to handle it too — `absR` is a one-liner
                         // whose `if` is its whole body, so it comes through
                         // here rather than through `eval`.
-                        Err(e) if self.interval_mode && is_undecided(&e) => {
+                        Err(e) if is_undecided(&e) => {
                             let t = self.eval(then_branch, &env_local)?;
                             let f = self.eval(else_branch, &env_local)?;
                             return Ok(EvalOutcome::Done(hull_values(&t, &f)?));
@@ -1443,6 +1443,12 @@ fn as_interval(v: &Value) -> Option<crate::interval::Interval> {
     match v {
         Value::Interval(i) => Some(*i),
         Value::Int(n) => Some(crate::interval::Interval::from_int(*n as i128)),
+        // A literal sitting next to an interval in ordinary evaluation —
+        // `0.9 * x` where `x` is a band.  Read as the decimal it is.  The
+        // kernel does not rely on this: it re-evaluates from source with
+        // every literal lifted, and refuses a bare `f64` outright.
+        Value::Real(r) => crate::algebra::decimal_to_rat(*r)
+            .map(crate::interval::Interval::exact),
         _ => None,
     }
 }
@@ -2248,6 +2254,36 @@ pub fn make_builtin_prelude() -> Globals {
     }
     // `abs` is now defined in `stdlib.seki` for both Int and Real domains
     // (one definition each).
+    /// `interval lo hi` — a value that stands for *every* real between
+    /// `lo` and `hi`.
+    ///
+    /// This is how a program says "the sensor reads somewhere in this
+    /// band" or "the initial state is anywhere in this box".  Arithmetic on
+    /// it carries the whole range forward with outward rounding, and a
+    /// comparison answers only when the range settles it — so a claim
+    /// proved about an interval is proved about every value in it.
+    fn b_interval(args: &[Value]) -> Result<Value, String> {
+        let num = |v: &Value| -> Option<crate::algebra::Rat> {
+            match v {
+                Value::Int(n) => Some(crate::algebra::Rat::from_int(*n as i128)),
+                Value::Real(r) => crate::algebra::decimal_to_rat(*r),
+                Value::Interval(i) if i.is_point() => Some(i.lo),
+                _ => None,
+            }
+        };
+        let (Some(lo), Some(hi)) = (num(&args[0]), num(&args[1])) else {
+            return Err(format!(
+                "interval: expected two numbers, got {} and {}",
+                args[0].type_name(),
+                args[1].type_name()
+            ));
+        };
+        if hi.sub(lo).sign() < 0 {
+            return Err(format!("interval: the low end {} is above the high end {}", lo, hi));
+        }
+        Ok(Value::Interval(crate::interval::Interval::new(lo, hi)))
+    }
+
     fn b_sqrt(args: &[Value]) -> Result<Value, String> {
         // In interval mode the argument is an enclosure, and the answer has
         // to be one too — verified by squaring, not taken from `f64`.
@@ -4162,6 +4198,7 @@ pub fn make_builtin_prelude() -> Globals {
     g.defs.insert("ceil".into(), bi("ceil", 1, b_ceil));
     g.defs.insert("round".into(), bi("round", 1, b_round));
     g.defs.insert("sqrt".into(), bi("sqrt", 1, b_sqrt));
+    g.defs.insert("interval".into(), bi("interval", 2, b_interval));
     g.defs.insert("pow".into(), bi("pow", 2, b_pow));
     // Transcendental Real builtins
     g.defs.insert("exp".into(), bi("exp", 1, b_exp));
