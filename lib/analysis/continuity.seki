@@ -1,0 +1,102 @@
+-- ===========================================================
+-- lib/analysis/continuity.seki — 連続性を演繹で建てる
+--
+-- `lib/analysis/axioms.seki` の定義 (`isContinuousAt`, `isLimitOf`,
+-- `isLipschitzWith`) について、具体的な関数の連続性を **証明する**。
+--
+-- 鍵は `by witness d := <eps の式>` — ε に対する δ を実際に差し出す。
+-- カーネルは δ が Real の元であることを構文的に確かめ、残りの義務
+-- (δ を代入した本体) を自分で導出してから検査する。
+-- ===========================================================
+
+import "analysis/axioms.seki"
+
+-- ----- 定数関数 -----
+-- どんな δ でもよい。1 を取る。
+def constF := \x -> 3.0
+
+theorem const_continuous : forall x0 in Real, isContinuousAt constF x0
+  := by unfold isContinuousAt then unfold constF
+     then witness d := 1.0
+     then unfold absR then algebra
+
+-- ----- 恒等関数 -----
+-- δ = ε。
+def idF := \x -> x
+
+theorem id_continuous : forall x0 in Real, isContinuousAt idF x0
+  := by unfold isContinuousAt then unfold idF
+     then witness d := eps
+     then unfold absR then algebra
+
+-- ----- アフィン関数 f x = 2x + 1 -----
+-- |f x - f x0| = 2|x - x0| なので δ = ε/2。
+def affine := \x -> 2.0 * x + 1.0
+
+theorem affine_continuous : forall x0 in Real, isContinuousAt affine x0
+  := by unfold isContinuousAt then unfold affine
+     then witness d := eps / 2.0
+     then unfold absR then algebra
+
+-- ----- 傾き c のアフィン関数 (c は 0 以上に限る) -----
+-- δ = ε/(c+1)。c+1 >= 1 > 0 なので割ってよく、c|x-x0| < c·ε/(c+1) <= ε。
+-- 分母は「0 でないリテラル」ではないが、`eps / (c + 1.0)` の形は
+-- カーネルの構文的な全域性検査を通らないため、ここでは δ = ε を取り
+-- c <= 1 の場合に限って述べる。
+def scaleBy := \c x -> c * x
+
+theorem scale_continuous_on_contraction
+  : forall c in Real, forall x0 in Real,
+      (c >= 0.0) and (c <= 1.0) =>
+        (forall eps in Real, eps > 0.0 =>
+          (exists d in Real, forall x in Real,
+             (d > 0.0) and (absR (x - x0) < d) => absR (scaleBy c x - scaleBy c x0) < eps))
+  := by unfold scaleBy then witness d := eps then unfold absR then algebra
+
+-- ===========================================================
+-- Lipschitz 連続 — 連続性より強い、実際に示しやすい形
+-- ===========================================================
+
+theorem affine_lipschitz : isLipschitzWith affine 2.0
+  := by unfold isLipschitzWith then unfold affine then unfold absR then algebra
+
+theorem id_lipschitz : isLipschitzWith idF 1.0
+  := by unfold isLipschitzWith then unfold idF then unfold absR then algebra
+
+-- 単位区間上の二乗関数は Lipschitz 定数 2 — ε-δ の典型例。
+theorem sq_lipschitz_on_unit
+  : forall x in Real, forall a in Real, forall d in Real,
+      (x >= 0.0) and (x <= 1.0) and (a >= 0.0) and (a <= 1.0) and (d > 0.0)
+        and (absR (x - a) < d)
+      => absR (x * x - a * a) < 2.0 * d
+  := by unfold absR then algebra
+
+-- ===========================================================
+-- 極限
+-- ===========================================================
+
+theorem affine_limit : forall x0 in Real, isLimitOf affine x0 (2.0 * x0 + 1.0)
+  := by unfold isLimitOf then unfold affine
+     then witness d := eps / 2.0
+     then unfold absR then algebra
+
+-- ===========================================================
+-- 微分 — 割らない定義から直接
+-- ===========================================================
+-- f x = 2x + 1 のとき f(x0+h) - f(x0) - 2h = 0 なので、
+-- 左辺は恒等的に 0。どんな δ でもよい。
+
+theorem affine_derivative : forall x0 in Real, hasDerivativeAt affine x0 2.0
+  := by unfold hasDerivativeAt then unfold affine
+     then witness d := 1.0
+     then unfold absR then algebra
+
+theorem id_derivative : forall x0 in Real, hasDerivativeAt idF x0 1.0
+  := by unfold hasDerivativeAt then unfold idF
+     then witness d := 1.0
+     then unfold absR then algebra
+
+theorem const_derivative : forall x0 in Real, hasDerivativeAt constF x0 0.0
+  := by unfold hasDerivativeAt then unfold constF
+     then witness d := 1.0
+     then unfold absR then algebra

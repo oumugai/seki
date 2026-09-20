@@ -749,6 +749,12 @@ impl<'a> Parser<'a> {
                 Ok(Proof::Have { name, prop: Box::new(prop), proof: Box::new(proof) })
             }
             "assumption" => Ok(Proof::Assumption),
+            "witness" => {
+                let var = self.eat_ident("the existential's bound variable")?;
+                self.expect(&Tok::Assign, "':=' in `by witness <var> := <term>`")?;
+                let term = self.parse_expr()?;
+                Ok(Proof::Witness { var, term: Box::new(term) })
+            }
             "simp" => {
                 let lemmas = if matches!(self.peek(), Tok::LBracket) {
                     self.bump();

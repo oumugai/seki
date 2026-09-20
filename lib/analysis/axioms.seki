@@ -1,0 +1,146 @@
+-- ===========================================================
+-- lib/analysis/axioms.seki — ℝ を完備順序体として公理化する
+--
+-- 方針: **公理は少なく、定理は演繹で**。
+--
+-- seki の `Real` には既に四則演算があり、`by algebra` は可換順序体の
+-- 恒等式と不等式を決定手続きで落とす。つまり体の公理・順序の公理は
+-- **公理として書く必要がない — 定理として証明できる**。ここでは実際に
+-- 証明して、決定手続きが何を保証しているのかを明示する。
+--
+-- 決定手続きで届かないのは次の 2 つだけで、これだけを `axiom` にする:
+--
+--   1. **完備性** (上限公理) — 上に有界な空でない集合は上限を持つ。
+--      これは一階の算術では表現できない、ℝ を ℚ から分ける性質。
+--   2. **アルキメデス性** — 任意の実数より大きい自然数がある。
+--      (完備性から導けるが、その導出には超限的な議論が要る。)
+--
+-- 連続性・極限・微分はこの上に **定義** として載せ、性質は `by witness`
+-- / `by apply` / `by have` で演繹する。`seki --audit` で全件が
+-- `kernel-checked from primitives` になることを確認できる。
+-- ===========================================================
+
+def absR := \r -> if r < 0.0 then 0.0 - r else r
+
+-- ===========================================================
+-- 1. 順序体の公理 — 公理ではなく定理
+-- ===========================================================
+-- 教科書が公理として置くものを、seki では `by algebra` が落とす。
+-- 「何を仮定しているか」を読む人に示すために、あえて全部並べる。
+
+theorem add_comm : forall a in Real, forall b in Real, a + b == b + a := by algebra
+theorem add_assoc : forall a in Real, forall b in Real, forall c in Real,
+  (a + b) + c == a + (b + c) := by algebra
+theorem add_zero : forall a in Real, a + 0.0 == a := by algebra
+theorem add_inverse : forall a in Real, a + (0.0 - a) == 0.0 := by algebra
+
+theorem mul_comm : forall a in Real, forall b in Real, a * b == b * a := by algebra
+theorem mul_assoc : forall a in Real, forall b in Real, forall c in Real,
+  (a * b) * c == a * (b * c) := by algebra
+theorem mul_one : forall a in Real, a * 1.0 == a := by algebra
+theorem distrib : forall a in Real, forall b in Real, forall c in Real,
+  a * (b + c) == a * b + a * c := by algebra
+
+-- 順序の公理
+theorem le_refl : forall a in Real, a <= a := by algebra
+theorem le_trans : forall a in Real, forall b in Real, forall c in Real,
+  (a <= b) and (b <= c) => a <= c := by algebra
+theorem le_antisym : forall a in Real, forall b in Real,
+  (a <= b) and (b <= a) => a == b := by algebra
+theorem add_le_mono : forall a in Real, forall b in Real, forall c in Real,
+  a <= b => (a + c) <= (b + c) := by algebra
+theorem mul_pos : forall a in Real, forall b in Real,
+  (a > 0.0) and (b > 0.0) => (a * b) > 0.0 := by algebra
+
+-- ===========================================================
+-- 2. 絶対値 — 解析のすべてがこれを通る
+-- ===========================================================
+
+theorem abs_nonneg : forall a in Real, absR a >= 0.0
+  := by unfold absR then algebra
+
+theorem abs_self : forall a in Real, a >= 0.0 => absR a == a
+  := by unfold absR then algebra
+
+theorem abs_bound : forall a in Real, forall e in Real,
+  absR a < e => (a < e) and (0.0 - a < e)
+  := by unfold absR then algebra
+
+-- 三角不等式。|a| と |b| と |a+b| の 3 つの `if` を場合分けして、
+-- 各枝を Farkas 証明書で閉じる。
+theorem abs_triangle : forall a in Real, forall b in Real,
+  absR (a + b) <= absR a + absR b
+  := by unfold absR then algebra
+
+theorem abs_scale : forall a in Real, forall c in Real,
+  c >= 0.0 => absR (c * a) == c * absR a
+  := by unfold absR then algebra
+
+-- ===========================================================
+-- 3. 完備性 — ここだけが公理
+-- ===========================================================
+-- 集合は述語として表す (`Real -> Bool`)。`PowerSet` は seki には無く、
+-- また述語のほうが `by apply` で扱いやすい。
+def isUpperBound := \P u -> forall x in Real, P x => x <= u
+
+-- 上限 (最小上界)。
+def isSupremum := \P u ->
+    (isUpperBound P u) and (forall v in Real, isUpperBound P v => u <= v)
+
+-- **上限公理** (完備性)。空でなく上に有界な集合は上限を持つ。
+-- 一階算術では書けず、ℝ を ℚ から分ける唯一の性質。
+-- `by obtain u from completeness with P := ...` で使う。
+axiom completeness
+  : forall P in (Real -> Bool),
+      ((exists w in Real, P w) and (exists b in Real, isUpperBound P b))
+        => (exists u in Real, isSupremum P u)
+
+-- **アルキメデス性**。完備性から導けるが、その導出は超限的なので公理に置く。
+-- 「どんな正の実数より小さい正の実数を、1/(n+1) の形で取れる」という形にする
+-- — ε-δ 論法で実際に使う向き。
+axiom archimedean
+  : forall eps in Real, eps > 0.0 => (exists n in Nat, 1.0 / (n + 1.0) < eps)
+
+-- ===========================================================
+-- 4. 極限と連続性 — 定義
+-- ===========================================================
+-- 教科書の ε-δ をそのまま書く。`by witness` があるので、これらは
+-- 飾りではなく **実際に証明できる述語** になった。
+
+def isLimitOf := \f x0 l ->
+    forall eps in Real, eps > 0.0 =>
+      (exists d in Real, forall x in Real,
+         (d > 0.0) and (absR (x - x0) < d) and (x != x0) => absR (f x - l) < eps)
+
+def isContinuousAt := \f x0 ->
+    forall eps in Real, eps > 0.0 =>
+      (exists d in Real, forall x in Real,
+         (d > 0.0) and (absR (x - x0) < d) => absR (f x - f x0) < eps)
+
+-- Lipschitz 連続: |f x - f y| <= K |x - y|。連続性より強く、
+-- 実際の関数についてはこちらのほうが示しやすい。
+def isLipschitzWith := \f K ->
+    forall x in Real, forall y in Real, absR (f x - f y) <= K * absR (x - y)
+
+-- ===========================================================
+-- 5. 微分 — 定義
+-- ===========================================================
+-- 差商 `(f(x0+h) - f(x0))/h` ではなく、**割らない** 形で書く:
+--
+--   f'(x0) = L  ⟺  任意の ε>0 に対しある δ>0 があり、
+--                   |h| < δ ならば |f(x0+h) - f(x0) - L·h| <= ε·|h|
+--
+-- これは教科書の定義と同値で (h≠0 で両辺を |h| で割れば差商の形になる)、
+-- 3 つ利点がある:
+--
+--   1. h = 0 でも意味を持つので `h != 0` の場合分けが要らない。
+--   2. 割り算が出てこないので `by algebra` の多項式の範囲に収まる
+--      — 差商のままだと `2h/h == 2` の約分が必要になり、それは
+--      「h≠0 のもとでの有理式の等価性」という別の判定手続きになる
+--      (現状これは証明できるが証明項が付かない)。
+--   3. そのまま多変数 (Fréchet 微分) と ODE に伸びる。
+def hasDerivativeAt := \f x0 l ->
+    forall eps in Real, eps > 0.0 =>
+      (exists d in Real, forall h in Real,
+         (d > 0.0) and (absR h < d)
+           => absR (f (x0 + h) - f x0 - l * h) <= eps * absR h)

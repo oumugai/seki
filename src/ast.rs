@@ -323,6 +323,24 @@ pub enum Proof {
 
     /// `by assumption` — the goal is one of the hypotheses already in scope.
     Assumption,
+
+    /// `by witness v := <term> then <rest>` — existential *introduction*.
+    ///
+    /// The dual of [`Proof::Obtain`], and the piece analysis could not be
+    /// done without: every epsilon-delta statement is
+    /// `forall eps, eps > 0 => exists delta, ...`, and proving one means
+    /// *exhibiting* delta as a function of eps.  Without this, the textbook
+    /// definitions in `lib/analysis/` could be written down but never used
+    /// in a theorem, which is exactly what their comments used to warn.
+    ///
+    /// Transformer-only: it replaces the bound variable with `term`
+    /// throughout the existential's body and hands the result to the next
+    /// tactic.  The kernel re-derives that obligation itself, so a
+    /// certificate cannot substitute one term and claim another.
+    Witness {
+        var: String,
+        term: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -430,6 +448,7 @@ impl fmt::Display for Proof {
             }
             Proof::ByAuto => f.write_str("by auto"),
             Proof::ByIntros => f.write_str("by intros"),
+            Proof::Witness { var, term } => write!(f, "by witness {} := {}", var, term),
             Proof::ByUnfold(name) => write!(f, "by unfold {}", name),
             Proof::BySimp { lemmas } => {
                 if lemmas.is_empty() {

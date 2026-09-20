@@ -706,6 +706,49 @@ fn negate_condition(c: &Expr) -> Expr {
 
 /// Peel `(not P) or Q` / `P -> Q` chains into the conclusion and the
 /// premises gathered on the way.
+/// Move `forall` binders out of the conclusion of an implication:
+/// `A => forall x in D, P` becomes `forall x in D, A => P`.
+///
+/// Analysis needs this constantly.  `exists delta, forall x, ...` is the
+/// natural way to state continuity, so instantiating the existential leaves
+/// `eps > 0 => forall x in Real, ...` — a shape no closer can reach, since
+/// they peel leading binders and then premises, in that order, and here the
+/// order is the other way round.
+///
+/// The move is the standard prenex law and is sound exactly when the binder
+/// is not free in the premises it jumps over.  Rather than rename to make
+/// that true, a binder that would capture is left where it is: the goal
+/// stays provable by other means, and nothing silently changes meaning.
+pub fn prenex_foralls(prop: &Expr) -> Expr {
+    let (mut binders, inner) = peel_binders(prop);
+    let (mut conclusion, hyps) = peel_premises(&inner);
+    let mut moved = false;
+    while let Expr::Forall { var, domain, body } = conclusion.clone() {
+        let mut free = std::collections::BTreeSet::new();
+        for h in &hyps {
+            crate::unfold::collect_free_var_names(h, &mut free);
+        }
+        if free.contains(&var) || binders.iter().any(|(v, _)| *v == var) {
+            break;
+        }
+        binders.push((var, (*domain).clone()));
+        conclusion = (*body).clone();
+        moved = true;
+    }
+    if !moved {
+        return prop.clone();
+    }
+    let mut goal = prenex_foralls(&conclusion);
+    for h in hyps.iter().rev() {
+        goal = Expr::BinOp(
+            BinOp::Or,
+            Box::new(Expr::UnOp(UnOp::Not, Box::new(h.clone()))),
+            Box::new(goal),
+        );
+    }
+    rebuild_binders(&binders, goal)
+}
+
 pub fn peel_premises(body: &Expr) -> (Expr, Vec<Expr>) {
     let mut premises = Vec::new();
     let mut cur = body.clone();

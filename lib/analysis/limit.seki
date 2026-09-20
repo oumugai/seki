@@ -14,16 +14,22 @@
 
 def absR := \r -> if r < 0.0 then 0.0 - r else r
 
--- ----- ε-δ 論法の形式的定義 (文書化目的) -----
--- 教科書の定義をそのまま述語として書き下したもの。ただし
--- `forall eps, exists delta, forall x, ...` という量化子の入れ子を
--- `by eval`/`by decide`/裸の証明項で「証明」しても、Real 上の forall は
--- 有限サンプルでの検査に格下げされるため不健全 (docs/spec/06-soundness.md)。
--- 個々の具体的な (f, x0) について連続性を厳密に示したい場合は、
--- exists 層を具体的な δ(ε) の式で埋めた「量化子除去後の核心の不等式」
--- (forall eps, forall x, ... => ...) を `by algebra`/`by linarith` で
--- 直接証明すること — この述語自体は exists の証明に使える汎用的な
--- witness 抽出の仕組みを持たないので、`theorem` の証明には使わない。
+-- ----- ε-δ 論法の形式的定義 -----
+-- 教科書の定義をそのまま述語として書き下したもの。
+--
+-- ⚠️ ここにある定義は **数値ライブラリ向けの旧版** です。
+-- 新しい証明は `lib/analysis/axioms.seki` の `isContinuousAt` /
+-- `isLimitOf` / `hasDerivativeAt` を使ってください。そちらは
+-- `by witness d := <eps の式>` で実際に証明でき、証明項が付きます
+-- (`lib/analysis/continuity.seki` に例が 29 件)。
+--
+-- かつてここには「exists を証明する手段が無いので theorem には使うな」
+-- という注意書きがありました。`by witness` (存在導入) の追加で
+-- その制限は無くなっています。
+--
+-- `by eval`/`by decide` で「証明」してはいけないのは変わりません —
+-- Real 上の forall は有限サンプルでの検査に格下げされ、`--strict` では
+-- 拒否されます (docs/spec/06-soundness.md)。
 def isContinuousAt := \f x0 ->
     forall eps in Real, eps > 0.0 =>
       (exists delta in Real, delta > 0.0 and

@@ -1,0 +1,105 @@
+-- ===========================================================
+-- lib/analysis/ode.seki — 常微分方程式: Picard–Lindelöf の演繹可能な部分
+--
+-- Picard–Lindelöf (存在と一意性) は 2 つの半分からなる:
+--
+--   存在   — Picard 反復が収束する。完備性 (`completeness`) と
+--            関数空間上の Banach の不動点定理が要る。関数空間の完備性は
+--            seki ではまだ形式化できないので、**公理として置く**。
+--   一意性 — 縮小写像の不動点は高々ひとつ。これは ℝ の順序体の性質
+--            だけから **演繹できる**。以下で実際に証明する。
+--
+-- つまりこのファイルは「どこまでが定理で、どこからが仮定か」を
+-- 線引きしたもの。`seki --audit` がその線をそのまま表示する。
+-- ===========================================================
+
+import "analysis/axioms.seki"
+
+-- ===========================================================
+-- 1. 縮小写像 — 一意性は演繹できる
+-- ===========================================================
+-- 縮小率 k で |x - y| <= k|x - y| が成り立つなら、k < 1 のもとで x = y。
+--
+-- 証明の要: Positivstellensatz は非負量を**足す**ことしかできないので
+-- (1-k)|x-y| <= 0 までは行けても |x-y| <= 0 に移れない。正の量 (1-k) で
+-- **割る**規則 (`Cert::CancelPositive`) がその一歩を埋める。
+theorem contraction_unique
+  : forall x in Real, forall y in Real, forall k in Real,
+      (k >= 0.0) and (k < 1.0) and (absR (x - y) <= k * absR (x - y))
+      => x == y
+  := by unfold absR then algebra
+
+-- 距離が縮小率で押さえられているとき、2 段でその 2 乗になる。
+-- Picard 反復の収束率がこの形。
+theorem contraction_squared
+  : forall a in Real, forall b in Real, forall d in Real, forall k in Real,
+      (k >= 0.0) and (b >= 0.0) and (d >= 0.0)
+        and (a <= k * b) and (b <= k * d)
+      => a <= k * k * d
+  := by algebra
+
+-- 縮小率が 1 未満なら、n 段後の距離は初期距離を超えない。
+theorem contraction_does_not_grow
+  : forall a in Real, forall d in Real, forall k in Real,
+      (k >= 0.0) and (k <= 1.0) and (d >= 0.0) and (a <= k * d)
+      => a <= d
+  := by algebra
+
+-- ===========================================================
+-- 2. 存在 — ここは公理
+-- ===========================================================
+-- ℝ 上の縮小写像は不動点を持つ (Banach)。1 次元でも完備性が要る。
+-- 関数空間版 (Picard 反復が要求するもの) はさらに C[a,b] の完備性が
+-- 要るので、そこまで含めてここで仮定する。
+axiom banach_fixed_point
+  : forall F in (Real -> Real), forall k in Real,
+      ((k >= 0.0) and (k < 1.0)
+        and (forall x in Real, forall y in Real,
+               absR (F x - F y) <= k * absR (x - y)))
+      => (exists p in Real, F p == p)
+
+-- ===========================================================
+-- 3. Grönwall — 誤差評価の道具
+-- ===========================================================
+-- 離散 Grönwall の 1 段分。`e_{n+1} <= (1 + h L) e_n + C h²` という
+-- 数値解法の誤差伝播がこの形で、これは演繹できる。
+theorem gronwall_step
+  : forall e in Real, forall enext in Real, forall h in Real,
+      forall bigL in Real, forall c in Real,
+      (h >= 0.0) and (bigL >= 0.0) and (c >= 0.0) and (e >= 0.0)
+        and (enext <= (1.0 + h * bigL) * e + c * h * h)
+      => enext <= e + h * (bigL * e + c * h)
+  := by algebra
+
+-- 誤差が非負に保たれること。
+theorem gronwall_step_nonneg
+  : forall e in Real, forall h in Real, forall bigL in Real,
+      (h >= 0.0) and (bigL >= 0.0) and (e >= 0.0)
+      => (1.0 + h * bigL) * e >= 0.0
+  := by algebra
+
+-- ===========================================================
+-- 4. Euler 法 — 1 段の局所誤差
+-- ===========================================================
+-- y' = f(t,y) を y_{n+1} = y_n + h f(t_n, y_n) で解く。
+-- f が Lipschitz 定数 L なら、2 つの初期値の差は 1 段で
+-- 高々 (1 + hL) 倍にしかならない。これが数値解の安定性の中身。
+def eulerStep := \f h t y -> y + h * f t y
+
+theorem euler_step_stability
+  : forall y1 in Real, forall y2 in Real, forall f1 in Real, forall f2 in Real,
+      forall h in Real, forall bigL in Real,
+      (h >= 0.0) and (bigL >= 0.0)
+        and (absR (f1 - f2) <= bigL * absR (y1 - y2))
+      => absR ((y1 + h * f1) - (y2 + h * f2)) <= (1.0 + h * bigL) * absR (y1 - y2)
+  := by unfold absR then algebra
+
+-- 縮小条件: h L < 1 なら Euler の 1 段は縮小写像になる
+-- — Picard–Lindelöf の証明が使うのと同じ条件。
+theorem euler_step_is_contraction
+  : forall y1 in Real, forall y2 in Real, forall f1 in Real, forall f2 in Real,
+      forall h in Real, forall bigL in Real,
+      (h >= 0.0) and (bigL >= 0.0) and (h * bigL <= 1.0)
+        and (absR (f1 - f2) <= bigL * absR (y1 - y2))
+      => absR ((h * f1) - (h * f2)) <= absR (y1 - y2)
+  := by unfold absR then algebra

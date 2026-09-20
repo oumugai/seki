@@ -134,6 +134,19 @@ impl<'a> Prover<'a> {
                 let v = self.ctx.eval(&extended, env)?;
                 require_true(&v).map(|()| Value::Bool(true))
             }
+            Proof::Witness { var, term } => {
+                // Standalone `by witness` (no following `then`): instantiate
+                // and require the result to evaluate to `true`, the same
+                // pattern as a standalone unfold or obtain.
+                let (new_goal, _) = instantiate_existential(prop, var, term).ok_or_else(|| {
+                    SekiError::Proof(format!(
+                        "by witness: the goal's conclusion is not `exists {} in ..., ...`",
+                        var
+                    ))
+                })?;
+                let v = self.ctx.eval(&new_goal, env)?;
+                require_true(&v).map(|()| Value::Bool(true))
+            }
             Proof::Obtain { intro, lemma, substs } => {
                 // Standalone `obtain` (no following `then`): transform and
                 // require the result to evaluate to `true`, same pattern as
@@ -473,6 +486,15 @@ impl<'a> Prover<'a> {
                 self.verify_apply(prop, lemma, substs, env)?;
                 Ok(TacOutcome::Closed)
             }
+            Proof::Witness { var, term } => {
+                let (new_goal, _) = instantiate_existential(prop, var, term).ok_or_else(|| {
+                    SekiError::Proof(format!(
+                        "by witness: the goal's conclusion is not `exists {} in ..., ...`",
+                        var
+                    ))
+                })?;
+                Ok(TacOutcome::NewGoal(new_goal))
+            }
             Proof::Obtain { intro, lemma, substs } => {
                 // Also strip the *current goal's own* leading foralls/
                 // implications here (not just to gather `context_hyps` for
@@ -621,6 +643,20 @@ impl<'a> Prover<'a> {
         dom: PolyDomain,
         hyps: &[(Expr, bool)],
     ) -> SekiResult<Value> {
+        self.prove_algebra_rel_at(body, dom, hyps, 1)
+    }
+
+    /// As above, with a budget for how many times the goal may still be
+    /// divided through by a positive factor.  One level is enough for the
+    /// contraction arguments this exists for, and a budget stops the
+    /// search from multiplying the goal forever.
+    fn prove_algebra_rel_at(
+        &self,
+        body: &Expr,
+        dom: PolyDomain,
+        hyps: &[(Expr, bool)],
+        cancel_budget: u32,
+    ) -> SekiResult<Value> {
         // If any prior hypothesis is contradicted (same condition assumed
         // both true and false on this path), the branch is vacuously true.
         if hyps_contradict(hyps) {
@@ -649,8 +685,8 @@ impl<'a> Prover<'a> {
                 if let Some(extra) = integer_strengthen(&cond, false, dom) {
                     else_hyps.push(extra);
                 }
-                self.prove_algebra_rel(body, dom, &then_hyps)?;
-                return self.prove_algebra_rel(body, dom, &else_hyps);
+                self.prove_algebra_rel_at(body, dom, &then_hyps, cancel_budget)?;
+                return self.prove_algebra_rel_at(body, dom, &else_hyps, cancel_budget);
             }
         }
         if let Some((then_body, else_body, cond)) = split_first_if(body) {
@@ -677,14 +713,14 @@ impl<'a> Prover<'a> {
             if let Some(h) = integer_strengthen(&cond, false, dom) {
                 else_hyps.push(h);
             }
-            self.prove_algebra_rel(&then_refined, dom, &then_hyps)
+            self.prove_algebra_rel_at(&then_refined, dom, &then_hyps, cancel_budget)
                 .map_err(|e| {
                     SekiError::Proof(format!(
                         "by algebra (then-branch of `if {}`): {}",
                         cond, e
                     ))
                 })?;
-            self.prove_algebra_rel(&else_refined, dom, &else_hyps)
+            self.prove_algebra_rel_at(&else_refined, dom, &else_hyps, cancel_budget)
                 .map_err(|e| {
                     SekiError::Proof(format!(
                         "by algebra (else-branch of `if {}`): {}",
@@ -748,14 +784,14 @@ impl<'a> Prover<'a> {
                             Box::new(a.clone()),
                             Box::new(b.clone()),
                         );
-                        self.prove_algebra_rel(&eq, dom, hyps)?;
+                        self.prove_algebra_rel_at(&eq, dom, hyps, cancel_budget)?;
                     }
                     let eq = Expr::BinOp(
                         BinOp::Eq,
                         Box::new(last.0.clone()),
                         Box::new(last.1.clone()),
                     );
-                    return self.prove_algebra_rel(&eq, dom, hyps);
+                    return self.prove_algebra_rel_at(&eq, dom, hyps, cancel_budget);
                 }
                 Some(CtorEquality::Distinct(a, b)) => {
                     return Err(SekiError::Proof(format!(
@@ -819,6 +855,20 @@ impl<'a> Prover<'a> {
         {
             return Ok(Value::Bool(true));
         }
+        // Antisymmetry: an equality goal follows from `>=` and `<=`, each
+        // of which the Positivstellensatz search below can reach.  Without
+        // this, `a <= b and b <= a => a == b` — the antisymmetry of the
+        // order itself — is out of reach, and with it the uniqueness of
+        // limits and suprema.
+        if op == BinOp::Eq && !hyps.is_empty() {
+            let ge = Expr::BinOp(BinOp::Ge, Box::new(lhs.clone()), Box::new(rhs.clone()));
+            let le = Expr::BinOp(BinOp::Le, Box::new(lhs.clone()), Box::new(rhs.clone()));
+            if self.prove_algebra_rel_at(&ge, dom, hyps, cancel_budget).is_ok()
+                && self.prove_algebra_rel_at(&le, dom, hyps, cancel_budget).is_ok()
+            {
+                return Ok(Value::Bool(true));
+            }
+        }
         // Positivstellensatz: non-negative weights on the hypotheses *and
         // their products*.  This is what reaches past linear arithmetic —
         // `0 ≤ a ≤ 1 ⊢ a² ≤ 1` needs `(1-a)·(1+a)`, which no sum of the
@@ -854,6 +904,37 @@ impl<'a> Prover<'a> {
                 .collect();
             if self.find_farkas(&hyp_exprs, &goal_diff, strict).is_some() {
                 return Ok(Value::Bool(true));
+            }
+        }
+        // Divide through by a positive quantity.  A Positivstellensatz
+        // certificate adds non-negative things, so it reaches
+        // `(1-k)·A <= 0` but not the `A <= 0` that follows; multiplying
+        // the goal by `1-k` puts it back in reach.  Every contraction
+        // argument ends exactly here.
+        if cancel_budget > 0 && matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+            let hyp_exprs: Vec<Expr> = hyps
+                .iter()
+                .filter_map(|(h, truth)| {
+                    if *truth {
+                        return Some(h.clone());
+                    }
+                    match h {
+                        Expr::BinOp(o, l, r) if matches!(
+                            o,
+                            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                        ) => Some(Expr::BinOp(negate_relation(o), l.clone(), r.clone())),
+                        _ => None,
+                    }
+                })
+                .collect();
+            for factor in positive_factors(&hyp_exprs) {
+                let scaled = scale_relation(&op, lhs, rhs, &factor);
+                if self
+                    .prove_algebra_rel_at(&scaled, dom, hyps, cancel_budget - 1)
+                    .is_ok()
+                {
+                    return Ok(Value::Bool(true));
+                }
             }
         }
         Err(SekiError::Proof(format!(
@@ -1972,6 +2053,18 @@ impl<'a> Prover<'a> {
                 self.verify_assumption(prop)?;
                 Ok(Cert::Assumption)
             }
+            Proof::Witness { var, term } => {
+                let (new_goal, _) = instantiate_existential(prop, var, term).ok_or_else(|| {
+                    SekiError::Proof(format!(
+                        "by witness: the goal's conclusion is not `exists {} in ..., ...`",
+                        var
+                    ))
+                })?;
+                Ok(Cert::Witness {
+                    term: (**term).clone(),
+                    then: Box::new(self.evaluation_cert(&new_goal, env)),
+                })
+            }
             Proof::Apply { lemma, substs } => {
                 let (full_substs, premise_goals) =
                     self.verify_apply(prop, lemma, substs, env)?;
@@ -2176,6 +2269,12 @@ impl<'a> Prover<'a> {
     /// route that has no witness form yet, that is recorded explicitly
     /// instead of being passed off as checked.
     fn algebra_cert(&self, prop: &Expr, _env: &Env) -> Cert {
+        self.algebra_cert_at(prop, _env, 1)
+    }
+
+    /// As above, with the same "divide through by a positive factor"
+    /// budget the tactic uses, so the certificate can follow the search.
+    fn algebra_cert_at(&self, prop: &Expr, _env: &Env, cancel_budget: u32) -> Cert {
         let dom = detect_domain_with(prop, Some(self.ctx));
         let body = strip_foralls(prop);
         let (mut conclusion, mut hyps) = peel_implications(body);
@@ -2190,7 +2289,7 @@ impl<'a> Prover<'a> {
                 .iter()
                 .map(|c| {
                     let sub = rebuild_foralls_of(prop, under_hypotheses(&hyps, (*c).clone()));
-                    self.algebra_cert(&sub, _env)
+                    self.algebra_cert_at(&sub, _env, cancel_budget)
                 })
                 .collect();
             if subs.iter().all(|c| !matches!(c, Cert::Trusted { .. })) {
@@ -2250,6 +2349,26 @@ impl<'a> Prover<'a> {
                     claim: PolyClaim::EqCombination { lhs, rhs, used },
                 };
             }
+        // The equality counterpart: prove both directions and let the
+        // kernel put them together (`Cert::Antisymmetry`).
+        if op == BinOp::Eq && !hyps.is_empty() {
+            let ge = Expr::BinOp(BinOp::Ge, Box::new(lhs.clone()), Box::new(rhs.clone()));
+            let le = Expr::BinOp(BinOp::Le, Box::new(lhs.clone()), Box::new(rhs.clone()));
+            let under = |side: Expr| {
+                let (binders, inner) = crate::rewrite::peel_binders(prop);
+                let (_, hs) = crate::rewrite::peel_premises(&inner);
+                let mut g = side;
+                for h in hs.iter().rev() {
+                    g = implies_expr(h.clone(), g);
+                }
+                crate::rewrite::rebuild_binders(&binders, g)
+            };
+            let gc = self.algebra_cert_at(&under(ge), _env, cancel_budget);
+            let lc = self.algebra_cert_at(&under(le), _env, cancel_budget);
+            if !matches!(gc, Cert::Trusted { .. }) && !matches!(lc, Cert::Trusted { .. }) {
+                return Cert::Antisymmetry { ge: Box::new(gc), le: Box::new(lc) };
+            }
+        }
             return self.no_witness(
                 "by algebra",
                 "the two sides do not normalize to the same polynomial by ring \
@@ -2330,6 +2449,39 @@ impl<'a> Prover<'a> {
             }
         }
 
+        // Divide through by a positive factor, mirroring the tactic.
+        if cancel_budget > 0 && matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
+            let under = |e: Expr| {
+                let (binders, inner) = crate::rewrite::peel_binders(prop);
+                let (_, hs) = crate::rewrite::peel_premises(&inner);
+                let mut g = e;
+                for h in hs.iter().rev() {
+                    g = implies_expr(h.clone(), g);
+                }
+                crate::rewrite::rebuild_binders(&binders, g)
+            };
+            for factor in positive_factors(&hyps) {
+                let pos = under(Expr::BinOp(
+                    BinOp::Gt,
+                    Box::new(factor.clone()),
+                    Box::new(Expr::Real(0.0)),
+                ));
+                let pc = self.algebra_cert_at(&pos, _env, cancel_budget - 1);
+                if matches!(pc, Cert::Trusted { .. }) {
+                    continue;
+                }
+                let scaled = under(scale_relation(&op, &lhs, &rhs, &factor));
+                let sc = self.algebra_cert_at(&scaled, _env, cancel_budget - 1);
+                if matches!(sc, Cert::Trusted { .. }) {
+                    continue;
+                }
+                return Cert::CancelPositive {
+                    factor,
+                    positive: Box::new(pc),
+                    scaled: Box::new(sc),
+                };
+            }
+        }
         self.case_split_or_give_up(prop, &conclusion, _env)
     }
 
@@ -2460,7 +2612,11 @@ impl<'a> Prover<'a> {
                 for &i in &combo[1..] {
                     product = product.mul(usable[i].2.clone());
                 }
-                if product.has_overflow() || product.degree() > want_degree {
+                // Only the *number* of factors is bounded, not the
+                // product's degree: `(1 - h·L)·(y2 - y1)` has degree three
+                // and is needed for a degree-two goal, because its cubic
+                // terms cancel against another generator's.
+                if product.has_overflow() {
                     continue;
                 }
                 generators.push(Generator {
@@ -2542,12 +2698,13 @@ impl<'a> Prover<'a> {
         // A strict goal needs positive slack or a strict generator actually
         // used.  The first solve may return neither even when one exists, so
         // each strict generator also gets a turn at being forced in.
+        // Only the strict *hypotheses* get a turn at being forced in, not
+        // every strict product: a hundred extra simplex solves per goal buys
+        // almost nothing, since a certificate that needs strictness almost
+        // always gets it from a hypothesis used directly.
         let forced: Vec<Option<usize>> = std::iter::once(None)
             .chain(if goal_strict {
-                (0..generators.len())
-                    .filter(|&i| generators[i].strict)
-                    .map(Some)
-                    .collect()
+                (0..singles).filter(|&i| generators[i].strict).map(Some).collect()
             } else {
                 Vec::new()
             })
@@ -2683,6 +2840,9 @@ impl<'a> Prover<'a> {
                             wraps.push(SeqWrap::Generalize(
                                 binders.into_iter().map(|(v, _)| v).collect(),
                             ));
+                        }
+                        Proof::Witness { term, .. } => {
+                            wraps.push(SeqWrap::Witness((**term).clone()))
                         }
                         Proof::Obtain { intro, lemma, substs } => {
                             let (_, hyps) =
@@ -2834,6 +2994,11 @@ impl<'a> Prover<'a> {
             | Proof::ByLinarith
             | Proof::ByInduction
             | Proof::ByStrongInduction { .. } => TrustLevel::Sound,
+
+            // Choosing a witness proves nothing by itself; the trust comes
+            // from whatever closes the instantiated goal, which in a `then`
+            // chain is the next tactic.
+            Proof::Witness { .. } => TrustLevel::Sound,
 
             // Every tactic that finishes by *evaluating* the goal inherits
             // `enumerate_set`'s sampling of infinite domains.
@@ -3172,6 +3337,8 @@ enum SeqWrap {
     Generalize(Vec<String>),
     /// A `by have`: the fact it established, and its proof.
     Have(Expr, Cert),
+    /// A `by witness`: the term the existential was instantiated with.
+    Witness(Expr),
     /// A `by obtain`: the existential it eliminated.
     Obtain {
         intro: String,
@@ -3195,6 +3362,7 @@ fn wrap_seq(wraps: Vec<SeqWrap>, inner: Cert) -> Cert {
                 Cert::Unfold { name, unfolded, then: Box::new(cert) }
             }
             SeqWrap::Generalize(vars) => Cert::Generalize { vars, then: Box::new(cert) },
+            SeqWrap::Witness(term) => Cert::Witness { term, then: Box::new(cert) },
             SeqWrap::Obtain { intro, lemma, substs, premises } => Cert::Obtain {
                 lemma,
                 intro,
@@ -3568,6 +3736,91 @@ fn solve_nonneg_exact(columns: &[Vec<Rat>], target: &[Rat]) -> Option<Vec<Rat>> 
     Some(solution)
 }
 
+/// Replace `exists v in D, P(v)` — wherever it sits under the goal's
+/// binders and premises — with `P(term)`.
+///
+/// Returns the domain alongside the new goal so the caller can say what the
+/// witness has to be a member of.  The kernel re-derives all of this from
+/// the original goal (`Cert::Witness`), so nothing here is trusted.
+fn instantiate_existential(prop: &Expr, var: &str, term: &Expr) -> Option<(Expr, Expr)> {
+    // The existential may sit behind a premise (`c >= 0 => forall eps, ...
+    // exists d, ...`), so pull the binders forward first — exactly as the
+    // kernel does before checking the same step.
+    let prop = crate::rewrite::prenex_foralls(prop);
+    let (binders, inner) = crate::rewrite::peel_binders(&prop);
+    let (conclusion, hyps) = crate::rewrite::peel_premises(&inner);
+    let Expr::Exists { var: ev, domain, body } = &conclusion else {
+        return None;
+    };
+    if ev != var {
+        return None;
+    }
+    let instance = subst(body, ev, term);
+    let mut goal = instance;
+    for h in hyps.iter().rev() {
+        goal = implies_expr(h.clone(), goal);
+    }
+    let goal = crate::rewrite::rebuild_binders(&binders, goal);
+    Some((crate::rewrite::prenex_foralls(&goal), (**domain).clone()))
+}
+
+/// The strictly positive quantities the hypotheses assert, as expressions.
+///
+/// `c > 0` offers `c`; `a > b` offers `a - b`.  These are the factors a
+/// `Cert::CancelPositive` may divide a goal by.
+fn positive_factors(hyps: &[Expr]) -> Vec<Expr> {
+    /// Retrying the whole Positivstellensatz search per factor is not
+    /// cheap, and a contraction argument divides by one thing.
+    const MAX_FACTORS: usize = 3;
+    let mut out: Vec<Expr> = Vec::new();
+    // For a linear goal under linear hypotheses, Farkas is complete: if the
+    // search failed there, no amount of scaling will rescue it, and trying
+    // costs a full re-run of the whole search per factor.  Dividing only
+    // pays when a hypothesis is non-linear — which is exactly the
+    // contraction shape, `A <= k·A`.
+    if !hyps.iter().any(|h| match h {
+        Expr::BinOp(_, l, r) => match (expr_to_poly(l), expr_to_poly(r)) {
+            (Some(lp), Some(rp)) => lp.degree() > 1 || rp.degree() > 1,
+            _ => false,
+        },
+        _ => false,
+    }) {
+        return out;
+    }
+    for h in hyps {
+        if let Expr::BinOp(op, l, r) = h {
+            let (big, small) = match op {
+                BinOp::Gt => (l, r),
+                BinOp::Lt => (r, l),
+                _ => continue,
+            };
+            let factor = match small.as_ref() {
+                Expr::Int(0) => (**big).clone(),
+                Expr::Real(z) if *z == 0.0 => (**big).clone(),
+                _ => Expr::BinOp(BinOp::Sub, big.clone(), small.clone()),
+            };
+            // A non-linear factor raises the scaled goal's degree past
+            // what the generators can match anyway.
+            let usable = expr_to_poly(&factor).is_some_and(|p| p.degree() == 1);
+            if usable && !out.iter().any(|e| crate::ast::alpha_equiv(e, &factor)) {
+                out.push(factor);
+                if out.len() >= MAX_FACTORS {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `lhs OP rhs` with both sides multiplied by `factor`.
+fn scale_relation(op: &BinOp, lhs: &Expr, rhs: &Expr, factor: &Expr) -> Expr {
+    let times = |e: &Expr| {
+        Expr::BinOp(BinOp::Mul, Box::new(factor.clone()), Box::new(e.clone()))
+    };
+    Expr::BinOp(op.clone(), Box::new(times(lhs)), Box::new(times(rhs)))
+}
+
 /// The hypotheses a goal currently assumes, read off its premise chain.
 ///
 /// seki keeps the proof context *in the goal*: `h1 and h2 => C` is a goal
@@ -3599,6 +3852,7 @@ fn add_hypothesis(prop: &Expr, fact: Expr) -> Expr {
 fn tactic_name(p: &Proof) -> &'static str {
     match p {
         Proof::ByEval => "by eval",
+        Proof::Witness { .. } => "by witness",
         Proof::Refl => "refl",
         Proof::ByAlgebra => "by algebra",
         Proof::ByLinarith => "by linarith",
@@ -4221,6 +4475,18 @@ fn collect_nat_hyps(prop: &Expr, out: &mut Vec<(Expr, bool)>) {
 /// into its relational leaves.  Returns `None` (instead of a partial list)
 /// if any conjunct isn't itself a relation, so callers never silently drop
 /// a premise they can't represent as a hypothesis.
+/// Flatten a conjunction, whatever its conjuncts are.  Matches the
+/// kernel's `flatten_conjuncts`.
+fn flatten_and_any(e: &Expr, out: &mut Vec<Expr>) {
+    match e {
+        Expr::BinOp(BinOp::And, l, r) => {
+            flatten_and_any(l, out);
+            flatten_and_any(r, out);
+        }
+        other => out.push(other.clone()),
+    }
+}
+
 fn flatten_relational_and(e: &Expr, out: &mut Vec<Expr>) -> bool {
     match e {
         Expr::BinOp(BinOp::And, l, r) => {
@@ -4251,16 +4517,22 @@ fn peel_implications(body: &Expr) -> (Expr, Vec<Expr>) {
     loop {
         match &cur {
             // `(not P) or Q` — the `=>` desugaring.  `P` may itself be a
-            // conjunction of relations (`a > 0 and b > 0 => ...`), each
-            // conjunct becomes its own hypothesis.
+            // conjunction (`a > 0 and b > 0 => ...`), each conjunct
+            // becoming its own hypothesis.
+            //
+            // A premise need not be a *relation*: the completeness axiom
+            // assumes `exists b in Real, isUpperBound P b`.  Requiring one
+            // here while the kernel's `split_implications` did not was a
+            // silent disagreement about how many premises a lemma has, and
+            // `by apply` produced certificates the kernel then rejected for
+            // discharging none of them.  There is no ambiguity to guard
+            // against in this shape — `(not P) or Q` is only ever the
+            // desugaring of an implication.
             Expr::BinOp(BinOp::Or, l, r) => {
                 if let Expr::UnOp(UnOp::Not, inner) = l.as_ref() {
-                    let mut conjuncts = Vec::new();
-                    if flatten_relational_and(inner, &mut conjuncts) {
-                        premises.extend(conjuncts);
-                        cur = (**r).clone();
-                        continue;
-                    }
+                    flatten_and_any(inner, &mut premises);
+                    cur = (**r).clone();
+                    continue;
                 }
                 break;
             }

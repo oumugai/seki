@@ -86,6 +86,49 @@ pub enum Cert {
     /// cardinality: a witness is a witness.
     ExistsWitness { witness: Expr, sub: Box<Cert> },
 
+    /// `l OP r` from `c > 0` and `c·l OP c·r`, under the goal's own
+    /// binders and premises.
+    ///
+    /// Dividing an inequality by a positive quantity.  A
+    /// Positivstellensatz certificate can only *add* non-negative things,
+    /// so it can reach `(1-k)·A <= 0` but never the `A <= 0` that follows
+    /// — the division has no representation as a sum. Every contraction
+    /// argument ends exactly there, so without this rule the uniqueness of
+    /// a fixed point, and with it the uniqueness half of
+    /// Picard-Lindelof, is unreachable.
+    ///
+    /// Sound for every ordered field: `c > 0` and `c·l >= c·r` give
+    /// `l >= r`, and likewise for the strict and reversed forms.
+    CancelPositive { factor: Expr, positive: Box<Cert>, scaled: Box<Cert> },
+
+    /// `l == r` from `l >= r` and `l <= r`, under the goal's own binders
+    /// and premises.
+    ///
+    /// The antisymmetry of the order.  It is what turns the inequality
+    /// machinery into an *equality* proof, and without it the uniqueness of
+    /// a limit or a supremum — both stated as equalities and both proved by
+    /// squeezing — cannot be derived at all.
+    ///
+    /// Both obligations are derived from the goal, so the certificate
+    /// chooses nothing here beyond how to prove each direction.
+    Antisymmetry { ge: Box<Cert>, le: Box<Cert> },
+
+    /// The same rule, but for an existential that sits *under* the goal's
+    /// binders and premises — the shape every epsilon-delta statement has:
+    /// `forall eps in Real, eps > 0 => exists delta in Real, ...`.
+    ///
+    /// `ExistsWitness` cannot serve here because it must evaluate the
+    /// witness to check membership, and a witness such as `eps / 2.0`
+    /// mentions a generalized variable that has no value.  So this rule
+    /// checks membership *syntactically* instead
+    /// ([`Checker::witness_is_total`]): the witness has to be built from
+    /// the binders and literals by operations that are total on the
+    /// domain, which is decidable without evaluating anything.
+    ///
+    /// The obligation is re-derived from the goal, so a certificate can
+    /// choose the witness but not what proving it means.
+    Witness { term: Expr, then: Box<Cert> },
+
     /// `forall x in {y in D | pred}, body` where `body` is conjunct
     /// `conjunct` of `pred` — every member satisfies it by definition.
     ForallFromComprehension { conjunct: usize },
@@ -415,6 +458,11 @@ impl Checker<'_, '_> {
             Cert::ExistsWitness { witness, sub } => {
                 self.check_exists_witness(prop, witness, sub)
             }
+            Cert::Witness { term, then } => self.check_witness(prop, term, then),
+            Cert::Antisymmetry { ge, le } => self.check_antisymmetry(prop, ge, le),
+            Cert::CancelPositive { factor, positive, scaled } => {
+                self.check_cancel_positive(prop, factor, positive, scaled)
+            }
             Cert::ForallFromComprehension { conjunct } => {
                 self.check_forall_from_comprehension(prop, *conjunct)
             }
@@ -613,6 +661,196 @@ impl Checker<'_, '_> {
         }
         let instance = subst(body, var, witness);
         self.check(&instance, sub)
+    }
+
+    /// See [`Cert::CancelPositive`].
+    fn check_cancel_positive(
+        &self,
+        prop: &Expr,
+        factor: &Expr,
+        positive: &Cert,
+        scaled: &Cert,
+    ) -> KResult<Verdict> {
+        use crate::ast::BinOp as B;
+        let (binders, inner) = crate::rewrite::peel_binders(prop);
+        let (concl, hyps) = split_implications(inner);
+        let Expr::BinOp(op, l, r) = &concl else {
+            return err(format!("expected a relational goal, got {}", concl));
+        };
+        if !matches!(op, B::Ge | B::Gt | B::Le | B::Lt) {
+            return err(format!(
+                "dividing by a positive factor applies to <, <=, > and >=, not {:?}",
+                op
+            ));
+        }
+        let under = |e: Expr| {
+            crate::rewrite::rebuild_binders(&binders, under_hypotheses(&hyps, e))
+        };
+        // The factor really is positive...
+        let pos_goal = under(Expr::BinOp(
+            B::Gt,
+            Box::new(factor.clone()),
+            Box::new(Expr::Real(0.0)),
+        ));
+        let mut verdict = self.check(&pos_goal, positive)?;
+        // ...and the goal holds after multiplying both sides by it.  Both
+        // obligations are derived here, so the certificate chooses only
+        // the factor.
+        let times = |e: &Expr| {
+            Expr::BinOp(B::Mul, Box::new(factor.clone()), Box::new(e.clone()))
+        };
+        let scaled_goal = under(Expr::BinOp(
+            op.clone(),
+            Box::new(times(l)),
+            Box::new(times(r)),
+        ));
+        verdict = verdict.merge(self.check(&scaled_goal, scaled)?);
+        Ok(verdict)
+    }
+
+    /// See [`Cert::Antisymmetry`].
+    fn check_antisymmetry(&self, prop: &Expr, ge: &Cert, le: &Cert) -> KResult<Verdict> {
+        let (binders, inner) = crate::rewrite::peel_binders(prop);
+        let (concl, hyps) = split_implications(inner);
+        let Expr::BinOp(crate::ast::BinOp::Eq, l, r) = &concl else {
+            return err(format!("expected an equality goal, got {}", concl));
+        };
+        let mut verdict = Verdict::sound();
+        for op in [crate::ast::BinOp::Ge, crate::ast::BinOp::Le] {
+            let cert = if op == crate::ast::BinOp::Ge { ge } else { le };
+            let side = Expr::BinOp(op, l.clone(), r.clone());
+            let sub = crate::rewrite::rebuild_binders(
+                &binders,
+                under_hypotheses(&hyps, side),
+            );
+            verdict = verdict.merge(self.check(&sub, cert)?);
+        }
+        Ok(verdict)
+    }
+
+    /// See [`Cert::Witness`].
+    fn check_witness(&self, prop: &Expr, term: &Expr, then: &Cert) -> KResult<Verdict> {
+        let prop = crate::rewrite::prenex_foralls(prop);
+        let (binders, inner) = crate::rewrite::peel_binders(&prop);
+        let (conclusion, hyps) = crate::rewrite::peel_premises(&inner);
+        let Expr::Exists { var, domain, body } = &conclusion else {
+            return err(format!(
+                "expected the goal's conclusion to be an `exists`, got {}",
+                conclusion
+            ));
+        };
+        // Which set each enclosing binder ranges over, so the totality check
+        // below knows what the witness's variables denote.
+        let mut scope: Vec<(String, Expr)> = Vec::new();
+        for (v, d) in &binders {
+            scope.push((v.clone(), d.clone()));
+        }
+        self.witness_is_total(term, domain, &scope)?;
+        // Re-derive the obligation rather than trusting one supplied with
+        // the certificate: the witness is the certificate's to choose, the
+        // meaning of having chosen it is not.
+        let mut goal = subst(body, var, term);
+        for h in hyps.iter().rev() {
+            goal = Expr::BinOp(
+                crate::ast::BinOp::Or,
+                Box::new(Expr::UnOp(crate::ast::UnOp::Not, Box::new(h.clone()))),
+                Box::new(goal),
+            );
+        }
+        let goal = crate::rewrite::rebuild_binders(&binders, goal);
+        self.check(&crate::rewrite::prenex_foralls(&goal), then)
+    }
+
+    /// Does `term` denote a member of `domain` for *every* value its
+    /// variables may take?
+    ///
+    /// Deliberately syntactic and deliberately conservative.  `eps / 2.0`
+    /// passes; `1.0 / eps` does not, because nothing here knows that `eps`
+    /// is non-zero — a hypothesis saying so may be in scope, but reading
+    /// hypotheses is reasoning, and this is a membership check.  A witness
+    /// that needs it can be restated (`delta := eps` usually works) or the
+    /// existential introduced with `Cert::ExistsWitness` on a closed term.
+    fn witness_is_total(
+        &self,
+        term: &Expr,
+        domain: &Expr,
+        scope: &[(String, Expr)],
+    ) -> KResult<()> {
+        fn name_of(e: &Expr) -> Option<&str> {
+            match e {
+                Expr::Var { name, .. } => Some(name.as_str()),
+                _ => None,
+            }
+        }
+        let target = name_of(domain).ok_or_else(|| {
+            KernelError(format!(
+                "a witness under binders needs a named domain, got {}",
+                domain
+            ))
+        })?;
+        // `Nat` would additionally require the term to be non-negative,
+        // which is arithmetic reasoning rather than a syntactic check.
+        if !matches!(target, "Real" | "Int") {
+            return err(format!(
+                "witnesses under binders are only checked for Real and Int, not {}",
+                target
+            ));
+        }
+        let fits = |d: &str| match target {
+            "Real" => matches!(d, "Real" | "Int" | "Nat"),
+            _ => matches!(d, "Int" | "Nat"),
+        };
+        match term {
+            Expr::Int(_) => Ok(()),
+            Expr::Real(_) if target == "Real" => Ok(()),
+            Expr::Var { name, .. } => {
+                let d = scope
+                    .iter()
+                    .rev()
+                    .find(|(v, _)| v == name)
+                    .map(|(_, d)| d)
+                    .ok_or_else(|| {
+                        KernelError(format!(
+                            "the witness mentions `{}`, which is not bound by the goal",
+                            name
+                        ))
+                    })?;
+                match name_of(d) {
+                    Some(d) if fits(d) => Ok(()),
+                    _ => err(format!(
+                        "`{}` ranges over {}, which is not contained in {}",
+                        name, d, target
+                    )),
+                }
+            }
+            Expr::UnOp(crate::ast::UnOp::Neg, x) => self.witness_is_total(x, domain, scope),
+            Expr::BinOp(op, l, r) => match op {
+                crate::ast::BinOp::Add
+                | crate::ast::BinOp::Sub
+                | crate::ast::BinOp::Mul => {
+                    self.witness_is_total(l, domain, scope)?;
+                    self.witness_is_total(r, domain, scope)
+                }
+                // Division is the one partial operation here, so the divisor
+                // has to be a literal this check can see is non-zero.
+                crate::ast::BinOp::Div if target == "Real" => {
+                    self.witness_is_total(l, domain, scope)?;
+                    match r.as_ref() {
+                        Expr::Real(d) if *d != 0.0 => Ok(()),
+                        Expr::Int(d) if *d != 0 => Ok(()),
+                        other => err(format!(
+                            "a witness may only divide by a non-zero literal, not {}",
+                            other
+                        )),
+                    }
+                }
+                other => err(format!("`{:?}` may not appear in a witness", other)),
+            },
+            other => err(format!(
+                "this witness has no membership check: {}",
+                other
+            )),
+        }
     }
 
     fn check_forall_from_comprehension(
@@ -1634,6 +1872,20 @@ impl Cert {
                 out.push_str(&format!("{}witness {}:\n", pad, witness));
                 sub.render_into(out, depth + 1);
             }
+            Cert::Witness { term, then } => {
+                out.push_str(&format!("{}take the existential's witness to be {}:\n", pad, term));
+                then.render_into(out, depth + 1);
+            }
+            Cert::CancelPositive { factor, positive, scaled } => {
+                out.push_str(&format!("{}divide through by {}, which is positive:\n", pad, factor));
+                positive.render_into(out, depth + 1);
+                scaled.render_into(out, depth + 1);
+            }
+            Cert::Antisymmetry { ge, le } => {
+                out.push_str(&format!("{}equal because >= and <= both hold:\n", pad));
+                ge.render_into(out, depth + 1);
+                le.render_into(out, depth + 1);
+            }
             Cert::ForallFromComprehension { conjunct } => out.push_str(&format!(
                 "{}conjunct {} of the set's own defining predicate\n",
                 pad, conjunct
@@ -2266,5 +2518,81 @@ mod forgery_tests {
         )
         .unwrap_err();
         assert!(err.0.contains("finiteness-strict"), "{}", err.0);
+    }
+
+    // ---- `Cert::Witness` -------------------------------------------------
+    // The witness is the certificate's to choose; what choosing it obliges
+    // it to prove is not.
+
+    #[test]
+    fn a_witness_must_be_a_member_of_the_existential_domain() {
+        // `eps` ranges over Real, so it cannot witness an existential over
+        // Int — the forged certificate claims a real is an integer.
+        let g = make_prelude();
+        let forged = Cert::Witness {
+            term: parse_prop("eps"),
+            then: Box::new(Cert::Ground),
+        };
+        let err = check_in(
+            &g,
+            "forall eps in Real, (exists n in Int, n > 0)",
+            &forged,
+        )
+        .unwrap_err();
+        assert!(err.0.contains("not contained in"), "{}", err.0);
+    }
+
+    #[test]
+    fn a_witness_may_not_divide_by_something_that_could_be_zero() {
+        // `1.0 / eps` is not a real number when `eps` is zero.  A
+        // hypothesis saying otherwise may be in scope, but reading it is
+        // reasoning, and this is a membership check.
+        let g = make_prelude();
+        let forged = Cert::Witness {
+            term: parse_prop("1.0 / eps"),
+            then: Box::new(Cert::Ground),
+        };
+        let err = check_in(
+            &g,
+            "forall eps in Real, (exists d in Real, d > 0.0)",
+            &forged,
+        )
+        .unwrap_err();
+        assert!(err.0.contains("non-zero literal"), "{}", err.0);
+    }
+
+    #[test]
+    fn a_witness_may_not_mention_an_unbound_name() {
+        let g = make_prelude();
+        let forged = Cert::Witness {
+            term: parse_prop("bogus"),
+            then: Box::new(Cert::Ground),
+        };
+        let err = check_in(&g, "exists d in Real, d > 0.0", &forged).unwrap_err();
+        assert!(err.0.contains("not bound by the goal"), "{}", err.0);
+    }
+
+    #[test]
+    fn a_witness_rule_needs_an_existential_goal() {
+        let g = make_prelude();
+        let forged = Cert::Witness {
+            term: parse_prop("1.0"),
+            then: Box::new(Cert::Ground),
+        };
+        let err = check_in(&g, "forall x in Nat, x >= 0", &forged).unwrap_err();
+        assert!(err.0.contains("`exists`"), "{}", err.0);
+    }
+
+    #[test]
+    fn a_witness_obligation_is_derived_not_supplied() {
+        // The instantiated body is false at this witness, and the kernel
+        // derives that body itself — the certificate cannot hand it an
+        // easier one.
+        let g = make_prelude();
+        let forged = Cert::Witness {
+            term: parse_prop("0.0"),
+            then: Box::new(Cert::Ground),
+        };
+        assert!(check_in(&g, "exists d in Real, d > 1.0", &forged).is_err());
     }
 }

@@ -1,0 +1,37 @@
+-- lib/analysis/{axioms,continuity,ode}.seki の回帰テスト。
+--
+-- これらのファイルは theorem をそのまま含むので、import すれば
+-- 全件が再検証される。ここでは import に加えて、演繹の層が
+-- 壊れていないことを確かめる追加の定理を置く。
+
+import "analysis/continuity.seki"
+import "analysis/ode.seki"
+
+-- ----- by witness が ε-δ を通ること -----
+def triple := \x -> 3.0 * x
+
+theorem triple_continuous : forall x0 in Real, isContinuousAt triple x0
+  := by unfold isContinuousAt then unfold triple
+     then witness d := eps / 3.0
+     then unfold absR then algebra
+
+theorem triple_derivative : forall x0 in Real, hasDerivativeAt triple x0 3.0
+  := by unfold hasDerivativeAt then unfold triple
+     then witness d := 1.0
+     then unfold absR then algebra
+
+-- ----- 正の量で割る規則 -----
+theorem cancel_simple
+  : forall a in Real, forall c in Real,
+      (c > 0.0) and (c * a <= 0.0) => a <= 0.0
+  := by algebra
+
+-- ----- 不等式 2 本から等式 (反対称性) -----
+theorem squeeze_to_equal
+  : forall a in Real, forall b in Real,
+      (a <= b) and (b <= a) => a == b
+  := by algebra
+
+-- ----- 次数 3 以上 -----
+theorem cube_bounded : forall a in Real, (a >= 0.0) and (a <= 1.0) => a * a * a <= 1.0
+  := by algebra

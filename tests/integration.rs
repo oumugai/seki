@@ -1438,6 +1438,46 @@ fn run_seki_test_file(rel_path: &str, min_theorems: usize) {
 // so nothing ran them.  Two of them had in fact been broken since `sigma`
 // became a keyword (Σ-types): `lib/probability/{continuous,montecarlo}.seki`
 // used `sigma` as a lambda parameter and no longer parsed.
+/// `lib/analysis/{axioms,continuity,ode}.seki` — real analysis built by
+/// deduction on top of the ordered-field axioms.  The file adds theorems of
+/// its own, so a regression in `by witness`, the antisymmetry rule or the
+/// divide-by-a-positive rule shows up here.
+#[test]
+fn seki_lib_test_real_axioms() {
+    run_seki_test_file("tests/seki/test_real_axioms.seki", 5);
+}
+
+/// Every claim in the analysis library is re-established by the kernel.
+///
+/// The point of building analysis by deduction rather than by axiom is
+/// that the result is *checked*; a proof that only the tactic believes
+/// would be a step backwards from the numerical library it replaces.  The
+/// two genuine assumptions (completeness and the Archimedean property) are
+/// `axiom`s, which the audit counts separately.
+#[test]
+fn the_analysis_library_is_kernel_checked() {
+    for file in [
+        "lib/analysis/axioms.seki",
+        "lib/analysis/continuity.seki",
+        "lib/analysis/ode.seki",
+    ] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+            .arg("--audit")
+            .arg(file)
+            .env("SEKI_LIB_PATH", "lib")
+            .output()
+            .expect("run seki --audit");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{}: {}", file, stdout);
+        assert!(
+            stdout.contains("every claim in this file was re-established by the kernel"),
+            "{} is not fully kernel-checked:\n{}",
+            file,
+            stdout
+        );
+    }
+}
+
 #[test]
 fn seki_lib_test_analysis_advanced() {
     run_seki_test_file("tests/seki/test_analysis_advanced.seki", 14);
