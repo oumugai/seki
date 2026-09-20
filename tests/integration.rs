@@ -3587,6 +3587,52 @@ fn a_three_variable_box_is_kernel_checked() {
 }
 
 #[test]
+fn dividing_by_a_positive_factor_is_kernel_checked() {
+    // The certificate orients itself around `lhs - rhs >= 0`, which swaps
+    // the sides of a `<=` goal.  Scaling the swapped pair builds the
+    // reverse inequality, so this proved but could not be certified.
+    assert_eq!(
+        trust_of(
+            "theorem cancel : forall a in Real, forall c in Real, \
+             (c > 0.0) and (c * a <= 0.0) => a <= 0.0 := by algebra",
+            "cancel"
+        ),
+        TrustLevel::Sound
+    );
+    // The same shape stated with `>=`, where no swap happens.
+    assert_eq!(
+        trust_of(
+            "theorem cancel_ge : forall a in Real, forall c in Real, \
+             (c > 0.0) and (c * a >= 0.0) => a >= 0.0 := by algebra",
+            "cancel_ge"
+        ),
+        TrustLevel::Sound
+    );
+}
+
+#[test]
+fn a_contraction_has_at_most_one_fixed_point() {
+    assert_eq!(
+        trust_of(
+            "def absR := \\r -> if r < 0.0 then 0.0 - r else r\n\
+             theorem uniq : forall x in Real, forall y in Real, forall k in Real, \
+             (k >= 0.0) and (k < 1.0) and (absR (x - y) <= k * absR (x - y)) => x == y \
+             := by unfold absR then algebra",
+            "uniq"
+        ),
+        TrustLevel::Sound
+    );
+    // At k = 1 the conclusion is false: any x and y satisfy the premise.
+    assert!(run_err(
+        "def absR := \\r -> if r < 0.0 then 0.0 - r else r\n\
+         theorem bad : forall x in Real, forall y in Real, forall k in Real, \
+         (k >= 0.0) and (k <= 1.0) and (absR (x - y) <= k * absR (x - y)) => x == y \
+         := by unfold absR then algebra"
+    )
+    .is_proof_error());
+}
+
+#[test]
 fn false_higher_degree_claims_are_refused() {
     // Each is false at some point of the stated domain; the simplex must not
     // manufacture a certificate for any of them.

@@ -2470,7 +2470,11 @@ impl<'a> Prover<'a> {
                 if matches!(pc, Cert::Trusted { .. }) {
                     continue;
                 }
-                let scaled = under(scale_relation(&op, &lhs, &rhs, &factor));
+                // `gl`/`gr`, not the oriented `lhs`/`rhs`: those are
+                // swapped for `<=` and `<` so the certificate can always
+                // talk about `lhs - rhs >= 0`, and scaling the swapped
+                // pair builds the *reverse* inequality.
+                let scaled = under(scale_relation(&op, &gl, &gr, &factor));
                 let sc = self.algebra_cert_at(&scaled, _env, cancel_budget - 1);
                 if matches!(sc, Cert::Trusted { .. }) {
                     continue;
