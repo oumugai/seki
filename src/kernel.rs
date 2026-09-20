@@ -2595,4 +2595,69 @@ mod forgery_tests {
         };
         assert!(check_in(&g, "exists d in Real, d > 1.0", &forged).is_err());
     }
+
+    // ---- `Cert::Antisymmetry` and `Cert::CancelPositive` -----------------
+
+    #[test]
+    fn antisymmetry_needs_an_equality_goal() {
+        let g = make_prelude();
+        let forged = Cert::Antisymmetry {
+            ge: Box::new(Cert::Ground),
+            le: Box::new(Cert::Ground),
+        };
+        let err = check_in(&g, "forall x in Nat, x >= 0", &forged).unwrap_err();
+        assert!(err.0.contains("equality goal"), "{}", err.0);
+    }
+
+    #[test]
+    fn antisymmetry_derives_both_directions_itself() {
+        // `1 == 2` would need `1 >= 2`, which does not hold.
+        let g = make_prelude();
+        let forged = Cert::Antisymmetry {
+            ge: Box::new(Cert::Ground),
+            le: Box::new(Cert::Ground),
+        };
+        assert!(check_in(&g, "1 == 2", &forged).is_err());
+    }
+
+    #[test]
+    fn dividing_through_requires_the_factor_to_be_positive() {
+        // `0` is not positive, so the division is not licensed — without
+        // that check any inequality would follow from `0 <= 0`.
+        let g = make_prelude();
+        let forged = Cert::CancelPositive {
+            factor: Expr::Real(0.0),
+            positive: Box::new(Cert::Ground),
+            scaled: Box::new(Cert::Ground),
+        };
+        assert!(check_in(&g, "1.0 <= 0.0", &forged).is_err());
+    }
+
+    #[test]
+    fn dividing_through_applies_only_to_inequalities() {
+        let g = make_prelude();
+        let forged = Cert::CancelPositive {
+            factor: Expr::Real(2.0),
+            positive: Box::new(Cert::Ground),
+            scaled: Box::new(Cert::Ground),
+        };
+        let err = check_in(&g, "1 == 1", &forged).unwrap_err();
+        assert!(err.0.contains("<, <=, > and >="), "{}", err.0);
+    }
+
+    #[test]
+    fn prenexing_leaves_a_capturing_binder_alone() {
+        // `x` is free in the premise, so moving `forall x` in front of it
+        // would change what the statement says.
+        let before = parse_prop("(x > 0.0) => (forall x in Real, x >= 0.0)");
+        let after = crate::rewrite::prenex_foralls(&before);
+        assert!(crate::ast::alpha_equiv(&before, &after), "{}", after);
+    }
+
+    #[test]
+    fn prenexing_moves_a_binder_the_premise_does_not_mention() {
+        let before = parse_prop("(a > 0.0) => (forall y in Real, y == y)");
+        let after = crate::rewrite::prenex_foralls(&before);
+        assert!(matches!(after, Expr::Forall { .. }), "{}", after);
+    }
 }
