@@ -877,6 +877,11 @@ impl<'a> EvalCtx<'a> {
                 .map(Value::Int)
                 .ok_or_else(|| overflow_error("unary -", 0, n)),
             (UnOp::Neg, Value::Real(r)) => Ok(Value::Real(-r)),
+            // Negating an enclosure flips it end for end.  Without this the
+            // stdlib's own `absR` — written `if r < 0.0 then -r else r` —
+            // fell out of interval arithmetic, and every goal that used it
+            // kept its floating-point grade.
+            (UnOp::Neg, Value::Interval(i)) => Ok(Value::Interval(i.neg())),
             (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
             (op, v) => Err(SekiError::Runtime(format!(
                 "bad unary application: {:?} {}",
@@ -1424,12 +1429,34 @@ fn interval_builtin(name: &str, args: &[Value]) -> SekiResult<Option<Value>> {
                 ))),
             }
         }
-        // Rounds in a way nothing here bounds.
-        "exp" | "ln" | "log" | "sin" | "cos" | "tan" | "atan" | "asin" | "acos"
-        | "sinh" | "cosh" | "tanh" => Err(SekiError::Runtime(format!(
-            "{} has no interval form yet, so this goal gets no exact verdict",
-            name
-        ))),
+        // Series with a Lagrange remainder bound — see `crate::interval`.
+        // Each refuses an argument outside the range its bound was
+        // established for, so `poison` here means "no verdict", never a
+        // guess.
+        "exp" | "ln" | "log" | "sin" | "cos" => {
+            let x = need(&args[0])?;
+            let out = match name {
+                "exp" => x.exp(),
+                "ln" | "log" => x.ln(),
+                "sin" => x.sin(),
+                _ => x.cos(),
+            };
+            if out.is_poison() {
+                return Err(SekiError::Runtime(format!(
+                    "{}: no enclosure for {} (outside the range its error \
+                     bound covers)",
+                    name, x
+                )));
+            }
+            Ok(Some(Value::Interval(out)))
+        }
+        // No bound established for these yet.
+        "tan" | "atan" | "asin" | "acos" | "sinh" | "cosh" | "tanh" => {
+            Err(SekiError::Runtime(format!(
+                "{} has no interval form yet, so this goal gets no exact verdict",
+                name
+            )))
+        }
         // Everything else is not about reals.
         _ => Ok(None),
     }
@@ -2348,6 +2375,21 @@ pub fn make_builtin_prelude() -> Globals {
     // Real → Real transcendental builtins.  Each accepts Int (promoted to
     // Real) or Real and returns Real.  Generic helper to keep noise down.
     fn unary_real_fn(args: &[Value], name: &str, f: fn(f64) -> f64) -> Result<Value, String> {
+        // An enclosure argument means the caller is reasoning about a
+        // range, so the answer has to be an enclosure too.
+        if let Value::Interval(i) = &args[0] {
+            let out = match name {
+                "exp" => i.exp(),
+                "ln" | "log" => i.ln(),
+                "sin" => i.sin(),
+                "cos" => i.cos(),
+                _ => crate::interval::Interval::poison(),
+            };
+            if out.is_poison() {
+                return Err(format!("{}: no enclosure for {}", name, i));
+            }
+            return Ok(Value::Interval(out));
+        }
         let x = match &args[0] {
             Value::Real(r) => *r,
             Value::Int(n) => *n as f64,

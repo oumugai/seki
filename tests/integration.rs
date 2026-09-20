@@ -3862,12 +3862,35 @@ fn a_tolerance_check_on_a_square_root_is_now_proved() {
 }
 
 #[test]
-fn a_transcendental_still_has_no_enclosure() {
-    // `exp` rounds in a way nothing here bounds, so a goal that needs it
-    // gets no exact verdict — the honest answer, not a guess.
+fn a_transcendental_now_has_an_enclosure() {
+    // `exp`, `ln`, `sin` and `cos` are series with a Lagrange remainder
+    // bound, so a tolerance check on one is a claim about the reals.
+    for src in [
+        "theorem t : (absR ((exp 1.0) - 2.718281828)) < 0.001 := by eval",
+        "theorem t : (absR ((ln (exp 2.0)) - 2.0)) < 0.0000001 := by eval",
+        "theorem t : (absR ((sin 1.0) * (sin 1.0) + (cos 1.0) * (cos 1.0) - 1.0)) \
+         < 0.0000001 := by eval",
+    ] {
+        assert_eq!(trust_of(src, "t"), TrustLevel::Sound, "for: {}", src);
+    }
+    // And a tolerance the series does not meet is refused.
+    assert!(run_err(
+        "theorem bad : (absR ((exp 1.0) - 2.718281828)) < 0.0000000001 := by eval"
+    )
+    .is_proof_error());
+}
+
+#[test]
+fn a_function_with_no_bound_established_still_has_no_enclosure() {
+    // `tan` has no remainder bound here, so a goal that needs it keeps its
+    // floating-point grade rather than being guessed at.
     let g = run("def absR := \\r -> if r < 0.0 then 0.0 - r else r\n\
-                 theorem t : absR ((exp 1.0) - 2.718281828) < 0.001 := by eval\n");
+                 theorem t : absR ((tan 1.0) - 1.5574077) < 0.0001 := by eval\n");
     assert_eq!(g.theorem_trust["t"], TrustLevel::Approximate);
+    // So does an argument outside the range the bound covers.
+    let g = run("def absR := \\r -> if r < 0.0 then 0.0 - r else r\n\
+                 theorem u : absR ((sin 20.0) - 0.9129452507) < 0.0001 := by eval\n");
+    assert_eq!(g.theorem_trust["u"], TrustLevel::Approximate);
 }
 
 #[test]
@@ -3877,7 +3900,7 @@ fn strict_mode_refuses_a_floating_point_verdict() {
     let err = session
         .run_source(
             "def absR := \\r -> if r < 0.0 then 0.0 - r else r\n\
-             theorem t : absR ((exp 1.0) - 2.718281828) < 0.001 := by eval\n",
+             theorem t : absR ((tan 1.0) - 1.5574077) < 0.0001 := by eval\n",
             true,
         )
         .expect_err("--strict must refuse a floating-point verdict");
