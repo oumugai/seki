@@ -631,7 +631,7 @@ pub fn shapes_from_globals(g: &Globals) -> ShapeEnv {
     for (k, v) in g.defs.iter() {
         let sh = match v {
             Value::Int(_) => Shape::Int,
-            Value::Real(_) => Shape::Real,
+            Value::Real(_) | Value::Interval(_) => Shape::Real,
             Value::Bool(_) => Shape::Bool,
             Value::Str(_) => Shape::Str,
             Value::Set(_) => Shape::Set,

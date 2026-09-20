@@ -364,6 +364,23 @@ impl Session {
                 let sh = shape_of(&val);
                 self.shapes = self.shapes.extend(name.clone(), sh);
                 self.globals.defs.insert(name.clone(), val.clone());
+                // Keep the source of a *real* scalar so the kernel can
+                // re-evaluate it as an enclosure — see `Globals::def_exprs`.
+                //
+                // Only reals: they are the ones whose stored value has
+                // already rounded.  Re-running anything else would re-run
+                // its effects too — `def counter := newRef 0` would hand
+                // the kernel a fresh cell instead of the one the program
+                // has been writing to.
+                // Redefining a name must drop any source kept for the old
+                // one.  `def e := parseSym "..."` shadows the stdlib's
+                // `e = 2.718…`, and a stale entry made interval mode
+                // resolve the name to the constant instead.
+                if crate::eval::worth_reevaluating(&val, value) {
+                    self.globals.def_exprs.insert(name.clone(), value.clone());
+                } else {
+                    self.globals.def_exprs.remove(name);
+                }
                 self.note_insert(name);
 
                 // Termination check: only meaningful when `value` is a
@@ -572,7 +589,7 @@ pub fn shape_of(v: &Value) -> crate::typecheck::Shape {
     use crate::typecheck::Shape::*;
     match v {
         Value::Int(_) => Int,
-        Value::Real(_) => Real,
+        Value::Real(_) | Value::Interval(_) => Real,
         Value::Bool(_) => Bool,
         Value::Str(_) => Str,
         Value::Set(_) => Set,
@@ -791,4 +808,3 @@ fn is_ident_continue(c: char) -> bool {
 fn refined_identifier_len(e: &SekiError) -> Option<usize> {
     extract_failing_ident(e).map(|s| s.chars().count())
 }
-

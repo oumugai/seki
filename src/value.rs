@@ -28,6 +28,13 @@ pub enum Value {
     /// in seki is a computational (machine-precision) approximation of `ℝ`,
     /// not a constructive Cauchy-sequence representation.
     Real(f64),
+    /// A guaranteed *enclosure* of a real, `[lo, hi]` in exact rationals.
+    ///
+    /// `Real` is `f64`, which rounds; `Interval` brackets the true value
+    /// instead, so a comparison it settles is settled about ℝ.  Only the
+    /// kernel produces these, through `EvalCtx::interval_mode` — an
+    /// ordinary program never sees one.  See `crate::interval`.
+    Interval(crate::interval::Interval),
     Bool(bool),
     Str(String),
     Set(Arc<SetVal>),
@@ -238,6 +245,7 @@ impl Value {
             Value::Unit => "Unit",
             Value::Int(_) => "Int",
             Value::Real(_) => "Real",
+            Value::Interval(_) => "Real",
             Value::Bool(_) => "Bool",
             Value::Str(_) => "String",
             Value::Set(_) => "Set",
@@ -258,6 +266,9 @@ impl fmt::Display for Value {
         match self {
             Value::Unit => write!(f, "()"),
             Value::Int(n) => write!(f, "{}", n),
+            // Shown as the enclosure it is: a reader who sees one is
+            // looking at a kernel check, and the width is the point.
+            Value::Interval(i) => write!(f, "{}", i),
             Value::Real(r) => {
                 // Always show a decimal point so `1.0` doesn't masquerade as Int.
                 if r.fract() == 0.0 && r.is_finite() {
@@ -639,6 +650,17 @@ impl Default for Env {
 /// Module-level definitions: `def` introduces these.  Looked up after env.
 pub struct Globals {
     pub defs: HashMap<String, Value>,
+    /// The source expression of every non-function `def`, kept so the
+    /// kernel can re-evaluate it as an *enclosure*.
+    ///
+    /// A scalar definition is evaluated once, at declaration time, in
+    /// `f64`: `def pi := 3.141592653589793` stores a double.  Reading that
+    /// double back under interval arithmetic would mean treating a rounded
+    /// number as exact, which is the very confusion intervals exist to
+    /// stop.  Keeping the expression lets interval mode start from the
+    /// literal the author wrote.  Functions need no entry — a closure
+    /// carries its body and re-evaluates it anyway.
+    pub def_exprs: HashMap<String, crate::ast::Expr>,
     /// Theorems that have been verified.  Their *type* (proposition) is also
     /// recorded so they can be referenced as proof terms.
     pub theorems: HashMap<String, Value>,
@@ -714,6 +736,7 @@ impl Globals {
     pub fn new() -> Self {
         Globals {
             defs: HashMap::new(),
+            def_exprs: HashMap::new(),
             theorems: HashMap::new(),
             axioms: HashMap::new(),
             inferred_types: HashMap::new(),
@@ -748,6 +771,7 @@ impl Globals {
     pub fn clone_for_thread(&self) -> Globals {
         Globals {
             defs: self.defs.clone(),
+            def_exprs: self.def_exprs.clone(),
             theorems: self.theorems.clone(),
             axioms: self.axioms.clone(),
             inferred_types: self.inferred_types.clone(),

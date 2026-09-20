@@ -3822,10 +3822,16 @@ fn the_kernel_does_not_certify_a_proposition_and_its_negation() {
 #[test]
 fn hiding_the_literals_in_definitions_does_not_reopen_it() {
     // A syntactic check for real literals misses this: the proposition is
-    // `(a + b) != c` and mentions none.  The evaluator reports instead
-    // whether it ever operated on a real.
-    let g = run("def a := 0.1\n                 def b := 0.2\n                 def c := 0.3\n                 theorem viaDefs : (a + b) != c := by eval\n");
-    assert_eq!(g.theorem_trust["viaDefs"], TrustLevel::Approximate);
+    // `(a + b) != c` and mentions none.  Interval arithmetic re-evaluates
+    // the definitions from source, finds `3/10` on both sides, and settles
+    // the goal as *false* — so it is refused outright.
+    assert!(run_err(
+        "def a := 0.1\n\
+         def b := 0.2\n\
+         def c := 0.3\n\
+         theorem viaDefs : (a + b) != c := by eval\n"
+    )
+    .is_proof_error());
 }
 
 #[test]
@@ -3842,11 +3848,26 @@ fn an_exact_real_claim_is_still_kernel_checked() {
 }
 
 #[test]
-fn a_numerical_tolerance_check_is_reported_as_approximate() {
-    // `|sqrt 2 - 1.414| < 0.001` is a claim about doubles.  It used to
-    // audit as "kernel-checked from primitives", which it was not.
+fn a_tolerance_check_on_a_square_root_is_now_proved() {
+    // `|sqrt 2 - 1.414| < 0.001` used to be reported as floating point.
+    // Interval arithmetic gives a *verified* enclosure of the root — each
+    // endpoint checked by squaring it — so the claim is about the reals.
     let g = run("theorem approx : (absR ((sqrt 2.0) - 1.414)) < 0.001 := by eval\n");
-    assert_eq!(g.theorem_trust["approx"], TrustLevel::Approximate);
+    assert_eq!(g.theorem_trust["approx"], TrustLevel::Sound);
+    // And a tolerance the root does not meet is refused, not waved through.
+    assert!(run_err(
+        "theorem bad : (absR ((sqrt 2.0) - 1.414)) < 0.0000000001 := by eval\n"
+    )
+    .is_proof_error());
+}
+
+#[test]
+fn a_transcendental_still_has_no_enclosure() {
+    // `exp` rounds in a way nothing here bounds, so a goal that needs it
+    // gets no exact verdict — the honest answer, not a guess.
+    let g = run("def absR := \\r -> if r < 0.0 then 0.0 - r else r\n\
+                 theorem t : absR ((exp 1.0) - 2.718281828) < 0.001 := by eval\n");
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Approximate);
 }
 
 #[test]
@@ -3855,7 +3876,8 @@ fn strict_mode_refuses_a_floating_point_verdict() {
     session.strict = true;
     let err = session
         .run_source(
-            "theorem approx : (absR ((sqrt 2.0) - 1.414)) < 0.001 := by eval\n",
+            "def absR := \\r -> if r < 0.0 then 0.0 - r else r\n\
+             theorem t : absR ((exp 1.0) - 2.718281828) < 0.001 := by eval\n",
             true,
         )
         .expect_err("--strict must refuse a floating-point verdict");
@@ -3867,30 +3889,122 @@ fn strict_mode_refuses_a_floating_point_verdict() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Interval arithmetic: what it proves, and what it refuses to.
+
 #[test]
-fn a_witness_that_does_not_work_is_refused() {
-    // `certify` must fail when the tactic does.  Building a certificate
-    // and letting the kernel reject it is not the same thing: a rejected
-    // *evaluation* step is reported as sampled rather than as an error, so
-    // these came back "proved" with a sampling caveat.
+fn a_taylor_series_tolerance_is_proved_not_approximated() {
+    // Thirty terms of exp's series, compared against a decimal, all under
+    // guaranteed enclosures.  Nothing here is in the polynomial fragment —
+    // `expAccum` is a recursive seki function.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--audit")
+        .arg("examples/29_analysis.seki")
+        .output()
+        .expect("run seki --audit");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", stdout);
+    assert!(
+        stdout.contains("sound:"),
+        "some claims in the analysis example should now be proved:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn an_enclosure_that_does_not_settle_gives_no_verdict() {
+    // A tolerance tighter than the enclosure's own width cannot be
+    // decided, and "cannot decide" must never read as "holds".
+    assert!(run_err(
+        "theorem bad : (absR ((sqrt 2.0) - 1.41421356237309504880)) < 0.0 := by eval\n"
+    )
+    .is_proof_error());
+}
+
+// ---------------------------------------------------------------------------
+// Interval arithmetic.  A claim about a numerical computation can be proved
+// *about the reals* when the computation is carried out with guaranteed
+// enclosures — see `src/interval.rs`.
+
+#[test]
+fn a_verified_square_root_settles_a_tolerance() {
+    // Each endpoint of the enclosure is checked by squaring it, so this is
+    // a statement about √2, not about what `f64::sqrt` returned.
+    assert_eq!(
+        trust_of("theorem t : (absR ((sqrt 2.0) - 1.414)) < 0.001 := by eval", "t"),
+        TrustLevel::Sound
+    );
+    assert_eq!(
+        trust_of("theorem t : (sqrt 2.0) < 1.5 := by eval", "t"),
+        TrustLevel::Sound
+    );
+    assert_eq!(
+        trust_of("theorem t : (sqrt 9.0) == 3.0 := by eval", "t"),
+        TrustLevel::Sound
+    );
+}
+
+#[test]
+fn a_tolerance_the_root_misses_is_refused() {
     for src in [
-        "theorem bad : exists x in Real, x * x == (0.0 - 1.0) := by witness x := 0.0",
-        "theorem bad : forall e in Real, e > 0.0 => (exists d in Real, d > e) \
-         := by witness d := e",
-        "theorem bad : forall e in Real, (exists d in Real, d > 0.0) := by witness d := e",
+        // |√2 - 1.41421356| is about 2.4e-9, so this is false.
+        "theorem bad : (absR ((sqrt 2.0) - 1.41421356)) < 0.000000001 := by eval",
+        "theorem bad : (sqrt 2.0) < 1.41421356 := by eval",
+        "theorem bad : (sqrt 2.0) > 1.41421357 := by eval",
     ] {
         assert!(run_err(src).is_proof_error(), "accepted: {}", src);
     }
 }
 
 #[test]
-fn a_witness_that_works_is_still_accepted() {
-    assert_eq!(
-        trust_of(
-            "theorem ok : forall e in Real, e > 0.0 => (exists d in Real, d > 0.0) \
-             := by witness d := e",
-            "ok"
-        ),
-        TrustLevel::Sound
+fn an_enclosure_overrules_the_floating_point_answer() {
+    // `0.1 + 0.2 > 0.3` is true of doubles and false of the reals.  The
+    // tactic evaluates it to true; the kernel refuses it.
+    assert!(run_err("theorem bad : (0.1 + 0.2) > 0.3 := by eval").is_proof_error());
+}
+
+#[test]
+fn a_recursive_numerical_computation_is_proved_not_approximated() {
+    // Thirty terms of exp's Taylor series against a decimal — outside the
+    // polynomial fragment entirely, since `expAccum` is a recursive seki
+    // function, and still settled exactly.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--audit")
+        .arg("examples/29_analysis.seki")
+        .env("SEKI_LIB_PATH", "lib")
+        .output()
+        .expect("run seki --audit");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", stdout);
+    assert!(
+        stdout.contains("exp_1_is_e                                    kernel-checked"),
+        "a Taylor-series tolerance should be kernel-checked:\n{}",
+        stdout
     );
+}
+
+#[test]
+fn shadowing_a_stdlib_constant_does_not_confuse_the_kernel() {
+    // `def e := ...` shadows the stdlib's `e = 2.718…`.  Interval mode
+    // re-evaluates definitions from source, and a stale entry for the old
+    // `e` made it resolve to the constant instead.
+    let g = run("def e := 3.0\n                 theorem t : e == 3.0 := by eval\n");
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+}
+
+#[test]
+fn re_evaluating_a_definition_never_re_runs_its_effects() {
+    // `mkRef` evaluated twice is two different cells.  A definition whose
+    // source is not effect-free keeps its stored value, so the kernel reads
+    // the cell the program has been writing to and sees 3, not 0.
+    let g = run("def counter := mkRef 0\n\
+                 def step1 := writeRef counter 3\n\
+                 theorem t : (readRef counter) == 3 := by eval\n");
+    assert_eq!(g.theorem_trust["t"], TrustLevel::Sound);
+    // With a real in the cell the kernel cannot vouch for the stored
+    // `f64`, so it declines rather than re-running the effect to find out.
+    let g = run("def c2 := mkRef 0.0\n\
+                 def s2 := writeRef c2 3.0\n\
+                 theorem u : (readRef c2) == 3.0 := by eval\n");
+    assert_eq!(g.theorem_trust["u"], TrustLevel::Approximate);
 }

@@ -585,6 +585,26 @@ impl Checker<'_, '_> {
             }
             None => {}
         }
+        // Before settling for floating point, try computing the whole
+        // proposition as a guaranteed *enclosure*.  `|integSimpson 100 f 0 1
+        // - 1/3| < 1e-6` is outside the polynomial fragment — it is a
+        // recursive seki function — but interval arithmetic evaluates it
+        // with rigorous bounds, and a comparison the bounds settle is
+        // settled about ℝ, not about doubles.
+        match self.interval_verdict(prop) {
+            Some(true) => return Ok(Verdict::sound()),
+            // An enclosure that settles the comparison the other way is a
+            // proof the goal is *false* — the true values lie inside the
+            // enclosures, so they settle it the same way.
+            Some(false) => {
+                return err(format!(
+                    "the goal {} is false over the reals; the evaluator's \
+                     floating-point answer differs",
+                    prop
+                ))
+            }
+            None => {}
+        }
         // Otherwise evaluate, and see whether the answer rested on
         // floating point.  A syntactic check for real literals does not
         // close this — `def a := 0.1` hides them — so the evaluator reports
@@ -622,6 +642,33 @@ impl Checker<'_, '_> {
                 prop,
                 other.type_name()
             )),
+        }
+    }
+
+    /// Evaluate `prop` with reals as enclosures.  `Some(true)` means the
+    /// enclosures settled it; anything else means no verdict, and the
+    /// caller falls back.
+    ///
+    /// Interval arithmetic only ever widens, so a `true` here is a
+    /// statement about the reals.  A `false` is *not* symmetrical — the
+    /// enclosure could be too wide to have caught a true statement — so it
+    /// is reported as "no verdict" and the ordinary path decides.
+    fn interval_verdict(&self, prop: &Expr) -> Option<bool> {
+        let ctx = EvalCtx::interval(self.ctx.globals);
+        let outcome = ctx.eval(prop, &self.env);
+        // Why an enclosure failed to settle a goal is the question when
+        // tuning this, and invisible without help.  `SEKI_INTERVAL_DEBUG`
+        // prints it; nothing depends on the output.
+        if std::env::var_os("SEKI_INTERVAL_DEBUG").is_some() {
+            match &outcome {
+                Ok(Value::Bool(b)) => eprintln!("interval: {} => {}", prop, b),
+                Ok(v) => eprintln!("interval: {} => non-Bool {}", prop, v),
+                Err(e) => eprintln!("interval: {} => {}", prop, e),
+            }
+        }
+        match outcome {
+            Ok(Value::Bool(b)) => Some(b),
+            _ => None,
         }
     }
 

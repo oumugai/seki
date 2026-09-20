@@ -93,6 +93,13 @@ pub struct EvalCtx<'a> {
     /// real was ever operated on, and the kernel refuses to settle such a
     /// goal by evaluation.  See `Checker::check_ground`.
     pub touched_real: std::cell::Cell<bool>,
+    /// Compute reals as guaranteed *enclosures* rather than as `f64`.
+    ///
+    /// Set by the kernel.  Literals become exact rationals, arithmetic
+    /// rounds outward, and a comparison the enclosure does not settle is an
+    /// error rather than a guess — so a verdict reached in this mode is a
+    /// verdict about ℝ.  See `crate::interval`.
+    pub interval_mode: bool,
 }
 
 /// Restores the evaluator's nesting count when it goes out of scope, so the
@@ -125,9 +132,16 @@ impl<'a> EvalCtx<'a> {
             globals,
             finite_only: false,
             touched_real: std::cell::Cell::new(false),
+            interval_mode: false,
             steps_left: std::cell::Cell::new(eval_budget()),
             depth: std::cell::Cell::new(0),
         }
+    }
+
+    /// A `finite_only` context that also computes reals as guaranteed
+    /// enclosures.  See [`EvalCtx::interval_mode`].
+    pub fn interval(globals: &'a Globals) -> Self {
+        EvalCtx { interval_mode: true, ..EvalCtx::finite_only(globals) }
     }
 
     /// An evaluation context that refuses to sample an infinite domain.
@@ -139,6 +153,7 @@ impl<'a> EvalCtx<'a> {
             steps_left: std::cell::Cell::new(eval_budget()),
             depth: std::cell::Cell::new(0),
             touched_real: std::cell::Cell::new(false),
+            interval_mode: false,
         }
     }
 
@@ -185,13 +200,33 @@ impl<'a> EvalCtx<'a> {
         let _depth = self.enter()?;
         match e {
             Expr::Int(n) => Ok(Value::Int(*n)),
-            Expr::Real(r) => Ok(Value::Real(*r)),
+            Expr::Real(r) => {
+                if self.interval_mode {
+                    // The literal as written, exactly: `0.1` is one tenth.
+                    return match crate::algebra::decimal_to_rat(*r) {
+                        Some(q) => Ok(Value::Interval(crate::interval::Interval::exact(q))),
+                        None => Err(SekiError::Runtime(format!(
+                            "the literal {} has no exact rational form",
+                            r
+                        ))),
+                    };
+                }
+                Ok(Value::Real(*r))
+            }
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Str(s) => Ok(Value::Str(s.clone())),
 
             Expr::Var { name, line, col } => {
                 if let Some(v) = env.lookup(name) {
                     return Ok(v.clone());
+                }
+                // Under interval arithmetic a scalar definition is
+                // re-evaluated from its source rather than read back as the
+                // `f64` it was stored as — see `Globals::def_exprs`.
+                if self.interval_mode {
+                    if let Some(src) = self.globals.def_exprs.get(name) {
+                        return self.eval(src, &Env::new());
+                    }
                 }
                 if let Some(v) = self.globals.lookup(name) {
                     return Ok(v.clone());
@@ -298,7 +333,20 @@ impl<'a> EvalCtx<'a> {
             }
 
             Expr::If { cond, then_branch, else_branch } => {
-                let c = self.eval(cond, env)?;
+                let c = match self.eval(cond, env) {
+                    Ok(c) => c,
+                    // An enclosure too wide to settle the condition does
+                    // not mean the `if` has no value: it takes one branch
+                    // or the other, so the hull of the two encloses it.
+                    // `absR x` with `x` straddling zero is exactly this,
+                    // and it is what every tolerance check goes through.
+                    Err(e) if self.interval_mode && is_undecided(&e) => {
+                        let t = self.eval(then_branch, env)?;
+                        let f = self.eval(else_branch, env)?;
+                        return hull_values(&t, &f);
+                    }
+                    Err(e) => return Err(e),
+                };
                 match c {
                     Value::Bool(true) => self.eval(then_branch, env),
                     Value::Bool(false) => self.eval(else_branch, env),
@@ -540,6 +588,18 @@ impl<'a> EvalCtx<'a> {
                         )));
                     }
                     let take: Vec<Value> = args.drain(0..b.arity).collect();
+                    if self.interval_mode {
+                        // Fail closed: a builtin reaches an enclosure only
+                        // if it has been shown to be exact on exact input,
+                        // or to produce a rigorous enclosure itself.  A
+                        // builtin that rounds (`exp`, `sin`, `ln`) has no
+                        // entry, so a goal that needs one gets no interval
+                        // verdict and falls back to `Approximate`.
+                        if let Some(res) = interval_builtin(b.name, &take)? {
+                            f = res;
+                            continue;
+                        }
+                    }
                     let res = match b.name {
                         "spawn" => spawn_dispatch(self.globals, &take)
                             .map_err(SekiError::Runtime)?,
@@ -597,7 +657,21 @@ impl<'a> EvalCtx<'a> {
                     expr_ptr = body;
                 }
                 Expr::If { cond, then_branch, else_branch } => {
-                    let c = self.eval(cond, &env_local)?;
+                    let c = match self.eval(cond, &env_local) {
+                        Ok(c) => c,
+                        // See the same case in `eval`: an undecided
+                        // condition still has a value in one branch or the
+                        // other, so the hull encloses it.  The tail-call
+                        // loop has to handle it too — `absR` is a one-liner
+                        // whose `if` is its whole body, so it comes through
+                        // here rather than through `eval`.
+                        Err(e) if self.interval_mode && is_undecided(&e) => {
+                            let t = self.eval(then_branch, &env_local)?;
+                            let f = self.eval(else_branch, &env_local)?;
+                            return Ok(EvalOutcome::Done(hull_values(&t, &f)?));
+                        }
+                        Err(e) => return Err(e),
+                    };
                     match c {
                         Value::Bool(true) => { expr_ptr = then_branch; }
                         Value::Bool(false) => { expr_ptr = else_branch; }
@@ -680,6 +754,17 @@ impl<'a> EvalCtx<'a> {
         }
         let lv = self.eval(l, env)?;
         let rv = self.eval(r, env)?;
+        // A rounded `f64` must never take part in an enclosure: it has
+        // already lost the exactness intervals exist to preserve.  Refusing
+        // denies the kernel a verdict, which is the safe direction.
+        if self.interval_mode
+            && (matches!(lv, Value::Real(_)) || matches!(rv, Value::Real(_)))
+        {
+            return Err(SekiError::Runtime(format!(
+                "a floating-point value reached interval arithmetic ({} {} {})",
+                lv, op, rv
+            )));
+        }
         // Note any operation that involved a floating-point real.  The
         // kernel reads this to refuse settling such a goal by evaluation —
         // see `EvalCtx::touched_real`.
@@ -705,8 +790,35 @@ impl<'a> EvalCtx<'a> {
             BinOp::Mul => arith(lv, rv, "*", i64::checked_mul, |a, b| a * b),
             BinOp::Div => arith_div(lv, rv),
             BinOp::Mod => arith_mod(lv, rv),
-            BinOp::Eq => Ok(Value::Bool(value_eq(&lv, &rv))),
-            BinOp::Neq => Ok(Value::Bool(!value_eq(&lv, &rv))),
+            BinOp::Eq | BinOp::Neq => {
+                // Two enclosures settle equality only when they are the
+                // same point, or when they do not overlap at all.  Anything
+                // else is an honest "cannot tell".
+                if self.interval_mode && (contains_real(&lv) || contains_real(&rv)) {
+                    return Err(SekiError::Runtime(format!(
+                        "a floating-point value reached interval arithmetic \
+                         ({} == {})",
+                        lv, rv
+                    )));
+                }
+                if self.interval_mode
+                    && (contains_interval(&lv) || contains_interval(&rv))
+                {
+                    return match interval_structural_eq(&lv, &rv) {
+                        Some(v) => Ok(Value::Bool(
+                            if matches!(op, BinOp::Eq) { v } else { !v },
+                        )),
+                        None => Err(SekiError::Runtime(format!(
+                            "{}: {} and {} do not settle equality",
+                            crate::interval::UNDECIDED,
+                            lv,
+                            rv
+                        ))),
+                    };
+                }
+                let same = value_eq(&lv, &rv);
+                Ok(Value::Bool(if matches!(op, BinOp::Eq) { same } else { !same }))
+            }
             BinOp::Lt => cmp(lv, rv, |a, b| a < b, |a, b| a < b),
             BinOp::Le => cmp(lv, rv, |a, b| a <= b, |a, b| a <= b),
             BinOp::Gt => cmp(lv, rv, |a, b| a > b, |a, b| a > b),
@@ -1052,6 +1164,37 @@ fn arith(
     fi: fn(i64, i64) -> Option<i64>,
     fr: fn(f64, f64) -> f64,
 ) -> SekiResult<Value> {
+    // An enclosure on either side makes the whole operation an enclosure.
+    // Outward rounding means the result still brackets the real answer; a
+    // poisoned one means the kernel gets no verdict, never a wrong one.
+    if matches!(lv, Value::Interval(_)) || matches!(rv, Value::Interval(_)) {
+        let (Some(a), Some(b)) = (as_interval(&lv), as_interval(&rv)) else {
+            return Err(SekiError::Runtime(format!(
+                "interval arithmetic on non-numeric values: {} and {}",
+                lv.type_name(),
+                rv.type_name()
+            )));
+        };
+        let out = match op {
+            "+" => a.add(b),
+            "-" => a.sub(b),
+            "*" => a.mul(b),
+            "/" => a.div(b),
+            _ => {
+                return Err(SekiError::Runtime(format!(
+                    "`{}` has no interval form",
+                    op
+                )))
+            }
+        };
+        if out.is_poison() {
+            return Err(SekiError::Runtime(format!(
+                "the enclosure of `{} {} {}` could not be established",
+                a, op, b
+            )));
+        }
+        return Ok(Value::Interval(out));
+    }
     match (lv, rv) {
         (Value::Int(a), Value::Int(b)) => fi(a, b)
             .map(Value::Int)
@@ -1099,12 +1242,244 @@ fn arith_mod(lv: Value, rv: Value) -> SekiResult<Value> {
     }
 }
 
+
+
+
+/// Does this value have an enclosure anywhere inside it?
+///
+/// A list of coefficients is a tuple of tuples, so a polynomial compared
+/// with `==` reaches structural equality with intervals buried in it.
+fn contains_interval(v: &Value) -> bool {
+    match v {
+        Value::Interval(_) => true,
+        Value::Tuple(xs) => xs.iter().any(contains_interval),
+        _ => false,
+    }
+}
+
+/// Does this value have a rounded `f64` anywhere inside it?
+///
+/// Under interval arithmetic that is a value nothing here can vouch for —
+/// it may have come from a builtin with no enclosure, or from a definition
+/// left un-re-evaluated — so a comparison that reaches one gets no verdict.
+fn contains_real(v: &Value) -> bool {
+    match v {
+        Value::Real(_) => true,
+        Value::Tuple(xs) => xs.iter().any(contains_real),
+        _ => false,
+    }
+}
+
+/// Equality of two values that may contain enclosures.
+///
+/// Structural equality is wrong here: two enclosures with different
+/// endpoints may still bracket the same number, so telling them apart by
+/// their endpoints would report a difference that is not there.  The answer
+/// is `Some(false)` only when some part is *definitely* different,
+/// `Some(true)` only when every part is a matching point, and `None` — no
+/// verdict — otherwise.
+fn interval_structural_eq(a: &Value, b: &Value) -> Option<bool> {
+    match (a, b) {
+        (Value::Tuple(xs), Value::Tuple(ys)) => {
+            if xs.len() != ys.len() {
+                return Some(false);
+            }
+            let mut all_equal = true;
+            for (x, y) in xs.iter().zip(ys) {
+                match interval_structural_eq(x, y) {
+                    Some(false) => return Some(false),
+                    Some(true) => {}
+                    None => all_equal = false,
+                }
+            }
+            all_equal.then_some(true)
+        }
+        // A rounded `f64` on either side means the two are represented
+        // differently, not that they differ.  One definition may have been
+        // re-evaluated as an enclosure and the other left alone, and
+        // reporting that as a difference would reject a true equality.
+        (Value::Real(_), _) | (_, Value::Real(_)) => None,
+        _ => {
+            let (Some(x), Some(y)) = (as_interval(a), as_interval(b)) else {
+                // Not numeric on both sides — a tag string, a unit — so
+                // ordinary equality is the right answer.
+                return Some(crate::value::value_eq(a, b));
+            };
+            x.eq(y)
+        }
+    }
+}
+
+/// Was this failure "the enclosures were too wide", as opposed to a real
+/// error?  Only the former licenses hulling an `if`.
+fn is_undecided(e: &SekiError) -> bool {
+    e.message().contains(crate::interval::UNDECIDED)
+}
+
+/// The enclosure of an `if` whose condition was undecided: whichever branch
+/// runs, the answer is in here.  Only numbers have a hull, so anything else
+/// stays a failure.
+fn hull_values(a: &Value, b: &Value) -> SekiResult<Value> {
+    use crate::interval::Interval;
+    let as_iv = |v: &Value| match v {
+        Value::Interval(i) => Some(*i),
+        Value::Int(n) => Some(Interval::from_int(*n as i128)),
+        _ => None,
+    };
+    match (as_iv(a), as_iv(b)) {
+        (Some(x), Some(y)) => {
+            let h = crate::interval::hull(x, y);
+            if h.is_poison() {
+                return Err(SekiError::Runtime(format!(
+                    "{}: no enclosure covers both branches",
+                    crate::interval::UNDECIDED
+                )));
+            }
+            Ok(Value::Interval(h))
+        }
+        _ => Err(SekiError::Runtime(format!(
+            "{}: the branches are {} and {}, which have no common enclosure",
+            crate::interval::UNDECIDED,
+            a.type_name(),
+            b.type_name()
+        ))),
+    }
+}
+
+/// A builtin's behaviour on enclosures, when it has one.
+///
+/// `Ok(None)` means "not a numeric builtin, run the ordinary one" — string
+/// and list operations are unaffected by how reals are represented.
+/// `Err` means the builtin is numeric but has no rigorous interval form,
+/// which denies the kernel a verdict rather than giving it a wrong one.
+fn interval_builtin(name: &str, args: &[Value]) -> SekiResult<Option<Value>> {
+    use crate::interval::Interval;
+    let iv = |v: &Value| -> Option<Interval> {
+        match v {
+            Value::Interval(i) => Some(*i),
+            Value::Int(n) => Some(Interval::from_int(*n as i128)),
+            _ => None,
+        }
+    };
+    let need = |v: &Value| -> SekiResult<Interval> {
+        iv(v).ok_or_else(|| {
+            SekiError::Runtime(format!(
+                "{}: expected a number, got {}",
+                name,
+                v.type_name()
+            ))
+        })
+    };
+    match name {
+        // Exact on any input: an integer *is* a real.
+        "intToReal" => match &args[0] {
+            Value::Int(n) => Ok(Some(Value::Interval(Interval::from_int(*n as i128)))),
+            other => Err(SekiError::Runtime(format!(
+                "intToReal: expected an Int, got {}",
+                other.type_name()
+            ))),
+        },
+        // Verified by squaring — see `Interval::sqrt`.
+        "sqrt" => {
+            let s = need(&args[0])?.sqrt();
+            if s.is_poison() {
+                return Err(SekiError::Runtime("sqrt: no enclosure".into()));
+            }
+            Ok(Some(Value::Interval(s)))
+        }
+        // Repeated multiplication, so exact up to the outward rounding.
+        "pow" => {
+            let base = need(&args[0])?;
+            let Value::Int(e) = &args[1] else {
+                return Err(SekiError::Runtime(
+                    "pow: the exponent must be an Int for an enclosure".into(),
+                ));
+            };
+            if *e < 0 || *e > 4096 {
+                return Err(SekiError::Runtime(
+                    "pow: only small non-negative exponents have an enclosure".into(),
+                ));
+            }
+            let mut acc = Interval::from_int(1);
+            for _ in 0..*e {
+                acc = acc.mul(base);
+                if acc.is_poison() {
+                    return Err(SekiError::Runtime("pow: enclosure overflowed".into()));
+                }
+            }
+            Ok(Some(Value::Interval(acc)))
+        }
+        // Rounds, and an enclosure that straddles an integer has no answer.
+        "floor" | "ceil" | "round" => {
+            let i = need(&args[0])?;
+            let lo = crate::interval::floor_of(i.lo);
+            let hi = crate::interval::floor_of(i.hi);
+            match (name, lo, hi) {
+                (_, Some(a), Some(b)) if a == b && name == "floor" => {
+                    Ok(Some(Value::Int(a as i64)))
+                }
+                _ => Err(SekiError::Runtime(format!(
+                    "{}: the enclosure {} does not determine the result",
+                    name, i
+                ))),
+            }
+        }
+        // Rounds in a way nothing here bounds.
+        "exp" | "ln" | "log" | "sin" | "cos" | "tan" | "atan" | "asin" | "acos"
+        | "sinh" | "cosh" | "tanh" => Err(SekiError::Runtime(format!(
+            "{} has no interval form yet, so this goal gets no exact verdict",
+            name
+        ))),
+        // Everything else is not about reals.
+        _ => Ok(None),
+    }
+}
+
+/// Read a numeric value as an enclosure: an interval is itself, an integer
+/// is a point, and anything else is not numeric.  A plain `Real` cannot
+/// appear here — interval mode lifts every literal — so it is refused
+/// rather than silently converted from a rounded `f64`.
+fn as_interval(v: &Value) -> Option<crate::interval::Interval> {
+    match v {
+        Value::Interval(i) => Some(*i),
+        Value::Int(n) => Some(crate::interval::Interval::from_int(*n as i128)),
+        _ => None,
+    }
+}
+
 fn cmp(
     lv: Value,
     rv: Value,
     fi: fn(i64, i64) -> bool,
     fr: fn(f64, f64) -> bool,
 ) -> SekiResult<Value> {
+    if matches!(lv, Value::Interval(_)) || matches!(rv, Value::Interval(_)) {
+        let (Some(a), Some(b)) = (as_interval(&lv), as_interval(&rv)) else {
+            return Err(SekiError::Runtime(format!(
+                "interval comparison on non-numeric values: {} and {}",
+                lv.type_name(),
+                rv.type_name()
+            )));
+        };
+        // `fr` on the endpoints tells us which comparison this is, without
+        // threading an operator tag through every caller.
+        let answer = if fr(0.0, 1.0) && !fr(1.0, 0.0) {
+            if fr(1.0, 1.0) { a.le(b) } else { a.lt(b) }
+        } else if fr(1.0, 0.0) && !fr(0.0, 1.0) {
+            if fr(1.0, 1.0) { b.le(a) } else { b.lt(a) }
+        } else {
+            None
+        };
+        return match answer {
+            Some(v) => Ok(Value::Bool(v)),
+            None => Err(SekiError::Runtime(format!(
+                "{}: {} and {} do not settle this comparison",
+                crate::interval::UNDECIDED,
+                a,
+                b
+            ))),
+        };
+    }
     match (lv, rv) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(fi(a, b))),
         (Value::Real(a), Value::Real(b)) => Ok(Value::Bool(fr(a, b))),
@@ -1648,6 +2023,40 @@ fn expr_to_sym_value(e: &crate::ast::Expr) -> Result<Value, String> {
     }
 }
 
+
+/// Should this definition's source be kept so the kernel can re-evaluate it
+/// as an enclosure?  See `Globals::def_exprs`.
+///
+/// Two conditions.  It must *hold a real* — everything else was already
+/// exact when stored, so re-running it buys nothing.  And it must be
+/// **effect-free**: `def counter := newRef 0` evaluated a second time is a
+/// different cell, and the kernel would be reading one the program never
+/// wrote to.
+pub fn worth_reevaluating(value: &Value, source: &Expr) -> bool {
+    fn holds_a_real(v: &Value) -> bool {
+        match v {
+            Value::Real(_) => true,
+            Value::Tuple(xs) => xs.iter().any(holds_a_real),
+            _ => false,
+        }
+    }
+    fn effect_free(e: &Expr) -> bool {
+        if let Expr::Var { name, .. } = e {
+            if let Some(meta) = crate::builtin_meta::builtin_meta(name) {
+                if !matches!(
+                    meta.effect,
+                    crate::builtin_meta::Effect::Pure
+                        | crate::builtin_meta::Effect::PartialPure
+                ) {
+                    return false;
+                }
+            }
+        }
+        crate::ast::children(e).into_iter().all(effect_free)
+    }
+    holds_a_real(value) && effect_free(source)
+}
+
 /// Parse and evaluate the embedded `stdlib.seki`, inserting every `def`
 /// into `g`.  Each definition is evaluated in the context of all previously
 /// installed names (builtins + earlier stdlib defs).
@@ -1669,6 +2078,11 @@ fn install_stdlib(g: &mut Globals) {
                     Err(e) => panic!("stdlib eval `{}` failed: {}", name, e),
                 }
             };
+            if worth_reevaluating(&v, &value) {
+                g.def_exprs.insert(name.clone(), value.clone());
+            } else {
+                g.def_exprs.remove(&name);
+            }
             g.defs.insert(name, v);
         }
     }
@@ -1835,6 +2249,15 @@ pub fn make_builtin_prelude() -> Globals {
     // `abs` is now defined in `stdlib.seki` for both Int and Real domains
     // (one definition each).
     fn b_sqrt(args: &[Value]) -> Result<Value, String> {
+        // In interval mode the argument is an enclosure, and the answer has
+        // to be one too — verified by squaring, not taken from `f64`.
+        if let Value::Interval(i) = &args[0] {
+            let s = i.sqrt();
+            if s.is_poison() {
+                return Err(format!("sqrt: no enclosure for {}", i));
+            }
+            return Ok(Value::Interval(s));
+        }
         match &args[0] {
             Value::Real(r) => {
                 if *r < 0.0 {

@@ -27,6 +27,7 @@ pub mod builtin_meta;
 pub mod bytecode;
 pub mod confidence;
 pub mod eval;
+pub mod interval;
 pub mod lexer;
 pub mod linarith;
 pub mod obligation;
