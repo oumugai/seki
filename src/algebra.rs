@@ -277,6 +277,15 @@ pub struct Polynomial {
 }
 
 impl Polynomial {
+    /// The highest total degree of any term (a constant has degree zero).
+    pub fn degree(&self) -> u32 {
+        self.terms
+            .iter()
+            .map(|m| m.vars.values().sum::<u32>())
+            .max()
+            .unwrap_or(0)
+    }
+
     pub fn zero() -> Self {
         Self { terms: vec![] }
     }

@@ -26,8 +26,8 @@ use crate::algebra::{Rat,
 };
 use crate::ast::{subst, BinOp, Expr, Proof, UnOp};
 use crate::rewrite::{
-    canonicalize, case_split_goals, collect_simp_rules, exprs_equal, rewrite_goal,
-    simp_rewrite, split_first_if, SimpRule,
+    canonicalize, case_split_goals, collapse_if_cond, collect_simp_rules, exprs_equal,
+    rewrite_goal, simp_rewrite, split_first_if, SimpRule,
 };
 use crate::unfold::{collect_free_var_names, unfold_definition};
 use crate::eval::{enumerate_set, EvalCtx};
@@ -830,10 +830,27 @@ impl<'a> Prover<'a> {
                 _ => diff.clone(),
             };
             let strict = matches!(op, BinOp::Lt | BinOp::Gt);
+            // A hypothesis recorded as *false* is the else-branch of a
+            // case split: `not (x - a < 0)` is the fact `x - a >= 0`, and
+            // dropping it loses exactly the bound the branch was split to
+            // obtain.  Flip the relation instead.
             let hyp_exprs: Vec<Expr> = hyps
                 .iter()
-                .filter(|(_, truth)| *truth)
-                .map(|(h, _)| h.clone())
+                .filter_map(|(h, truth)| {
+                    if *truth {
+                        return Some(h.clone());
+                    }
+                    match h {
+                        Expr::BinOp(op, l, r) if matches!(
+                            op,
+                            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                        ) =>
+                        {
+                            Some(Expr::BinOp(negate_relation(op), l.clone(), r.clone()))
+                        }
+                        _ => None,
+                    }
+                })
                 .collect();
             if self.find_farkas(&hyp_exprs, &goal_diff, strict).is_some() {
                 return Ok(Value::Bool(true));
@@ -2318,17 +2335,22 @@ impl<'a> Prover<'a> {
 
     /// Last resort for `by algebra`: split on the goal's first `if` and
     /// certify each branch, or record that nothing here has a witness form.
-    fn case_split_or_give_up(&self, prop: &Expr, conclusion: &Expr, env: &Env) -> Cert {
-        if split_first_if(conclusion).is_some() {
-            if let Some((goal_t, goal_f)) = case_split_goals(prop) {
-                let t = self.algebra_cert(&goal_t, env);
-                let f = self.algebra_cert(&goal_f, env);
-                if !matches!(t, Cert::Trusted { .. }) && !matches!(f, Cert::Trusted { .. }) {
-                    return Cert::CaseSplit {
-                        then_branch: Box::new(t),
-                        else_branch: Box::new(f),
-                    };
-                }
+    ///
+    /// The `if` may sit in a hypothesis rather than the conclusion — that is
+    /// the usual shape in analysis, where `absR (x - a) < d` is an
+    /// assumption — so `case_split_goals` looks in both and decides for
+    /// itself whether there is anything to split on.  Branches can nest
+    /// (`absR` on each side of an epsilon-delta statement gives two), so
+    /// each branch recurses through `algebra_cert` and may split again.
+    fn case_split_or_give_up(&self, prop: &Expr, _conclusion: &Expr, env: &Env) -> Cert {
+        if let Some((goal_t, goal_f)) = case_split_goals(prop) {
+            let t = self.algebra_cert(&goal_t, env);
+            let f = self.algebra_cert(&goal_f, env);
+            if !matches!(t, Cert::Trusted { .. }) && !matches!(f, Cert::Trusted { .. }) {
+                return Cert::CaseSplit {
+                    then_branch: Box::new(t),
+                    else_branch: Box::new(f),
+                };
             }
         }
         self.no_witness(
@@ -2413,42 +2435,60 @@ impl<'a> Prover<'a> {
             return None;
         }
         const MAX_HYPS: usize = 8;
+        /// How many hypotheses may be multiplied together.
+        const MAX_PRODUCT_DEGREE: u32 = 4;
         if usable.len() > MAX_HYPS {
             usable.truncate(MAX_HYPS);
         }
 
-        // Generators: each hypothesis, then each pairwise product
-        // (including a hypothesis squared).  Singles come first so that a
-        // linear goal still yields the simplest certificate.
+        // Generators: products of hypotheses, up to as many factors as the
+        // goal's own degree could possibly need.  A non-negative combination
+        // of degree-`d` generators cannot produce a degree-`d+1` term, so a
+        // cubic goal needs triples; a linear one needs no products at all,
+        // and paying for them would only slow the common case down.
+        let want_degree = diff.degree().clamp(2, MAX_PRODUCT_DEGREE);
         let mut generators: Vec<Generator> = Vec::new();
         let mut polys: Vec<crate::algebra::Polynomial> = Vec::new();
-        for (h, strict, p) in &usable {
-            generators.push(Generator {
-                factors: vec![h.clone()],
-                strict: *strict,
-                coeff: Rat::from_int(1),
-            });
-            polys.push(p.clone());
-        }
-        for i in 0..usable.len() {
-            for j in i..usable.len() {
-                let product = usable[i].2.clone().mul(usable[j].2.clone());
-                if product.has_overflow() {
+        // `level` holds the products of exactly `k` hypotheses, as indices
+        // into `usable`; extending it one factor at a time (never below the
+        // last index used) enumerates each multiset once.
+        let mut level: Vec<Vec<usize>> = (0..usable.len()).map(|i| vec![i]).collect();
+        for k in 1..=want_degree as usize {
+            let mut next: Vec<Vec<usize>> = Vec::new();
+            for combo in &level {
+                let mut product = usable[combo[0]].2.clone();
+                for &i in &combo[1..] {
+                    product = product.mul(usable[i].2.clone());
+                }
+                if product.has_overflow() || product.degree() > want_degree {
                     continue;
                 }
                 generators.push(Generator {
-                    factors: vec![usable[i].0.clone(), usable[j].0.clone()],
-                    strict: usable[i].1 && usable[j].1,
+                    factors: combo.iter().map(|&i| usable[i].0.clone()).collect(),
+                    strict: combo.iter().all(|&i| usable[i].1),
                     coeff: Rat::from_int(1),
                 });
                 polys.push(product);
+                if k < want_degree as usize {
+                    for i in *combo.last().unwrap()..usable.len() {
+                        let mut ext = combo.clone();
+                        ext.push(i);
+                        next.push(ext);
+                    }
+                }
             }
+            level = next;
         }
+        // Singles first, so a linear goal still yields the simplest
+        // certificate from the subset search below.
+        let singles = usable.len();
 
         // Search subsets smallest-first, so the certificate that comes back
-        // is the simplest one that works.  Solving over every generator at
-        // once leaves free variables, and zeroing those can miss the answer.
-        let n = generators.len();
+        // is the simplest one that works — a basic solution from the simplex
+        // below is valid but not always the one a reader would have written.
+        // Only the low-degree generators are worth searching this way; past
+        // pairs the subset count explodes and the simplex takes over.
+        let n = generators.len().min(singles * (singles + 3) / 2);
         let mut subsets: Vec<Vec<usize>> = Vec::new();
         for i in 0..n {
             subsets.push(vec![i]);
@@ -2490,6 +2530,49 @@ impl<'a> Prover<'a> {
             if used.is_empty() {
                 // A constant goal needs no hypotheses; leave that to the
                 // simpler witnesses.
+                continue;
+            }
+            return Some((used, slack));
+        }
+
+        // Nothing small worked.  Let the simplex consider every generator at
+        // once, products included.  Subsets cannot reach here: eight
+        // hypotheses give 164 generators at degree three, and searching
+        // triples of those is 700,000 eliminations.
+        // A strict goal needs positive slack or a strict generator actually
+        // used.  The first solve may return neither even when one exists, so
+        // each strict generator also gets a turn at being forced in.
+        let forced: Vec<Option<usize>> = std::iter::once(None)
+            .chain(if goal_strict {
+                (0..generators.len())
+                    .filter(|&i| generators[i].strict)
+                    .map(Some)
+                    .collect()
+            } else {
+                Vec::new()
+            })
+            .collect();
+        for force in forced {
+            let Some((weights, slack)) = solve_nonneg_simplex(&polys, diff, force) else {
+                continue;
+            };
+            if goal_strict {
+                let strict_ok = slack.sign() > 0
+                    || generators
+                        .iter()
+                        .zip(&weights)
+                        .any(|(g, w)| g.strict && w.sign() > 0);
+                if !strict_ok {
+                    continue;
+                }
+            }
+            let used: Vec<Generator> = generators
+                .iter()
+                .zip(&weights)
+                .filter(|(_, w)| !w.is_zero())
+                .map(|(g, w)| Generator { coeff: *w, ..g.clone() })
+                .collect();
+            if used.is_empty() {
                 continue;
             }
             return Some((used, slack));
@@ -3155,6 +3238,70 @@ fn solve_nonneg_combination(
     solve_combination(polys, target, true, true)
 }
 
+/// `solve_nonneg_combination`, but decided by simplex instead of Gaussian
+/// elimination plus a search over subsets.
+///
+/// Gaussian elimination leaves free variables whenever there are more
+/// generators than monomials, and zeroing those can miss a solution — which
+/// is why the caller used to try subsets one at a time.  The simplex takes
+/// every generator at once and still answers exactly, so triple products
+/// (degree three and up) become affordable.
+///
+/// `forced` names a generator that must appear with weight at least one; it
+/// is how a strict goal asks for a strict hypothesis to actually be used.
+fn solve_nonneg_simplex(
+    polys: &[crate::algebra::Polynomial],
+    target: &crate::algebra::Polynomial,
+    forced: Option<usize>,
+) -> Option<(Vec<Rat>, Rat)> {
+    use std::collections::BTreeMap;
+    let target = match forced {
+        Some(i) => target.clone().sub(polys.get(i)?.clone()),
+        None => target.clone(),
+    };
+    if target.has_overflow() {
+        return None;
+    }
+    // One row per monomial; the slack is an extra column contributing to
+    // the constant monomial only.
+    let mut monomials: Vec<BTreeMap<String, u32>> = Vec::new();
+    for p in polys.iter().chain(std::iter::once(&target)) {
+        for m in &p.terms {
+            if !monomials.contains(&m.vars) {
+                monomials.push(m.vars.clone());
+            }
+        }
+    }
+    let constant: BTreeMap<String, u32> = BTreeMap::new();
+    if !monomials.contains(&constant) {
+        monomials.push(constant.clone());
+    }
+    let coeff = |p: &crate::algebra::Polynomial, k: &BTreeMap<String, u32>| -> Rat {
+        p.terms
+            .iter()
+            .filter(|m| m.vars == *k)
+            .fold(Rat::from_int(0), |a, m| a.add(m.coeff))
+    };
+    let mut columns: Vec<Vec<Rat>> = polys
+        .iter()
+        .map(|p| monomials.iter().map(|k| coeff(p, k)).collect())
+        .collect();
+    columns.push(
+        monomials
+            .iter()
+            .map(|k| Rat::from_int(if *k == constant { 1 } else { 0 }))
+            .collect(),
+    );
+    let rhs: Vec<Rat> = monomials.iter().map(|k| coeff(&target, k)).collect();
+
+    let mut weights = solve_nonneg_exact(&columns, &rhs)?;
+    let slack = weights.pop()?;
+    if let Some(i) = forced {
+        weights[i] = weights[i].add(Rat::from_int(1));
+    }
+    Some((weights, slack))
+}
+
 /// As above, but with two knobs: whether the coefficients must come out
 /// non-negative (inequalities need that, equations do not) and whether an
 /// extra non-negative slack column is allowed.
@@ -3282,6 +3429,143 @@ fn edit_distance(a: &str, b: &str) -> usize {
 fn rebuild_foralls_of(prop: &Expr, inner: Expr) -> Expr {
     let (binders, _) = crate::rewrite::peel_binders(prop);
     crate::rewrite::rebuild_binders(&binders, inner)
+}
+
+/// Find non-negative rational weights `x` with `Σ xⱼ·columnⱼ = target`, or
+/// report that none exist.
+///
+/// This is a phase-1 simplex over exact rationals.  It replaces a search
+/// over subsets of the generators, which could only afford to look at two
+/// or three at a time and therefore stopped at degree two: `a³ <= 1` needs
+/// a triple product, and with triples in the mix the number of subsets is
+/// hopeless.  A simplex looks at every generator at once and still answers
+/// exactly.
+///
+/// Bland's rule is used for pivoting, which is slower than steepest-descent
+/// but cannot cycle — termination matters more than speed here, since a
+/// non-terminating search inside a prover is indistinguishable from a hang.
+///
+/// Exact arithmetic can overflow on a long pivot sequence; `Rat` poisons
+/// rather than saturating, and any poisoned entry abandons the search
+/// (reporting "no certificate found", never a wrong one).
+fn solve_nonneg_exact(columns: &[Vec<Rat>], target: &[Rat]) -> Option<Vec<Rat>> {
+    let m = target.len();
+    let n = columns.len();
+    if n == 0 {
+        return target.iter().all(|t| t.is_zero()).then(Vec::new);
+    }
+    // Tableau rows: [ original columns | artificials | rhs ].
+    // Each row is normalised so its rhs is non-negative, which is what lets
+    // the artificial basis start feasible.
+    let width = n + m + 1;
+    let mut rows: Vec<Vec<Rat>> = Vec::with_capacity(m);
+    for i in 0..m {
+        let flip = target[i].sign() < 0;
+        let mut row = vec![Rat::from_int(0); width];
+        for (j, col) in columns.iter().enumerate() {
+            let v = col.get(i).copied().unwrap_or(Rat::from_int(0));
+            row[j] = if flip { v.neg() } else { v };
+        }
+        row[n + i] = Rat::from_int(1);
+        row[width - 1] = if flip { target[i].neg() } else { target[i] };
+        if row.iter().any(|v| v.is_poison()) {
+            return None;
+        }
+        rows.push(row);
+    }
+    let mut basis: Vec<usize> = (0..m).map(|i| n + i).collect();
+
+    // Objective: minimise the sum of the artificials.  Expressed in terms
+    // of the non-basic columns, that is minus the sum of the rows.
+    let mut cost = vec![Rat::from_int(0); width];
+    for row in &rows {
+        for j in 0..width {
+            cost[j] = cost[j].sub(row[j]);
+        }
+    }
+    for j in n..n + m {
+        cost[j] = Rat::from_int(0);
+    }
+
+    const MAX_PIVOTS: usize = 4000;
+    for _ in 0..MAX_PIVOTS {
+        // Bland: the lowest-numbered column with a negative reduced cost.
+        let Some(enter) = (0..n + m).find(|&j| cost[j].sign() < 0) else {
+            break;
+        };
+        // Bland: among the rows limiting the increase, the one whose basic
+        // variable has the lowest index.
+        let mut leave: Option<usize> = None;
+        let mut best_ratio = Rat::from_int(0);
+        for i in 0..m {
+            if rows[i][enter].sign() <= 0 {
+                continue;
+            }
+            let ratio = rows[i][width - 1].div(rows[i][enter])?;
+            if ratio.is_poison() {
+                return None;
+            }
+            let better = match leave {
+                None => true,
+                Some(l) => {
+                    let d = ratio.sub(best_ratio);
+                    d.sign() < 0 || (d.sign() == 0 && basis[i] < basis[l])
+                }
+            };
+            if better {
+                leave = Some(i);
+                best_ratio = ratio;
+            }
+        }
+        // Unbounded below with artificials present cannot happen; if it
+        // does, give up rather than loop.
+        let leave = leave?;
+
+        let pivot = rows[leave][enter];
+        for j in 0..width {
+            rows[leave][j] = rows[leave][j].div(pivot)?;
+        }
+        for i in 0..m {
+            if i == leave || rows[i][enter].is_zero() {
+                continue;
+            }
+            let factor = rows[i][enter];
+            for j in 0..width {
+                let sub = rows[leave][j].mul(factor);
+                rows[i][j] = rows[i][j].sub(sub);
+            }
+        }
+        let factor = cost[enter];
+        if !factor.is_zero() {
+            for j in 0..width {
+                let sub = rows[leave][j].mul(factor);
+                cost[j] = cost[j].sub(sub);
+            }
+        }
+        basis[leave] = enter;
+        if rows.iter().any(|r| r.iter().any(|v| v.is_poison()))
+            || cost.iter().any(|v| v.is_poison())
+        {
+            return None;
+        }
+    }
+
+    // Feasible exactly when every artificial has left the basis at value 0.
+    for (i, &b) in basis.iter().enumerate() {
+        if b >= n && rows[i][width - 1].sign() != 0 {
+            return None;
+        }
+    }
+    let mut solution = vec![Rat::from_int(0); n];
+    for (i, &b) in basis.iter().enumerate() {
+        if b < n {
+            solution[b] = rows[i][width - 1];
+        }
+    }
+    if solution.iter().any(|v| v.sign() < 0 || v.is_poison()) {
+        return None;
+    }
+    Some(solution)
 }
 
 /// The hypotheses a goal currently assumes, read off its premise chain.
@@ -3999,59 +4283,6 @@ fn peel_implications(body: &Expr) -> (Expr, Vec<Expr>) {
     (cur, premises)
 }
 
-/// Rewrite `e` by replacing every `if cond then T else E` subterm whose
-/// condition is structurally equal to `target_cond` with `T` (when
-/// `target_value` is true) or `E` (when false).  This is the standard
-/// "propagate the case assumption" pass used after splitting on a
-/// condition.  Sound because, on the branch where the condition has a
-/// fixed value, all occurrences of `if cond ...` reduce to that branch.
-fn collapse_if_cond(e: &Expr, target_cond: &Expr, target_value: bool) -> Expr {
-    use Expr::*;
-    match e {
-        If { cond, then_branch, else_branch } => {
-            let inner_then = collapse_if_cond(then_branch, target_cond, target_value);
-            let inner_else = collapse_if_cond(else_branch, target_cond, target_value);
-            let inner_cond = collapse_if_cond(cond, target_cond, target_value);
-            if inner_cond == *target_cond {
-                if target_value {
-                    inner_then
-                } else {
-                    inner_else
-                }
-            } else {
-                If {
-                    cond: Box::new(inner_cond),
-                    then_branch: Box::new(inner_then),
-                    else_branch: Box::new(inner_else),
-                }
-            }
-        }
-        BinOp(op, l, r) => BinOp(
-            op.clone(),
-            Box::new(collapse_if_cond(l, target_cond, target_value)),
-            Box::new(collapse_if_cond(r, target_cond, target_value)),
-        ),
-        UnOp(op, x) => UnOp(
-            op.clone(),
-            Box::new(collapse_if_cond(x, target_cond, target_value)),
-        ),
-        App { func, args } => App {
-            func: Box::new(collapse_if_cond(func, target_cond, target_value)),
-            args: args
-                .iter()
-                .map(|a| collapse_if_cond(a, target_cond, target_value))
-                .collect(),
-        },
-        Let { name, ty, value, body, rec } => Let {
-            name: name.clone(),
-            ty: ty.clone(),
-            value: Box::new(collapse_if_cond(value, target_cond, target_value)),
-            body: Box::new(collapse_if_cond(body, target_cond, target_value)),
-            rec: *rec,
-        },
-        _ => e.clone(),
-    }
-}
 
 /// Recognize the canonical stdlib representation of a list cell:
 ///   * `nil`            — the variable `nil` (resolved at runtime to (0, ()))
@@ -4961,5 +5192,80 @@ mod encoding_tests {
         ));
         // Unrelated expressions are not constructor applications.
         assert!(ctor_equality(&Expr::Int(1), &Expr::Int(2)).is_none());
+    }
+
+    // ---- exact phase-1 simplex -------------------------------------------
+    // The simplex is what makes degree three and up affordable, so its
+    // answers are pinned down directly rather than only through the tactic.
+
+    fn r(n: i128) -> Rat {
+        Rat::from_int(n)
+    }
+
+    fn check(columns: &[Vec<Rat>], target: &[Rat]) -> Option<Vec<Rat>> {
+        let x = solve_nonneg_exact(columns, target)?;
+        // Whatever comes back must actually solve the system.
+        for i in 0..target.len() {
+            let got = columns
+                .iter()
+                .zip(&x)
+                .fold(r(0), |a, (c, w)| a.add(c[i].mul(*w)));
+            assert_eq!(got.sub(target[i]).sign(), 0, "row {} does not match", i);
+        }
+        assert!(x.iter().all(|w| w.sign() >= 0), "negative weight: {:?}", x);
+        Some(x)
+    }
+
+    #[test]
+    fn simplex_solves_a_feasible_system() {
+        // [1 0; 0 1] x = [3; 4]
+        let columns = vec![vec![r(1), r(0)], vec![r(0), r(1)]];
+        assert_eq!(check(&columns, &[r(3), r(4)]), Some(vec![r(3), r(4)]));
+    }
+
+    #[test]
+    fn simplex_refuses_a_target_needing_a_negative_weight() {
+        // x·[1] = -1 has no non-negative solution.
+        assert_eq!(solve_nonneg_exact(&[vec![r(1)]], &[r(-1)]), None);
+    }
+
+    #[test]
+    fn simplex_refuses_an_inconsistent_system() {
+        // Two columns that are multiples of each other cannot hit a target
+        // off their common ray.
+        let columns = vec![vec![r(1), r(2)], vec![r(2), r(4)]];
+        assert_eq!(solve_nonneg_exact(&columns, &[r(1), r(1)]), None);
+    }
+
+    #[test]
+    fn simplex_finds_a_solution_gaussian_elimination_would_miss() {
+        // More columns than rows: the system is underdetermined, and the
+        // only non-negative solutions use the third column.  Zeroing free
+        // variables — what elimination does — lands on a negative weight.
+        let columns = vec![
+            vec![r(1), r(0)],
+            vec![r(0), r(1)],
+            vec![r(1), r(1)],
+        ];
+        let x = check(&columns, &[r(2), r(3)]).expect("feasible");
+        assert_eq!(x.len(), 3);
+    }
+
+    #[test]
+    fn simplex_handles_rational_weights() {
+        // 2x = 1 needs x = 1/2, not a rounded integer.
+        let x = check(&[vec![r(2)]], &[r(1)]).expect("feasible");
+        assert_eq!(x[0].mul(r(2)).sub(r(1)).sign(), 0);
+    }
+
+    #[test]
+    fn simplex_accepts_an_all_zero_target() {
+        assert_eq!(solve_nonneg_exact(&[vec![r(1)]], &[r(0)]), Some(vec![r(0)]));
+    }
+
+    #[test]
+    fn simplex_with_no_columns_needs_a_zero_target() {
+        assert_eq!(solve_nonneg_exact(&[], &[r(0)]), Some(vec![]));
+        assert_eq!(solve_nonneg_exact(&[], &[r(1)]), None);
     }
 }

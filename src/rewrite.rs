@@ -639,24 +639,47 @@ pub fn split_first_if(body: &Expr) -> Option<(Expr, Expr, Expr)> {
 pub fn case_split_goals(prop: &Expr) -> Option<(Expr, Expr)> {
     let (binders, inner) = peel_binders(prop);
     let (conclusion, hyps) = peel_premises(inner);
-    let (then_form, else_form, cond) = split_first_if(&conclusion)?;
+    // Look for the `if` in the *hypotheses* as well as the conclusion.
+    // `|x| < e/3 => |3x| < e` has one on each side, and splitting only the
+    // conclusion leaves the hypothesis an opaque atom — which is why an
+    // epsilon-delta goal proved but could not be certified.
+    let cond = hyps
+        .iter()
+        .find_map(first_if_condition)
+        .or_else(|| first_if_condition(&conclusion))?;
     let neg = negate_condition(&cond);
-    let under = |extra: Expr, concl: Expr| {
-        let mut premise = extra;
+    // Collapsing the same condition everywhere is what makes the two
+    // branches cover the goal: on the branch where `cond` holds, every
+    // `if cond then A else B` in it *is* `A`.
+    let under = |assumed: Expr, value: bool| {
+        let mut premise = assumed;
         for h in hyps.iter().rev() {
-            premise = Expr::BinOp(BinOp::And, Box::new(h.clone()), Box::new(premise));
+            premise = Expr::BinOp(
+                BinOp::And,
+                Box::new(collapse_if_cond(h, &cond, value)),
+                Box::new(premise),
+            );
         }
         rebuild_binders(
             &binders,
             Expr::BinOp(
                 BinOp::Or,
                 Box::new(Expr::UnOp(UnOp::Not, Box::new(premise))),
-                Box::new(concl),
+                Box::new(collapse_if_cond(&conclusion, &cond, value)),
             ),
         )
     };
-    Some((under(cond, then_form), under(neg, else_form)))
+    Some((under(cond.clone(), true), under(neg, false)))
 }
+
+/// The condition of the first `if` anywhere in `e`, in source order.
+pub fn first_if_condition(e: &Expr) -> Option<Expr> {
+    if let Expr::If { cond, .. } = e {
+        return Some((**cond).clone());
+    }
+    crate::ast::children(e).into_iter().find_map(first_if_condition)
+}
+
 
 /// Negate a condition, keeping it a relation where possible so that the
 /// `else` branch can still use it as a linear hypothesis.
@@ -718,5 +741,59 @@ fn flatten_and(e: &Expr, out: &mut Vec<Expr>) {
             flatten_and(r, out);
         }
         other => out.push(other.clone()),
+    }
+}
+
+/// Rewrite `e` by replacing every `if cond then T else E` subterm whose
+/// condition is structurally equal to `target_cond` with `T` (when
+/// `target_value` is true) or `E` (when false).  This is the standard
+/// "propagate the case assumption" pass used after splitting on a
+/// condition.  Sound because, on the branch where the condition has a
+/// fixed value, all occurrences of `if cond ...` reduce to that branch.
+pub fn collapse_if_cond(e: &Expr, target_cond: &Expr, target_value: bool) -> Expr {
+    use Expr::*;
+    match e {
+        If { cond, then_branch, else_branch } => {
+            let inner_then = collapse_if_cond(then_branch, target_cond, target_value);
+            let inner_else = collapse_if_cond(else_branch, target_cond, target_value);
+            let inner_cond = collapse_if_cond(cond, target_cond, target_value);
+            if inner_cond == *target_cond {
+                if target_value {
+                    inner_then
+                } else {
+                    inner_else
+                }
+            } else {
+                If {
+                    cond: Box::new(inner_cond),
+                    then_branch: Box::new(inner_then),
+                    else_branch: Box::new(inner_else),
+                }
+            }
+        }
+        BinOp(op, l, r) => BinOp(
+            op.clone(),
+            Box::new(collapse_if_cond(l, target_cond, target_value)),
+            Box::new(collapse_if_cond(r, target_cond, target_value)),
+        ),
+        UnOp(op, x) => UnOp(
+            op.clone(),
+            Box::new(collapse_if_cond(x, target_cond, target_value)),
+        ),
+        App { func, args } => App {
+            func: Box::new(collapse_if_cond(func, target_cond, target_value)),
+            args: args
+                .iter()
+                .map(|a| collapse_if_cond(a, target_cond, target_value))
+                .collect(),
+        },
+        Let { name, ty, value, body, rec } => Let {
+            name: name.clone(),
+            ty: ty.clone(),
+            value: Box::new(collapse_if_cond(value, target_cond, target_value)),
+            body: Box::new(collapse_if_cond(body, target_cond, target_value)),
+            rec: *rec,
+        },
+        _ => e.clone(),
     }
 }

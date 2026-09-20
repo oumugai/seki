@@ -3500,3 +3500,115 @@ fn the_nonlinear_example_is_kernel_checked() {
     assert!(out.status.success(), "{}", stdout);
     assert!(stdout.contains("sound:     7"), "{}", stdout);
 }
+
+// ---------------------------------------------------------------------------
+// Degree three and up: the Positivstellensatz search is decided by an exact
+// phase-1 simplex rather than by trying subsets of the generators, so a
+// certificate may draw on every product of hypotheses at once.  See
+// `solve_nonneg_exact` in `src/prover.rs`.
+
+#[test]
+fn a_cubic_bound_is_kernel_checked() {
+    // `1 - a³ = (1-a) + a(1-a) + a²(1-a)`: a triple product is needed, which
+    // no search over pairs can reach.
+    assert_eq!(
+        trust_of(
+            "theorem cube : forall a in Real, a >= 0.0 -> a <= 1.0 -> a * a * a <= 1.0 \
+             := by algebra",
+            "cube"
+        ),
+        TrustLevel::Sound
+    );
+}
+
+#[test]
+fn a_quartic_bound_is_kernel_checked() {
+    assert_eq!(
+        trust_of(
+            "theorem quartic : forall a in Real, a >= 0.0 -> a <= 1.0 -> \
+             a * a * a * a <= 1.0 := by algebra",
+            "quartic"
+        ),
+        TrustLevel::Sound
+    );
+}
+
+#[test]
+fn a_three_variable_box_is_kernel_checked() {
+    assert_eq!(
+        trust_of(
+            "theorem box : forall x in Real, forall y in Real, forall z in Real, \
+             x >= 0.0 -> x <= 1.0 -> y >= 0.0 -> y <= 1.0 -> z >= 0.0 -> z <= 1.0 -> \
+             x * y * z <= 1.0 := by algebra",
+            "box"
+        ),
+        TrustLevel::Sound
+    );
+}
+
+#[test]
+fn false_higher_degree_claims_are_refused() {
+    // Each is false at some point of the stated domain; the simplex must not
+    // manufacture a certificate for any of them.
+    for src in [
+        "theorem bad : forall a in Real, a >= 0.0 -> a <= 1.0 -> a * a * a >= a := by algebra",
+        "theorem bad : forall a in Real, a >= 0.0 -> a * a * a > 0.0 := by algebra",
+        "theorem bad : forall a in Real, forall b in Real, a >= 0.0 -> b >= 0.0 -> \
+         a * b * b >= a := by algebra",
+        "theorem bad : forall a in Real, a > 0.0 -> a <= 1.0 -> a * a * a < 0.0 := by algebra",
+    ] {
+        assert!(run_err(src).is_proof_error(), "accepted a false claim: {}", src);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Epsilon-delta shapes.  `absR` unfolds to an `if`, which may land in a
+// hypothesis rather than the conclusion, and the branch it opens is recorded
+// as a *negated* fact — both used to be dropped before the search.
+
+const ABS_R: &str = "def absR := \\r -> if r < 0.0 then 0.0 - r else r\n";
+
+#[test]
+fn an_abs_hypothesis_alone_is_kernel_checked() {
+    // The only `if` is in a hypothesis; there is none in the conclusion.
+    assert_eq!(
+        trust_of(
+            &format!(
+                "{ABS_R}theorem h : forall x in Real, forall a in Real, forall d in Real, \
+                 d > 0.0 -> absR (x - a) < d -> x - a < d := by unfold absR then algebra"
+            ),
+            "h"
+        ),
+        TrustLevel::Sound
+    );
+}
+
+#[test]
+fn a_quadratic_epsilon_delta_is_kernel_checked() {
+    // |x - a| < d  ⊢  |x² - a²| < 2d  on [0,1].  Needs the case split to
+    // reach the hypothesis, the negated branch fact to survive, and a
+    // product of two hypotheses in the certificate.
+    assert_eq!(
+        trust_of(
+            &format!(
+                "{ABS_R}theorem sq : forall x in Real, forall a in Real, forall d in Real, \
+                 x >= 0.0 -> x <= 1.0 -> a >= 0.0 -> a <= 1.0 -> d > 0.0 -> \
+                 absR (x - a) < d -> absR (x * x - a * a) < 2.0 * d \
+                 := by unfold absR then algebra"
+            ),
+            "sq"
+        ),
+        TrustLevel::Sound
+    );
+}
+
+#[test]
+fn a_false_epsilon_delta_bound_is_refused() {
+    // The Lipschitz constant on [0,1] is 2, not 1.
+    assert!(run_err(&format!(
+        "{ABS_R}theorem bad : forall x in Real, forall a in Real, forall d in Real, \
+         x >= 0.0 -> x <= 1.0 -> a >= 0.0 -> a <= 1.0 -> d > 0.0 -> \
+         absR (x - a) < d -> absR (x * x - a * a) < d := by unfold absR then algebra"
+    ))
+    .is_proof_error());
+}

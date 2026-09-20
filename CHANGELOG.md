@@ -15,6 +15,59 @@ seki は **pre-1.0** です。これは次を意味します:
 
 ## [Unreleased]
 
+### 次数の壁を越える — 厳密有理数の単体法
+
+0.11.0 の Positivstellensatz は生成子 (仮定とその積) の**部分集合**を
+小さい順に試していました。この探索は 3 個までが限界で、`a³ <= 1` のように
+3 個の積を必要とするゴールに届きません。かといって 3 重積を生成子に加えると、
+仮定 8 個で生成子は 164 個、その 3 個組は 70 万通りになり探索が破綻します。
+
+生成子を全部まとめて 1 回で解く方向に変えました。`Σ λⱼ·gⱼ + slack = diff`
+を満たす `λ >= 0` が存在するか — これは線形計画の実行可能性判定そのものなので、
+**厳密有理数の phase-1 単体法** (`solve_nonneg_exact`, `src/prover.rs`) で
+決定します。浮動小数点は使わないので答えは厳密で、Bland の規則を使うので
+巡回せず必ず停止します。
+
+生成子の次数はゴールの次数から決めます。線形のゴールは積を一切作らない
+(0.11.0 より速い) 一方、4 次のゴールには 4 重積まで用意します:
+
+```seki
+theorem cube    : forall a in Real, a >= 0.0 -> a <= 1.0 -> a*a*a   <= 1.0 := by algebra
+theorem quartic : forall a in Real, a >= 0.0 -> a <= 1.0 -> a*a*a*a <= 1.0 := by algebra
+theorem box     : forall x in Real, forall y in Real, forall z in Real,
+  x >= 0.0 -> x <= 1.0 -> y >= 0.0 -> y <= 1.0 -> z >= 0.0 -> z <= 1.0 ->
+  x * y * z <= 1.0 := by algebra
+```
+
+いずれも `--audit` で `kernel-checked from primitives` になります。
+証明書の形式は変えていないので、カーネル (`src/kernel.rs`) は無変更です。
+**探索が賢くなっただけで、信頼する対象は増えていません。**
+
+### ε-δ が検証できるようになった
+
+解析の主張は `absR (x - a) < d` のように、絶対値が**仮定の側**に現れます。
+`absR` を unfold すると `if` が仮定に残りますが、次の 3 箇所がそれを
+取りこぼしていました:
+
+1. `case_split_goals` (`src/rewrite.rs`) が結論の `if` しか探していなかった。
+2. その呼び出し側 (`case_split_or_give_up`) が「結論に `if` があるとき」
+   だけ場合分けを試みていた。
+3. 場合分けの else 側で得られる事実 (`not (x - a < 0)` すなわち
+   `x - a >= 0`) が、Farkas 探索に渡る前に**捨てられていた** —
+   まさにその分岐を作った理由の仮定が消えていた。
+
+3 つとも直した結果、二次の ε-δ が証明項付きで通ります:
+
+```seki
+theorem sq : forall x in Real, forall a in Real, forall d in Real,
+  x >= 0.0 -> x <= 1.0 -> a >= 0.0 -> a <= 1.0 -> d > 0.0 ->
+  absR (x - a) < d -> absR (x*x - a*a) < 2.0*d
+  := by unfold absR then algebra
+```
+
+証明書は `2·(d - x + a) + (x-a)(1-x) + (x-a)(1-a)` — 仮定の積を含む
+Positivstellensatz です。Lipschitz 定数を 1 に間違えた版は拒否されます。
+
 ## [0.11.0] — 2026-09-20
 
 ### 非線形算術 — 仮定の積 (Positivstellensatz)
