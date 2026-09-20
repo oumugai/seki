@@ -1,0 +1,116 @@
+-- ===========================================================
+-- 46: 意思決定の監査証跡
+--
+-- 投資判断・容量計画・価格設定は、いまは表計算で「代表値で計算して
+-- 感度分析を添える」形で行われている。半年後に「なぜこの判断をしたか」
+-- を問われたとき残っているのは数字だけで、**何を仮定したか**は消える。
+--
+-- seki でモデルを書くと、残るのは仮定の一覧のほうになる:
+--
+--   * 結論はパラメータの**箱全体**で証明される (代表値ではない)
+--   * 各仮定は出所と確度を持つ (`with confidence ... from ...`)
+--   * `--audit` が結論ごとに「どの仮定に乗っているか」「確度の下界」
+--     を表示し、最後に仮定の一覧を出所つきで並べる
+--   * 足りない仮定は名指しで返る (`by algebra` の逆算)
+--
+-- 実行:
+--   seki --audit examples/46_decision_audit.seki
+--   seki --min-confidence 0.8 examples/46_decision_audit.seki
+-- ===========================================================
+
+-- ===========================================================
+-- 1. 仮定 — 出所と確度を明示する
+-- ===========================================================
+-- モデルのパラメータは**未定義の名前**として置く。値を与えないので、
+-- 結論は「この名前について仮定したことだけ」から導かれる。
+-- 確度は **下界** として読む: 「0.9 以上の頻度で成り立つ」。
+
+axiom discount_rate_range
+  : (discountRate >= 0.05) and (discountRate <= 0.15)
+  with confidence 0.9 from "財務部の想定レンジ (2026Q3 資本コスト表)"
+
+axiom adoption_floor
+  : adoptionRate >= 0.6
+  with confidence 0.7 from "パイロット3社の結果からの外挿 (LLM 要約, 要検証)"
+
+axiom churn_ceiling
+  : (churnRate >= 0.0) and (churnRate <= 0.2)
+  with confidence 0.75 from "解約ログ12か月 (季節性は未補正)"
+
+axiom seat_price
+  : seatPrice == 50.0
+  with confidence 0.95 from "2026年度価格表 (確定)"
+
+-- ===========================================================
+-- 2. 結論 — 仮定を**引用して**導く
+-- ===========================================================
+-- `by have ... := by apply <axiom> then algebra` が引用の形。
+-- 仮定を theorem の前提として書き直してしまうと、確度が結論に届かない
+-- (--audit がそれを note で指摘する)。
+
+-- 割引率がレンジのどこであっても NPV は正。
+-- 代表値 r = 0.10 で計算するのとは主張の強さが違う。
+theorem npv_positive_over_the_whole_range
+  : (100.0 - 200.0 * discountRate) > 0.0
+  := by have r : (discountRate >= 0.05) and (discountRate <= 0.15)
+          := by apply discount_rate_range
+     then algebra
+
+-- 採用率と価格から粗利が基準を上回る。価格も仮定から引く
+-- (数値 50.0 を直接書くと、価格表の確度 0.95 が結論に届かない)。
+theorem revenue_clears_the_bar
+  : (adoptionRate * seatPrice) >= 30.0
+  := by have a : adoptionRate >= 0.6 := by apply adoption_floor
+     then have p : seatPrice == 50.0 := by apply seat_price
+     then algebra
+
+-- 2 つのパラメータが同時に動いても成り立つ。
+-- 確度は積ではなく **Fréchet 下界** (0.7 + 0.9 - 1 = 0.6) で出る
+-- — 独立性を勝手に仮定しない。
+theorem margin_holds_jointly
+  : (adoptionRate * 50.0 - 200.0 * discountRate) >= 0.0
+  := by have a : adoptionRate >= 0.6 := by apply adoption_floor
+     then have r : (discountRate >= 0.05) and (discountRate <= 0.15)
+          := by apply discount_rate_range
+     then algebra
+
+-- ===========================================================
+-- 3. 最悪ケース — 仮定を 3 つ重ねる
+-- ===========================================================
+-- この theorem は最初 `adoptionRate >= 0.6` のまま書いて**失敗した**。
+-- seki は
+--     it would hold given `(adoptionRate >= (4 / 5))`
+-- と返してきた。実際 a=0.6, r=0.15, churn=0.2 では
+-- 30 - 30 - 10 = -10 で判断は成立しない。
+-- 感度分析の表を読んで気づくのではなく、名指しで返ってくる。
+--
+-- そこで採用率の仮定を上げた。確度は下がる (0.55) が、それが
+-- 「この結論を支えるのに必要な確信の度合い」として記録される。
+axiom adoption_floor_strong
+  : adoptionRate >= 0.8
+  with confidence 0.55 from "上位20%の顧客のみを対象にした場合の外挿"
+
+theorem survives_the_worst_case
+  : (adoptionRate * 50.0 - 200.0 * discountRate - churnRate * 50.0) >= 0.0
+  := by have a : adoptionRate >= 0.8 := by apply adoption_floor_strong
+     then have r : (discountRate >= 0.05) and (discountRate <= 0.15)
+          := by apply discount_rate_range
+     then have c : (churnRate >= 0.0) and (churnRate <= 0.2)
+          := by apply churn_ceiling
+     then algebra
+
+-- ===========================================================
+-- 4. 足りない仮定は名指しで返る
+-- ===========================================================
+-- 下の theorem はコメントを外すと失敗し、
+--
+--   it would hold given `(cost <= 30)`
+--
+-- と返る。感度分析の代わりにこれが出てくる、というのが要点。
+-- 矛盾する仮定 (それを足せば ex falso で何でも「証明」できてしまうもの)
+-- は候補から外れるので、返ってくるのは実際に意味のある境界だけ。
+--
+-- theorem needs_a_cost_bound
+--   : forall rev in Real, forall cost in Real, forall tax in Real,
+--       (rev >= 100.0) and (tax <= 20.0) => (rev - cost - tax) >= 50.0
+--   := by algebra

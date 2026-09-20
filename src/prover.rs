@@ -2571,78 +2571,20 @@ impl<'a> Prover<'a> {
         diff: &crate::algebra::Polynomial,
         goal_strict: bool,
     ) -> Option<(Vec<Generator>, Rat)> {
-        // Normalize each usable hypothesis to a polynomial asserted `>= 0`.
-        let mut usable: Vec<(Expr, bool, crate::algebra::Polynomial)> = Vec::new();
-        for h in hyps {
-            if let Expr::BinOp(op, l, r) = h {
-                let (a, b, strict) = match op {
-                    BinOp::Ge => (l, r, false),
-                    BinOp::Gt => (l, r, true),
-                    BinOp::Le => (r, l, false),
-                    BinOp::Lt => (r, l, true),
-                    _ => continue,
-                };
-                if let (Some(ap), Some(bp)) = (expr_to_poly(a), expr_to_poly(b)) {
-                    usable.push((h.clone(), strict, ap.sub(bp)));
-                }
-            }
-        }
-        if usable.is_empty() {
-            return None;
-        }
-        const MAX_HYPS: usize = 8;
-        /// How many hypotheses may be multiplied together.
-        const MAX_PRODUCT_DEGREE: u32 = 4;
-        if usable.len() > MAX_HYPS {
-            usable.truncate(MAX_HYPS);
-        }
+        let (generators, polys, singles) = build_generators(hyps, diff)?;
+        self.farkas_from(&generators, &polys, singles, diff, goal_strict)
+    }
 
-        // Generators: products of hypotheses, up to as many factors as the
-        // goal's own degree could possibly need.  A non-negative combination
-        // of degree-`d` generators cannot produce a degree-`d+1` term, so a
-        // cubic goal needs triples; a linear one needs no products at all,
-        // and paying for them would only slow the common case down.
-        let want_degree = diff.degree().clamp(2, MAX_PRODUCT_DEGREE);
-        let mut generators: Vec<Generator> = Vec::new();
-        let mut polys: Vec<crate::algebra::Polynomial> = Vec::new();
-        // `level` holds the products of exactly `k` hypotheses, as indices
-        // into `usable`; extending it one factor at a time (never below the
-        // last index used) enumerates each multiset once.
-        let mut level: Vec<Vec<usize>> = (0..usable.len()).map(|i| vec![i]).collect();
-        for k in 1..=want_degree as usize {
-            let mut next: Vec<Vec<usize>> = Vec::new();
-            for combo in &level {
-                let mut product = usable[combo[0]].2.clone();
-                for &i in &combo[1..] {
-                    product = product.mul(usable[i].2.clone());
-                }
-                // Only the *number* of factors is bounded, not the
-                // product's degree: `(1 - h·L)·(y2 - y1)` has degree three
-                // and is needed for a degree-two goal, because its cubic
-                // terms cancel against another generator's.
-                if product.has_overflow() {
-                    continue;
-                }
-                generators.push(Generator {
-                    factors: combo.iter().map(|&i| usable[i].0.clone()).collect(),
-                    strict: combo.iter().all(|&i| usable[i].1),
-                    coeff: Rat::from_int(1),
-                });
-                polys.push(product);
-                if k < want_degree as usize {
-                    for i in *combo.last().unwrap()..usable.len() {
-                        let mut ext = combo.clone();
-                        ext.push(i);
-                        next.push(ext);
-                    }
-                }
-            }
-            level = next;
-        }
-        // Singles first, so a linear goal still yields the simplest
-        // certificate from the subset search below.
-        let singles = usable.len();
-
+    /// Search the given generators for a certificate.  Split out so
+    /// abduction can reuse exactly the generators the proof would have had.
+    fn farkas_from(
+        &self,
+        generators: &[Generator],
+        polys: &[crate::algebra::Polynomial],
+        singles: usize,
+        diff: &crate::algebra::Polynomial,
+        goal_strict: bool,
+    ) -> Option<(Vec<Generator>, Rat)> {
         // Search subsets smallest-first, so the certificate that comes back
         // is the simplest one that works — a basic solution from the simplex
         // below is valid but not always the one a reader would have written.
@@ -2739,6 +2681,111 @@ impl<'a> Prover<'a> {
             return Some((used, slack));
         }
         None
+    }
+
+    /// The bound on `var` that would make `diff >= 0` follow from `hyps`,
+    /// when adding one bound is enough.
+    ///
+    /// This is Farkas run backwards.  A proof asks "do non-negative weights
+    /// exist"; abduction adds one more column standing for the *missing*
+    /// hypothesis and asks the same question.  For `var <= c` the missing
+    /// generator is `c - var`, used with some weight `mu >= 0`, so the
+    /// system gains a column of `-var` and the constant term becomes free
+    /// (it absorbs `mu·c`).  The bound is then `c = K / mu`, where `K` is
+    /// that constant — no search over candidate values, and it works with
+    /// any number of variables, which a single-variable rearrangement
+    /// cannot.
+    ///
+    /// Every feasible point names a bound that would work, and the one
+    /// worth reporting is the *weakest*.  But `c` is a **ratio** of two
+    /// unknowns, so no linear objective picks it out: maximising `K` alone
+    /// answers `a >= 0.6 ⊢ 50a >= 40` with `a >= 1000`, which is true and
+    /// useless.  The Charnes-Cooper substitution `y = t·x`, `mu·y = 1`
+    /// turns the ratio into the linear objective `max K`, at the cost of
+    /// one extra row and one extra column.
+    ///
+    /// Returns `(is_upper_bound, c)`.  Nothing here is trusted: the caller
+    /// checks the suggestion by adding it and re-proving.
+    pub(crate) fn abduce_bound(
+        &self,
+        hyps: &[Expr],
+        diff: &crate::algebra::Polynomial,
+        var: &str,
+    ) -> Vec<(bool, Rat)> {
+        use crate::algebra::Polynomial;
+        use std::collections::BTreeMap;
+        let mut out = Vec::new();
+        // With no usable hypothesis there are no generators, but a bound on
+        // `var` may still be the whole answer.
+        let (_, polys, _) = build_generators(hyps, diff)
+            .unwrap_or_else(|| (Vec::new(), Vec::new(), 0));
+        for upper in [true, false] {
+            let v = Polynomial::from_var(var);
+            // Columns: the generators, then the missing hypothesis's own
+            // (`-var` for an upper bound, `+var` for a lower one), then the
+            // constant split into `+1` and `-1` so it can take either sign.
+            let mut cols: Vec<Polynomial> = polys.clone();
+            cols.push(if upper { v.clone().neg() } else { v.clone() });
+            let mu_col = cols.len() - 1;
+            cols.push(Polynomial::from_rat(Rat::from_int(1)));
+            cols.push(Polynomial::from_rat(Rat::from_int(-1)));
+            let k_plus = cols.len() - 2;
+            let k_minus = cols.len() - 1;
+
+            // One row per monomial, plus the normalising row `mu = 1`.
+            let mut monomials: Vec<BTreeMap<String, u32>> = Vec::new();
+            for p in cols.iter().chain(std::iter::once(diff)) {
+                for m in &p.terms {
+                    if !monomials.contains(&m.vars) {
+                        monomials.push(m.vars.clone());
+                    }
+                }
+            }
+            let coeff = |p: &Polynomial, k: &BTreeMap<String, u32>| -> Rat {
+                p.terms
+                    .iter()
+                    .filter(|m| m.vars == *k)
+                    .fold(Rat::from_int(0), |a, m| a.add(m.coeff))
+            };
+            // `A·y - diff·t = 0` for each monomial, then `y[mu] = 1`.
+            let mut columns: Vec<Vec<Rat>> = cols
+                .iter()
+                .enumerate()
+                .map(|(j, p)| {
+                    let mut col: Vec<Rat> =
+                        monomials.iter().map(|k| coeff(p, k)).collect();
+                    col.push(Rat::from_int(if j == mu_col { 1 } else { 0 }));
+                    col
+                })
+                .collect();
+            let mut t_col: Vec<Rat> =
+                monomials.iter().map(|k| coeff(diff, k).neg()).collect();
+            t_col.push(Rat::from_int(0));
+            columns.push(t_col);
+            let mut rhs = vec![Rat::from_int(0); monomials.len()];
+            rhs.push(Rat::from_int(1));
+
+            // Maximise `K = y[+1] - y[-1]`, which after the normalisation
+            // *is* the bound: weakest upper bound and weakest lower bound
+            // both come out of the same objective.
+            let mut objective = vec![Rat::from_int(0); columns.len()];
+            objective[k_plus] = Rat::from_int(-1);
+            objective[k_minus] = Rat::from_int(1);
+            let Some(y) = solve_nonneg_optimal(&columns, &rhs, Some(&objective)) else {
+                continue;
+            };
+            // `t = 0` means the answer came from the recession cone: the
+            // bound can be pushed out forever, so there is none to report.
+            if y[columns.len() - 1].sign() <= 0 {
+                continue;
+            }
+            let k = y[k_plus].sub(y[k_minus]);
+            let c = if upper { k } else { k.neg() };
+            if !c.is_poison() {
+                out.push((upper, c));
+            }
+        }
+        out
     }
 
     /// Induction: the base case becomes a real sub-proof (the kernel derives
@@ -3426,6 +3473,17 @@ fn solve_nonneg_simplex(
     target: &crate::algebra::Polynomial,
     forced: Option<usize>,
 ) -> Option<(Vec<Rat>, Rat)> {
+    solve_nonneg_simplex_opt(polys, target, forced, None)
+}
+
+/// As above, choosing among the solutions the one that minimises
+/// `objective` (indexed like `polys`, with one more entry for the slack).
+fn solve_nonneg_simplex_opt(
+    polys: &[crate::algebra::Polynomial],
+    target: &crate::algebra::Polynomial,
+    forced: Option<usize>,
+    objective: Option<&[Rat]>,
+) -> Option<(Vec<Rat>, Rat)> {
     use std::collections::BTreeMap;
     let target = match forced {
         Some(i) => target.clone().sub(polys.get(i)?.clone()),
@@ -3466,7 +3524,7 @@ fn solve_nonneg_simplex(
     );
     let rhs: Vec<Rat> = monomials.iter().map(|k| coeff(&target, k)).collect();
 
-    let mut weights = solve_nonneg_exact(&columns, &rhs)?;
+    let mut weights = solve_nonneg_optimal(&columns, &rhs, objective)?;
     let slack = weights.pop()?;
     if let Some(i) = forced {
         weights[i] = weights[i].add(Rat::from_int(1));
@@ -3606,7 +3664,8 @@ fn rebuild_foralls_of(prop: &Expr, inner: Expr) -> Expr {
 /// Find non-negative rational weights `x` with `Σ xⱼ·columnⱼ = target`, or
 /// report that none exist.
 ///
-/// This is a phase-1 simplex over exact rationals.  It replaces a search
+/// This is a phase-1 simplex over exact rationals, with an optional
+/// phase 2 for callers that need a particular solution rather than any.  It replaces a search
 /// over subsets of the generators, which could only afford to look at two
 /// or three at a time and therefore stopped at degree two: `a³ <= 1` needs
 /// a triple product, and with triples in the mix the number of subsets is
@@ -3620,7 +3679,18 @@ fn rebuild_foralls_of(prop: &Expr, inner: Expr) -> Expr {
 /// Exact arithmetic can overflow on a long pivot sequence; `Rat` poisons
 /// rather than saturating, and any poisoned entry abandons the search
 /// (reporting "no certificate found", never a wrong one).
-fn solve_nonneg_exact(columns: &[Vec<Rat>], target: &[Rat]) -> Option<Vec<Rat>> {
+/// With `objective`, minimises `objective · x` over the solutions rather
+/// than returning the first one found.
+///
+/// Feasibility alone answers "is there a certificate".  Abduction needs
+/// more: every feasible point names a bound that *would* work, and the one
+/// worth reporting is the weakest.  Phase 2 picks it out, reusing the
+/// tableau phase 1 already built.
+fn solve_nonneg_optimal(
+    columns: &[Vec<Rat>],
+    target: &[Rat],
+    objective: Option<&[Rat]>,
+) -> Option<Vec<Rat>> {
     let m = target.len();
     let n = columns.len();
     if n == 0 {
@@ -3728,6 +3798,82 @@ fn solve_nonneg_exact(columns: &[Vec<Rat>], target: &[Rat]) -> Option<Vec<Rat>> 
             return None;
         }
     }
+
+    // Phase 2: among the solutions, the one that minimises `cost`.  The
+    // artificial columns are barred from re-entering, which keeps the
+    // basis feasible for the original system.
+    if let Some(objective) = objective {
+        let mut z = vec![Rat::from_int(0); width];
+        for (j, c) in objective.iter().take(n).enumerate() {
+            z[j] = *c;
+        }
+        // Price out the basic columns so the reduced costs are honest.
+        for (i, &b) in basis.iter().enumerate() {
+            if b < n && !z[b].is_zero() {
+                let factor = z[b];
+                for j in 0..width {
+                    let sub = rows[i][j].mul(factor);
+                    z[j] = z[j].sub(sub);
+                }
+            }
+        }
+        for _ in 0..MAX_PIVOTS {
+            let Some(enter) = (0..n).find(|&j| z[j].sign() < 0) else {
+                break;
+            };
+            let mut leave: Option<usize> = None;
+            let mut best_ratio = Rat::from_int(0);
+            for i in 0..m {
+                if rows[i][enter].sign() <= 0 {
+                    continue;
+                }
+                let ratio = rows[i][width - 1].div(rows[i][enter])?;
+                if ratio.is_poison() {
+                    return None;
+                }
+                let better = match leave {
+                    None => true,
+                    Some(l) => {
+                        let d = ratio.sub(best_ratio);
+                        d.sign() < 0 || (d.sign() == 0 && basis[i] < basis[l])
+                    }
+                };
+                if better {
+                    leave = Some(i);
+                    best_ratio = ratio;
+                }
+            }
+            // Unbounded: the objective can be improved forever, so there is
+            // no "best" bound to report.  Keep the feasible point we have.
+            let Some(leave) = leave else { break };
+            let pivot = rows[leave][enter];
+            for j in 0..width {
+                rows[leave][j] = rows[leave][j].div(pivot)?;
+            }
+            for i in 0..m {
+                if i == leave || rows[i][enter].is_zero() {
+                    continue;
+                }
+                let factor = rows[i][enter];
+                for j in 0..width {
+                    let sub = rows[leave][j].mul(factor);
+                    rows[i][j] = rows[i][j].sub(sub);
+                }
+            }
+            let factor = z[enter];
+            if !factor.is_zero() {
+                for j in 0..width {
+                    let sub = rows[leave][j].mul(factor);
+                    z[j] = z[j].sub(sub);
+                }
+            }
+            basis[leave] = enter;
+            if rows.iter().any(|r| r.iter().any(|v| v.is_poison())) {
+                return None;
+            }
+        }
+    }
+
     let mut solution = vec![Rat::from_int(0); n];
     for (i, &b) in basis.iter().enumerate() {
         if b < n {
@@ -3766,6 +3912,104 @@ fn instantiate_existential(prop: &Expr, var: &str, term: &Expr) -> Option<(Expr,
     }
     let goal = crate::rewrite::rebuild_binders(&binders, goal);
     Some((crate::rewrite::prenex_foralls(&goal), (**domain).clone()))
+}
+
+/// The hypotheses of a goal as non-negative generators: each hypothesis,
+/// then the products of up to as many of them as the goal's degree could
+/// need.
+///
+/// Returns the generators, their polynomials, and how many of them are
+/// single hypotheses (those come first).
+fn build_generators(
+    hyps: &[Expr],
+    diff: &crate::algebra::Polynomial,
+) -> Option<(Vec<Generator>, Vec<crate::algebra::Polynomial>, usize)> {
+    // Normalize each usable hypothesis to a polynomial asserted `>= 0`.
+    let mut usable: Vec<(Expr, bool, crate::algebra::Polynomial)> = Vec::new();
+    for h in hyps {
+        if let Expr::BinOp(op, l, r) = h {
+            // An equality assumption is two inequalities, and models are
+            // full of them: "the price is 50", "capacity equals C".  They
+            // used to be dropped here, so a goal that needed one simply
+            // failed.  Both directions are recorded against the *same*
+            // hypothesis; the kernel derives them from it the same way.
+            if matches!(op, BinOp::Eq) {
+                if let (Some(ap), Some(bp)) = (expr_to_poly(l), expr_to_poly(r)) {
+                    let ge = Expr::BinOp(BinOp::Ge, l.clone(), r.clone());
+                    let le = Expr::BinOp(BinOp::Ge, r.clone(), l.clone());
+                    usable.push((ge, false, ap.clone().sub(bp.clone())));
+                    usable.push((le, false, bp.sub(ap)));
+                }
+                continue;
+            }
+            let (a, b, strict) = match op {
+                BinOp::Ge => (l, r, false),
+                BinOp::Gt => (l, r, true),
+                BinOp::Le => (r, l, false),
+                BinOp::Lt => (r, l, true),
+                _ => continue,
+            };
+            if let (Some(ap), Some(bp)) = (expr_to_poly(a), expr_to_poly(b)) {
+                usable.push((h.clone(), strict, ap.sub(bp)));
+            }
+        }
+    }
+    if usable.is_empty() {
+        return None;
+    }
+    const MAX_HYPS: usize = 8;
+    /// How many hypotheses may be multiplied together.
+    const MAX_PRODUCT_DEGREE: u32 = 4;
+    if usable.len() > MAX_HYPS {
+        usable.truncate(MAX_HYPS);
+    }
+
+    // Products of hypotheses, up to as many factors as the goal's own
+    // degree could possibly need.  A non-negative combination of degree-`d`
+    // generators cannot produce a degree-`d+1` term, so a cubic goal needs
+    // triples; a linear one needs no products at all, and paying for them
+    // would only slow the common case down.
+    let want_degree = diff.degree().clamp(2, MAX_PRODUCT_DEGREE);
+    let mut generators: Vec<Generator> = Vec::new();
+    let mut polys: Vec<crate::algebra::Polynomial> = Vec::new();
+    // `level` holds the products of exactly `k` hypotheses, as indices into
+    // `usable`; extending it one factor at a time (never below the last
+    // index used) enumerates each multiset once.
+    let mut level: Vec<Vec<usize>> = (0..usable.len()).map(|i| vec![i]).collect();
+    for k in 1..=want_degree as usize {
+        let mut next: Vec<Vec<usize>> = Vec::new();
+        for combo in &level {
+            let mut product = usable[combo[0]].2.clone();
+            for &i in &combo[1..] {
+                product = product.mul(usable[i].2.clone());
+            }
+            // Only the *number* of factors is bounded, not the product's
+            // degree: `(1 - h·L)·(y2 - y1)` has degree three and is needed
+            // for a degree-two goal, because its cubic terms cancel against
+            // another generator's.
+            if product.has_overflow() {
+                continue;
+            }
+            generators.push(Generator {
+                factors: combo.iter().map(|&i| usable[i].0.clone()).collect(),
+                strict: combo.iter().all(|&i| usable[i].1),
+                coeff: Rat::from_int(1),
+            });
+            polys.push(product);
+            if k < want_degree as usize {
+                for i in *combo.last().unwrap()..usable.len() {
+                    let mut ext = combo.clone();
+                    ext.push(i);
+                    next.push(ext);
+                }
+            }
+        }
+        level = next;
+    }
+    // Singles come first, so a linear goal still yields the simplest
+    // certificate from the subset search.
+    let singles = usable.len();
+    Some((generators, polys, singles))
 }
 
 /// The strictly positive quantities the hypotheses assert, as expressions.
@@ -3967,16 +4211,6 @@ fn atomic_poly_domain(s: &SetVal) -> Option<PolyDomain> {
     }
 }
 
-/// Decide whether free variables in `prop` should be treated as Nat (≥ 0),
-/// Int, or Real.  Heuristic over the binder chain:
-///   - every domain is `Nat` ⇒ `Nat`
-///   - any domain is `Real` ⇒ `Real` (the unsigned-coefficient analyses still
-///     apply, since rationals embed into ℝ)
-///   - otherwise ⇒ `Int` (the conservative default)
-#[cfg(test)]
-fn detect_domain(prop: &Expr) -> PolyDomain {
-    detect_domain_with(prop, None)
-}
 
 fn detect_domain_with(prop: &Expr, ctx: Option<&EvalCtx>) -> PolyDomain {
     // A binder's domain is often a *name* for a set rather than the set
@@ -4018,11 +4252,28 @@ fn detect_domain_with(prop: &Expr, ctx: Option<&EvalCtx>) -> PolyDomain {
     }
     if saw_any && all_nat {
         PolyDomain::Nat
-    } else if saw_real {
+    } else if saw_real || mentions_a_real_literal(prop) {
         PolyDomain::Real
     } else {
         PolyDomain::Int
     }
+}
+
+/// Does the goal contain a real literal anywhere?
+///
+/// A goal with no binders at all — a claim about free globals, which is how
+/// a model states facts about its parameters — used to fall through to
+/// `Int`, and `Int` licenses the discreteness step `p > 0 ⟹ p >= 1`.  So
+/// `freeX > 0.0 ⊢ freeX >= 1.0` came out "proved", which is false for a
+/// real.  The kernel refused the certificate, so nothing unsound got past
+/// `--strict`, but the tactic should not have claimed it either.
+///
+/// Seeing `0.0` is enough to settle it: nobody writes a real literal in a
+/// claim about integers, and `Real` is the weaker reading, so guessing it
+/// can only lose proofs, never licence them.
+fn mentions_a_real_literal(e: &Expr) -> bool {
+    matches!(e, Expr::Real(_))
+        || crate::ast::children(e).into_iter().any(mentions_a_real_literal)
 }
 
 
@@ -5479,7 +5730,7 @@ mod encoding_tests {
     }
 
     fn check(columns: &[Vec<Rat>], target: &[Rat]) -> Option<Vec<Rat>> {
-        let x = solve_nonneg_exact(columns, target)?;
+        let x = solve_nonneg_optimal(columns, target, None)?;
         // Whatever comes back must actually solve the system.
         for i in 0..target.len() {
             let got = columns
@@ -5502,7 +5753,7 @@ mod encoding_tests {
     #[test]
     fn simplex_refuses_a_target_needing_a_negative_weight() {
         // x·[1] = -1 has no non-negative solution.
-        assert_eq!(solve_nonneg_exact(&[vec![r(1)]], &[r(-1)]), None);
+        assert_eq!(solve_nonneg_optimal(&[vec![r(1)]], &[r(-1)], None), None);
     }
 
     #[test]
@@ -5510,7 +5761,7 @@ mod encoding_tests {
         // Two columns that are multiples of each other cannot hit a target
         // off their common ray.
         let columns = vec![vec![r(1), r(2)], vec![r(2), r(4)]];
-        assert_eq!(solve_nonneg_exact(&columns, &[r(1), r(1)]), None);
+        assert_eq!(solve_nonneg_optimal(&columns, &[r(1), r(1)], None), None);
     }
 
     #[test]
@@ -5536,12 +5787,12 @@ mod encoding_tests {
 
     #[test]
     fn simplex_accepts_an_all_zero_target() {
-        assert_eq!(solve_nonneg_exact(&[vec![r(1)]], &[r(0)]), Some(vec![r(0)]));
+        assert_eq!(solve_nonneg_optimal(&[vec![r(1)]], &[r(0)], None), Some(vec![r(0)]));
     }
 
     #[test]
     fn simplex_with_no_columns_needs_a_zero_target() {
-        assert_eq!(solve_nonneg_exact(&[], &[r(0)]), Some(vec![]));
-        assert_eq!(solve_nonneg_exact(&[], &[r(1)]), None);
+        assert_eq!(solve_nonneg_optimal(&[], &[r(0)], None), Some(vec![]));
+        assert_eq!(solve_nonneg_optimal(&[], &[r(1)], None), None);
     }
 }

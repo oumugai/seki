@@ -190,6 +190,47 @@ impl Rat {
     }
 }
 
+/// A real *literal* as the rational the author wrote.
+///
+/// `f64_to_rat` gives the exact binary value, which for `0.6` is
+/// 5404319552844595/9007199254740992 — very slightly less than three
+/// fifths.  Reasoning with it makes `0.6 * 50.0 >= 30.0` **false**, which
+/// is correct about doubles and wrong about the statement someone wrote.
+/// Decimal literals mean decimals, the way they do in every other prover,
+/// so the polynomial fragment reads them that way.
+///
+/// Rust's `Display` for `f64` prints the shortest decimal that round-trips,
+/// which is exactly the literal as written (up to trailing zeroes).  A
+/// literal too long to fit a denominator of `10^k` falls back to the binary
+/// value rather than being refused.
+///
+/// The *evaluator* still computes in `f64`; this governs `by algebra` and
+/// the kernel's polynomial checks, which agree with each other because both
+/// go through here.
+pub fn decimal_to_rat(f: f64) -> Option<Rat> {
+    if !f.is_finite() {
+        return None;
+    }
+    let text = format!("{}", f);
+    let (int_part, frac_part) = match text.split_once('.') {
+        Some((i, d)) => (i, d),
+        // No fractional part, and `Display` never uses exponent notation,
+        // so this is a plain integer.
+        None => (text.as_str(), ""),
+    };
+    if frac_part.len() > 30 || !frac_part.bytes().all(|b| b.is_ascii_digit()) {
+        return f64_to_rat(f);
+    }
+    let digits = format!("{}{}", int_part, frac_part);
+    let Ok(num) = digits.parse::<i128>() else {
+        return f64_to_rat(f);
+    };
+    let Some(den) = 10i128.checked_pow(frac_part.len() as u32) else {
+        return f64_to_rat(f);
+    };
+    Some(Rat::new(num, den))
+}
+
 /// Convert an `f64` to an exact `Rat` when possible.  Returns `None` for
 /// non-finite values, subnormals, or magnitudes whose exact representation
 /// would overflow `i128`.  This is the rule that decides whether a `Real`
@@ -480,7 +521,7 @@ pub fn expr_to_poly(e: &Expr) -> Option<Polynomial> {
 fn expr_to_poly_inner(e: &Expr) -> Option<Polynomial> {
     match e {
         Expr::Int(n) => Some(Polynomial::from_const(*n as i128)),
-        Expr::Real(f) => f64_to_rat(*f).map(Polynomial::from_rat),
+        Expr::Real(f) => decimal_to_rat(*f).map(Polynomial::from_rat),
         Expr::Bool(_) | Expr::Str(_) => None,
         Expr::Var { name, .. } => Some(Polynomial::from_var(name)),
         Expr::UnOp(UnOp::Neg, inner) => Some(expr_to_poly(inner)?.neg()),
@@ -577,7 +618,7 @@ pub fn const_value(e: &Expr) -> Option<i128> {
 pub fn const_value_rat(e: &Expr) -> Option<Rat> {
     match e {
         Expr::Int(n) => Some(Rat::from_int(*n as i128)),
-        Expr::Real(f) => f64_to_rat(*f),
+        Expr::Real(f) => decimal_to_rat(*f),
         Expr::UnOp(UnOp::Neg, inner) => const_value_rat(inner).map(|v| v.neg()),
         Expr::BinOp(BinOp::Add, l, r) => {
             Some(const_value_rat(l)?.add(const_value_rat(r)?))
@@ -642,7 +683,7 @@ pub fn canonicalize(e: &Expr) -> Expr {
 fn expr_to_poly_opaque_only(e: &Expr) -> Option<Polynomial> {
     match e {
         Expr::Int(n) => Some(Polynomial::from_const(*n as i128)),
-        Expr::Real(f) => f64_to_rat(*f).map(Polynomial::from_rat),
+        Expr::Real(f) => decimal_to_rat(*f).map(Polynomial::from_rat),
         Expr::Var { name, .. } => Some(Polynomial::from_var(name)),
         Expr::UnOp(UnOp::Neg, inner) => Some(expr_to_poly_opaque_only(inner)?.neg()),
         Expr::BinOp(op, l, r) => {
@@ -1377,16 +1418,51 @@ mod overflow_tests {
         assert!(Rat::ONE.div(p).is_none());
     }
 
-    #[test]
-    fn an_overflowed_expression_is_not_in_the_polynomial_fragment() {
-        // `expr_to_poly` refusing it is what makes every tactic and the
-        // kernel report the goal as out of range rather than reason with a
-        // wrong number.
-        let decls = crate::parse_program("0.1 * 0.2 * 0.3").expect("parse");
+    fn poly_of(src: &str) -> Option<Polynomial> {
+        let decls = crate::parse_program(src).expect("parse");
         let e = match decls.into_iter().next().unwrap().decl {
             crate::ast::Decl::Expr(e) => e,
             other => panic!("expected an expression, got {:?}", other),
         };
-        assert!(expr_to_poly(&e).is_none());
+        expr_to_poly(&e)
+    }
+
+    #[test]
+    fn an_overflowed_expression_is_not_in_the_polynomial_fragment() {
+        // `expr_to_poly` refusing it is what makes every tactic and the
+        // kernel report the goal as out of range rather than reason with a
+        // wrong number.  10^30 squared leaves `i128`.
+        assert!(poly_of(
+            "1000000000000000000000000000000.0 * 1000000000000000000000000000000.0"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_decimal_literal_is_the_decimal_it_is_written_as() {
+        // `0.1 * 0.2 * 0.3` used to overflow, because each factor was the
+        // exact binary value with a denominator of 2^54 or so.  Read as the
+        // decimals they are, they multiply to 3/500 and the documented
+        // workaround of writing `1.0/10.0` is no longer needed.
+        assert_eq!(
+            poly_of("0.1 * 0.2 * 0.3"),
+            Some(Polynomial::from_rat(Rat::new(3, 500)))
+        );
+        assert_eq!(poly_of("0.6"), Some(Polynomial::from_rat(Rat::new(3, 5))));
+        assert_eq!(
+            poly_of("0.1 + 0.2"),
+            Some(Polynomial::from_rat(Rat::new(3, 10)))
+        );
+    }
+
+    #[test]
+    fn decimal_conversion_keeps_the_binary_value_when_it_has_to() {
+        // A value with no short decimal form falls back rather than being
+        // refused — `1/3` is not `0.333...` truncated anywhere.
+        assert_eq!(decimal_to_rat(0.5), Some(Rat::new(1, 2)));
+        assert_eq!(decimal_to_rat(2.0), Some(Rat::from_int(2)));
+        assert_eq!(decimal_to_rat(-1.25), Some(Rat::new(-5, 4)));
+        assert!(decimal_to_rat(f64::NAN).is_none());
+        assert!(decimal_to_rat(1.0 / 3.0).is_some());
     }
 }

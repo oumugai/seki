@@ -1447,7 +1447,16 @@ fn seki_lib_test_real_axioms() {
     run_seki_test_file("tests/seki/test_real_axioms.seki", 5);
 }
 
-/// Every claim in the analysis library is re-established by the kernel.
+/// `lib/control/safety.seki` — safety envelopes for control loops.  The
+/// point of the library is that loosening any one range makes the claim
+/// *false*, so the test file adds uses of its own alongside the import.
+#[test]
+fn seki_lib_test_control_safety() {
+    run_seki_test_file("tests/seki/test_control_safety.seki", 5);
+}
+
+/// Every claim in the analysis and control libraries is re-established by
+/// the kernel.
 ///
 /// The point of building analysis by deduction rather than by axiom is
 /// that the result is *checked*; a proof that only the tactic believes
@@ -1460,6 +1469,7 @@ fn the_analysis_library_is_kernel_checked() {
         "lib/analysis/axioms.seki",
         "lib/analysis/continuity.seki",
         "lib/analysis/ode.seki",
+        "lib/control/safety.seki",
     ] {
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
             .arg("--audit")
@@ -3697,4 +3707,97 @@ fn a_false_epsilon_delta_bound_is_refused() {
          absR (x - a) < d -> absR (x * x - a * a) < d := by unfold absR then algebra"
     ))
     .is_proof_error());
+}
+
+// ---------------------------------------------------------------------------
+// The audit report is the deliverable for a model somebody has to sign off
+// on, so what it says about *assumptions* is part of the contract.
+
+#[test]
+fn the_audit_lists_what_a_file_assumes() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--audit")
+        .arg("examples/46_decision_audit.seki")
+        .output()
+        .expect("run seki --audit");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", stdout);
+    // Each assumption, with its confidence and where it came from.
+    assert!(stdout.contains("assumed without proof"), "{}", stdout);
+    assert!(stdout.contains("adoption_floor"), "{}", stdout);
+    assert!(stdout.contains("7/10"), "{}", stdout);
+    // And each conclusion says which assumptions carry it, with a bound
+    // that is the Frechet one rather than a product.
+    assert!(
+        stdout.contains("confidence >= 3/5"),
+        "the Frechet bound for 7/10 and 9/10 is 3/5:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("(from `adoption_floor` 7/10, `discount_rate_range` 9/10)"),
+        "{}",
+        stdout
+    );
+}
+
+#[test]
+fn an_assumption_nothing_rests_on_is_pointed_out() {
+    // A confidence written for a conclusion that never cites it warrants
+    // nothing; the audit says so rather than letting the number sit there.
+    let src = "axiom believed : someParam >= 1.0 with confidence 0.8 from \"a guess\"
+               theorem t : forall x in Real, x * x >= 0.0 := by algebra
+";
+    let dir = std::env::temp_dir().join("seki_audit_unused");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("unused.seki");
+    std::fs::write(&path, src).expect("write");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--audit")
+        .arg(&path)
+        .output()
+        .expect("run seki --audit");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("no conclusion here rests on `believed`"), "{}", stdout);
+}
+
+// ---------------------------------------------------------------------------
+// Decimal literals, and the domain a goal is read over.
+
+#[test]
+fn decimal_literals_mean_the_decimals_they_are_written_as() {
+    // `0.6` is not the nearest double when it appears in a claim; it is
+    // three fifths, and `0.6 * 50 >= 30` is true.
+    assert_eq!(
+        trust_of("theorem t : forall a in Real, a >= 0.6 => (a * 50.0) >= 30.0 := by algebra", "t"),
+        TrustLevel::Sound
+    );
+    assert_eq!(
+        trust_of("theorem t : (0.1 + 0.2) == 0.3 := by algebra", "t"),
+        TrustLevel::Sound
+    );
+}
+
+#[test]
+fn a_claim_about_free_reals_is_not_read_as_being_about_integers() {
+    // With no binder to read a domain from, the goal used to fall through
+    // to `Int`, which licenses `p > 0 ⟹ p >= 1` — false for a real.
+    assert!(run_err(
+        "axiom h : freeX > 0.0
+         theorem bad : freeX >= 1.0 := by have a : freeX > 0.0 := by apply h then algebra"
+    )
+    .is_proof_error());
+}
+
+#[test]
+fn an_equality_hypothesis_can_carry_a_proof() {
+    // "the price is 50" is how a model states a known quantity; a Farkas
+    // certificate needs both inequalities, and the kernel derives them.
+    assert_eq!(
+        trust_of(
+            "theorem t : forall a in Real, forall p in Real, \
+             (a >= 0.6) and (p == 50.0) => (a * p) >= 30.0 := by algebra",
+            "t"
+        ),
+        TrustLevel::Sound
+    );
 }

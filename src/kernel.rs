@@ -1032,6 +1032,7 @@ impl Checker<'_, '_> {
                 self.same_relation(gl, gr, lhs, rhs)?;
                 let mut available = goal_hypotheses(prop);
                 available.extend(domain_hypotheses(prop, self.ctx, &self.env));
+                add_equality_consequences(&mut available);
                 let mut acc = Polynomial::zero();
                 for (h, lambda) in used {
                     if !available.iter().any(|a| crate::ast::alpha_equiv(a, h)) {
@@ -1069,6 +1070,7 @@ impl Checker<'_, '_> {
                 // the goal — as a premise, or imposed by a binder's domain.
                 let mut available = goal_hypotheses(prop);
                 available.extend(domain_hypotheses(prop, self.ctx, &self.env));
+                add_equality_consequences(&mut available);
                 let mut acc = Polynomial::from_rat(*slack);
                 let mut strict_available = false;
                 for g in used {
@@ -1770,6 +1772,22 @@ pub fn domain_hypotheses(prop: &Expr, ctx: &EvalCtx, env: &Env) -> Vec<Expr> {
 
 /// Peel `(not P) or Q` / `P -> Q` chains into the final conclusion and the
 /// premises collected along the way.
+/// Both inequalities that an assumed equality entails.
+///
+/// Models are full of equalities — "the price is 50", "capacity equals C" —
+/// and a Farkas certificate is built from things assumed non-negative, so
+/// without this a goal that needs one has no certificate at all.  The
+/// kernel derives them itself rather than taking a certificate's word for
+/// which direction it meant.
+fn add_equality_consequences(available: &mut Vec<Expr>) {
+    for h in available.clone() {
+        if let Expr::BinOp(crate::ast::BinOp::Eq, a, b) = &h {
+            available.push(Expr::BinOp(crate::ast::BinOp::Ge, a.clone(), b.clone()));
+            available.push(Expr::BinOp(crate::ast::BinOp::Ge, b.clone(), a.clone()));
+        }
+    }
+}
+
 fn split_implications(body: &Expr) -> (Expr, Vec<Expr>) {
     let mut premises = Vec::new();
     let mut cur = body.clone();

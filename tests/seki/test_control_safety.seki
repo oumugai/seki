@@ -1,0 +1,40 @@
+-- lib/control/safety.seki の回帰テスト。
+--
+-- 安全包絡線のライブラリは、範囲を 1 つ緩めただけで**偽になる**ことが
+-- 価値の源。ここでは正しい形を再確認したうえで、その場で使えることを
+-- 確かめる追加の定理を置く。
+
+import "control/safety.seki"
+
+-- ----- クランプを実際に使う -----
+def throttle := \x -> clamp 0.0 1.0 x
+
+theorem throttle_bounded
+  : forall x in Real, (throttle x >= 0.0) and (throttle x <= 1.0)
+  := by unfold throttle then unfold clamp then algebra
+
+-- ----- ステップ幅の具体値 -----
+-- L = 4 なら h = 0.25 まで安全
+theorem quarter_step_is_safe
+  : forall e in Real, e >= 0.0 => (0.25 * 4.0) * e <= e
+  := by algebra
+
+-- ----- 3 次のゲイン箱 -----
+theorem tight_gain_box
+  : forall a in Real, forall b in Real, forall c in Real,
+      (a >= 0.0) and (a <= 0.5) and (b >= 0.0) and (b <= 0.5)
+        and (c >= 0.0) and (c <= 0.5)
+      => a * b * c <= 0.125
+  := by algebra
+
+-- ----- 等式の仮定が使えること -----
+-- 「ゲインは 2 に固定」のような仮定はモデルに頻出する
+theorem fixed_gain
+  : forall k in Real, forall x in Real,
+      (k == 2.0) and (x >= 0.0) and (x <= 1.0) => (k * x) <= 2.0
+  := by algebra
+
+-- ----- 定常誤差 -----
+theorem no_residual_error
+  : forall e in Real, (absR e <= 0.5 * absR e) => e == 0.0
+  := by unfold absR then algebra

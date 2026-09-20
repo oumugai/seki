@@ -11,9 +11,24 @@
 //! hypothesis and re-running the prover.  A suggestion that does not close
 //! the goal is worse than none, so none is given.
 //!
-//! What it currently finds: the bound on a single variable that makes a
-//! linear goal hold.  Missing premises of an applied lemma are reported by
-//! `by apply` itself, which knows them exactly.
+//! What it finds: bounds on the goal's variables that, added as
+//! hypotheses, make it provable — up to a few of them, since a model
+//! usually lacks more than one.  The bounds come from running Farkas
+//! backwards (`Prover::abduce_bound`), so they are exact and work with any
+//! number of variables.  Missing premises of an applied lemma are reported
+//! by `by apply` itself, which knows them exactly.
+//!
+//! What it does not find:
+//!
+//!   - A bound the goal needs *multiplied by* an existing hypothesis.
+//!     `x >= 0 ⊢ x² <= 4` holds given `x <= 2`, whose certificate is
+//!     `(2-x)·(2+x)` — the missing hypothesis appears inside a product, and
+//!     the unknown bound then multiplies a generator instead of standing in
+//!     its own column, which is no longer a linear question.
+//!   - A missing assumption that is not a bound on one variable.
+//!     `⊢ c - p >= 1/2` needs a bound on the *difference*; any pair of
+//!     bounds on `c` and `p` separately would do, so there is no answer to
+//!     give and silence is the honest one.
 
 use crate::algebra::{expr_to_poly, Polynomial, Rat};
 use crate::ast::{BinOp, Expr};
@@ -37,28 +52,155 @@ pub struct Suggestion {
 /// case for goals outside the linear fragment, and is reported as silence
 /// rather than as a guess.
 pub fn missing_assumptions(prover: &Prover, prop: &Expr, env: &Env) -> Vec<Suggestion> {
-    let mut out = Vec::new();
-    let Some((diff, strict)) = goal_difference(prop) else {
-        return out;
-    };
-    let (conclusion, _) =
-        crate::rewrite::peel_premises(crate::rewrite::peel_binders(prop).1);
-    for var in single_variable_bounds(&diff, strict) {
-        // A "suggestion" that restates the goal tells the author nothing:
-        // `n >= 5` holds given `n >= 5`.  Say nothing instead.
-        if crate::ast::alpha_equiv(&var.assumption, &conclusion) {
-            continue;
-        }
-        // And only offer what actually works.  The candidates come in
-        // decreasing readability, so the first that verifies is the one to
-        // show; the rest say the same thing less clearly.
-        let candidate = with_assumption(prop, var.assumption.clone());
-        if prover.verify_algebra_raw(&candidate, env).is_ok() {
-            out.push(var);
+    const MAX_SUGGESTIONS: usize = 3;
+    let mut found: Vec<Suggestion> = Vec::new();
+    // Each round adds the bound it found and asks again, so a goal short of
+    // two assumptions gets told about both.  Three is where a list stops
+    // being a diagnosis and starts being a shrug.
+    let mut goal = prop.clone();
+    for _ in 0..MAX_SUGGESTIONS {
+        let Some(next) = one_missing_bound(prover, &goal, env) else {
             break;
+        };
+        goal = with_assumption(&goal, next.assumption.clone());
+        found.push(next);
+        if prover.verify_algebra_raw(&goal, env).is_ok() {
+            return found;
         }
     }
-    out
+    // Only report a set that actually closes the goal.  A partial list
+    // points at the wrong thing, and a wrong hint costs more than silence.
+    if !found.is_empty() && prover.verify_algebra_raw(&goal, env).is_ok() {
+        found
+    } else {
+        Vec::new()
+    }
+}
+
+/// One bound that gets the goal closer, verified to be usable.
+fn one_missing_bound(prover: &Prover, prop: &Expr, env: &Env) -> Option<Suggestion> {
+    let (diff, strict) = goal_difference(prop)?;
+    let (conclusion, hyps) =
+        crate::rewrite::peel_premises(crate::rewrite::peel_binders(prop).1);
+    for var in candidate_variables(&diff, &hyps) {
+        for (upper, bound) in prover.abduce_bound(&hyps, &diff, &var) {
+            let op = match (upper, strict) {
+                (false, false) => BinOp::Ge,
+                (false, true) => BinOp::Gt,
+                (true, false) => BinOp::Le,
+                (true, true) => BinOp::Lt,
+            };
+            // A bound derived from decimal literals is exact but
+            // unreadable — `0.99` is not ninety-nine hundredths as an
+            // `f64`, so dividing by it yields something like
+            // `3602879701896397 / 17834254524387164`.  Offer rounded forms
+            // first, erring towards the *stronger* assumption so they still
+            // imply the goal.
+            for written in readable_bounds(bound, upper) {
+                let assumption = Expr::BinOp(
+                    op.clone(),
+                    Box::new(Expr::Var { name: var.clone(), line: 0, col: 0 }),
+                    Box::new(written),
+                );
+                // A "suggestion" that restates the goal tells the author
+                // nothing: `n >= 5` holds given `n >= 5`.
+                if crate::ast::alpha_equiv(&assumption, &conclusion) {
+                    continue;
+                }
+                // Nor does one already assumed.
+                if hyps.iter().any(|h| crate::ast::alpha_equiv(h, &assumption)) {
+                    continue;
+                }
+                // Does adding it actually get anywhere?  Either it closes
+                // the goal outright, or it is a step the next round can
+                // build on — but a bound that changes nothing is noise.
+                let candidate = with_assumption(prop, assumption.clone());
+                // A bound that contradicts what is already assumed makes
+                // the goal hold *vacuously*.  `a >= 0.6 ⊢ 50a >= 30` is
+                // "provable" given `a <= 0`, and offering that as the
+                // missing assumption is worse than saying nothing: it reads
+                // as a finding about the model when it is an artifact of
+                // ex falso.
+                if contradicts_the_hypotheses(prover, &candidate, env) {
+                    continue;
+                }
+                if prover.verify_algebra_raw(&candidate, env).is_ok()
+                    || bound_is_progress(prover, &candidate, env)
+                {
+                    return Some(Suggestion { assumption, variable: Some(var) });
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Whether the hypotheses of `prop` cannot all hold at once.
+///
+/// Asked by trying to derive something plainly false from them: if `0 >= 1`
+/// follows, anything does, and the goal's truth says nothing.
+fn contradicts_the_hypotheses(prover: &Prover, prop: &Expr, env: &Env) -> bool {
+    let (binders, inner) = crate::rewrite::peel_binders(prop);
+    let (_, hyps) = crate::rewrite::peel_premises(&inner);
+    if hyps.is_empty() {
+        return false;
+    }
+    let absurd = Expr::BinOp(
+        BinOp::Ge,
+        Box::new(Expr::Real(0.0)),
+        Box::new(Expr::Real(1.0)),
+    );
+    let mut goal = absurd;
+    for h in hyps.iter().rev() {
+        goal = Expr::BinOp(
+            BinOp::Or,
+            Box::new(Expr::UnOp(crate::ast::UnOp::Not, Box::new(h.clone()))),
+            Box::new(goal),
+        );
+    }
+    prover
+        .verify_algebra_raw(&crate::rewrite::rebuild_binders(&binders, goal), env)
+        .is_ok()
+}
+
+/// Whether a candidate assumption leaves a goal that abduction can still
+/// make progress on — used to accept a bound that is necessary but not on
+/// its own sufficient.
+fn bound_is_progress(prover: &Prover, candidate: &Expr, _env: &Env) -> bool {
+    let Some((diff, _)) = goal_difference(candidate) else {
+        return false;
+    };
+    let (_, hyps) =
+        crate::rewrite::peel_premises(crate::rewrite::peel_binders(candidate).1);
+    candidate_variables(&diff, &hyps)
+        .into_iter()
+        .any(|v| !prover.abduce_bound(&hyps, &diff, &v).is_empty())
+}
+
+/// The goal's variables, the ones no hypothesis mentions first.
+///
+/// An unconstrained parameter is what is usually missing; a variable that
+/// already has a bound needs it *tightened*, which is a smaller surprise
+/// and a less likely diagnosis.
+fn candidate_variables(diff: &Polynomial, hyps: &[Expr]) -> Vec<String> {
+    let mut vars: Vec<String> = Vec::new();
+    for m in &diff.terms {
+        for v in m.vars.keys() {
+            // An opaque subterm is not something the author can bound.
+            if !v.starts_with("__atom_") && !vars.contains(v) {
+                vars.push(v.clone());
+            }
+        }
+    }
+    let mentioned = |v: &str| {
+        let mut names = std::collections::BTreeSet::new();
+        for h in hyps {
+            crate::unfold::collect_free_var_names(h, &mut names);
+        }
+        names.contains(v)
+    };
+    vars.sort_by_key(|v| mentioned(v));
+    vars
 }
 
 /// Format suggestions as a hint to append to a failure message.
@@ -70,10 +212,13 @@ pub fn hint(suggestions: &[Suggestion]) -> String {
         .iter()
         .map(|s| format!("`{}`", s.assumption))
         .collect();
+    // The set is collectively sufficient, so they are joined with "and":
+    // adding only one of them would still leave the goal open.
     format!(
-        "\n  it would hold given {} — add it as a hypothesis \
+        "\n  it would hold given {} — add {} as a hypothesis \
          (`... => <goal>`) or tighten an existing one",
-        parts.join(" or ")
+        parts.join(" and "),
+        if parts.len() == 1 { "it" } else { "them" }
     )
 }
 
@@ -92,66 +237,6 @@ fn goal_difference(prop: &Expr) -> Option<(Polynomial, bool)> {
         _ => return None,
     };
     Some((expr_to_poly(&lhs)?.sub(expr_to_poly(&rhs)?), strict))
-}
-
-/// For `c·v + k ≥ 0` in a single variable, the bound on `v`.
-fn single_variable_bounds(diff: &Polynomial, strict: bool) -> Vec<Suggestion> {
-    let mut vars: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-    for m in &diff.terms {
-        for v in m.vars.keys() {
-            vars.insert(v.as_str());
-        }
-    }
-    // One variable, appearing linearly: anything else needs a different
-    // shape of answer than a bound.
-    if vars.len() != 1 {
-        return Vec::new();
-    }
-    let var = vars.into_iter().next().expect("one variable");
-    if var.starts_with("__atom_") {
-        // An opaque subterm is not something the author can bound.
-        return Vec::new();
-    }
-    let mut coeff = Rat::from_int(0);
-    let mut constant = Rat::from_int(0);
-    for m in &diff.terms {
-        match m.vars.get(var) {
-            Some(1) if m.vars.len() == 1 => coeff = coeff.add(m.coeff),
-            Some(_) => return Vec::new(), // non-linear
-            None if m.vars.is_empty() => constant = constant.add(m.coeff),
-            None => return Vec::new(),
-        }
-    }
-    if coeff.sign() == 0 {
-        return Vec::new();
-    }
-    // c·v + k ≥ 0  ⟺  v ≥ -k/c  (c > 0)  or  v ≤ -k/c  (c < 0)
-    let Some(bound) = constant.neg().div(coeff) else {
-        return Vec::new();
-    };
-    let upper = coeff.sign() < 0;
-    let op = match (upper, strict) {
-        (false, false) => BinOp::Ge,
-        (false, true) => BinOp::Gt,
-        (true, false) => BinOp::Le,
-        (true, true) => BinOp::Lt,
-    };
-    // A bound derived from decimal literals is exact but unreadable —
-    // `0.99` is not ninety-nine hundredths as an `f64`, so dividing by it
-    // yields something like `3602879701896397 / 17834254524387164`.  Offer
-    // rounded forms first, erring towards the *stronger* assumption so they
-    // still imply the goal, and let the caller's verification decide.
-    readable_bounds(bound, upper)
-        .into_iter()
-        .map(|b| Suggestion {
-            assumption: Expr::BinOp(
-                op.clone(),
-                Box::new(Expr::Var { name: var.to_string(), line: 0, col: 0 }),
-                Box::new(b),
-            ),
-            variable: Some(var.to_string()),
-        })
-        .collect()
 }
 
 /// Ways of writing a bound, most readable first.
@@ -267,8 +352,73 @@ mod tests {
     }
 
     #[test]
+    fn a_bound_is_found_with_several_variables_in_play() {
+        // `c >= 3.5` and the goal `c - p >= 0.5` pin `p` down exactly.
+        // Rearranging for a single variable — what this used to do — cannot
+        // see this at all.
+        assert_eq!(
+            suggest("forall c in Real, forall p in Real, c >= 3.5 => (c - p) >= 0.5"),
+            vec!["(p <= 3)"]
+        );
+    }
+
+    #[test]
+    fn the_bound_reported_is_the_weakest_one_that_works() {
+        // `r <= 0` would also make the goal hold, and the simplex is just
+        // as happy to return it.  Phase 2 picks the bound that actually
+        // answers the question.
+        assert_eq!(
+            suggest("forall r in Real, r <= 0.6 => (100.0 - 200.0 * r) > 0.0"),
+            vec!["(r < (1 / 2))"]
+        );
+    }
+
+    #[test]
+    fn a_three_parameter_model_names_the_one_that_is_missing() {
+        assert_eq!(
+            suggest(
+                "forall rev in Real, forall cost in Real, forall tax in Real, \
+                 (rev >= 100.0) and (tax <= 20.0) => (rev - cost - tax) >= 50.0"
+            ),
+            vec!["(cost <= 30)"]
+        );
+    }
+
+    #[test]
+    fn an_existing_bound_that_is_too_loose_gets_tightened() {
+        // `a >= 3/5` is not enough for `50a >= 40`; `a >= 4/5` is, and it
+        // is the *weakest* bound that is.  `a >= 1000` would also do, and
+        // is what a linear objective on the constant term picks — the
+        // bound is a ratio, so choosing it needs the Charnes-Cooper
+        // substitution in `Prover::abduce_bound`.
+        assert_eq!(
+            suggest("forall a in Real, a >= 0.6 => (a * 50.0) >= 40.0"),
+            vec!["(a >= (4 / 5))"]
+        );
+    }
+
+    #[test]
+    fn a_suggestion_never_works_by_contradicting_what_is_assumed() {
+        // `a <= 0` makes `a >= 0.6 ⊢ 50a >= 40` hold, vacuously.  Offering
+        // it reads as a finding about the model when it is ex falso.
+        for s in suggest("forall a in Real, a >= 0.6 => (a * 50.0) >= 40.0") {
+            assert!(!s.contains("a <="), "offered a contradictory bound: {}", s);
+        }
+    }
+
+    #[test]
+    fn an_ambiguous_gap_gets_silence_rather_than_a_guess() {
+        // `c - p >= 1/2` with both free needs a bound on the difference;
+        // infinitely many pairs of individual bounds would do, so naming
+        // one would be arbitrary.
+        assert!(suggest("forall c in Real, forall p in Real, (c - p) >= 0.5").is_empty());
+    }
+
+    #[test]
     fn nothing_is_offered_outside_the_linear_fragment() {
-        assert!(suggest("forall x in Real, forall y in Real, x * y >= 0.0").is_empty());
+        // `x <= 2` would do it, but its certificate is `(2-x)·(2+x)` — the
+        // missing bound inside a product, which is not a linear question.
+        assert!(suggest("forall x in Real, x >= 0.0 => x * x <= 4.0").is_empty());
         assert!(suggest("forall x in Real, x * x * x >= 0.0").is_empty());
     }
 

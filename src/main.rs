@@ -371,6 +371,66 @@ fn audit_file(path: &str, extra_libs: Vec<PathBuf>, prog_args: Vec<String>) -> E
         }
     }
     println!("{}", "-".repeat(78));
+
+    // What the file *assumes*.  An audit that lists only what was checked
+    // is half a report: a decision rests as much on the assumptions nobody
+    // proved, and those are exactly what a reader six months later needs to
+    // see.  Axioms are listed whether or not a theorem cites one.
+    let mut axiom_names: Vec<&String> = state.globals.axiom_props.keys().collect();
+    axiom_names.sort();
+    if !axiom_names.is_empty() {
+        println!();
+        println!("{:<44}  {}", "assumed without proof", "confidence and source");
+        println!("{}", "-".repeat(78));
+        for name in &axiom_names {
+            let confidence = match state.globals.axiom_confidence.get(*name) {
+                Some(c) => format!("{}", c),
+                None => "asserted outright".to_string(),
+            };
+            let source = state
+                .globals
+                .axiom_provenance
+                .get(*name)
+                .map(|p| format!(" — {}", p))
+                .unwrap_or_default();
+            println!("{:<44}  {}{}", name, confidence, source);
+        }
+        // An assumption no conclusion rests on is usually a modelling
+        // slip: the theorem restated the bound as its own hypothesis
+        // instead of citing the axiom, so the stated confidence never
+        // reaches the conclusion it was written for.
+        let cited: std::collections::BTreeSet<&str> = state
+            .globals
+            .theorem_verdicts
+            .values()
+            .flat_map(|v| v.assumptions.iter())
+            .map(|a| a.as_str())
+            .collect();
+        // Only axioms that carry a *confidence*: one was written to warrant
+        // a conclusion, so one that reaches none is a modelling slip worth
+        // pointing at.  A classical assumption an imported library declares
+        // and this file happens not to use is not.
+        let unused: Vec<&str> = axiom_names
+            .iter()
+            .map(|n| n.as_str())
+            .filter(|n| state.globals.axiom_confidence.contains_key(*n))
+            .filter(|n| !cited.iter().any(|a| a.contains(*n)))
+            .collect();
+        if !unused.is_empty() {
+            let listed = unused
+                .iter()
+                .map(|n| format!("`{}`", n))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!();
+            println!("  note: no conclusion here rests on {},", listed);
+            println!("  so the confidence stated for it warrants nothing.  A theorem that");
+            println!("  restates an axiom's content as its own hypothesis does not cite it");
+            println!("  — connect them with `by have h : <prop> := by apply <axiom> then ...`.");
+        }
+        println!("{}", "-".repeat(78));
+    }
+
     let total: usize = counts.values().sum();
     println!(
         "{} claims ({} theorems, {} refined definitions)",

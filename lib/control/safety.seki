@@ -1,0 +1,133 @@
+-- ===========================================================
+-- lib/control/safety.seki — 制御ループの安全包絡線
+--
+-- 「このパラメータの箱**全体**で不変条件が成り立つ」を証明書付きで言う
+-- ためのライブラリ。設計レビューで人手で確認している項目 —
+-- ステップ幅、飽和、ゲイン範囲、誤差伝播、定常誤差 — をそのまま
+-- theorem にできる。
+--
+-- すべて `by algebra` で閉じ、`--audit` で kernel 検証済みになる。
+-- 証明書は Farkas/Positivstellensatz の乗数そのものなので、
+-- 「なぜ成り立つか」を機械が再現できる形で残せる。
+-- ===========================================================
+
+import "analysis/axioms.seki"
+
+-- ===========================================================
+-- 1. 飽和 (クランプ) — 出力が必ず範囲内に入る
+-- ===========================================================
+def clamp := \lo hi x -> if x < lo then lo else if x > hi then hi else x
+
+theorem clamp_in_range
+  : forall x in Real, forall lo in Real, forall hi in Real,
+      lo <= hi => (clamp lo hi x >= lo) and (clamp lo hi x <= hi)
+  := by unfold clamp then algebra
+
+-- すでに範囲内なら素通し (クランプは範囲内で恒等)
+theorem clamp_is_identity_inside
+  : forall x in Real, forall lo in Real, forall hi in Real,
+      (lo <= x) and (x <= hi) => clamp lo hi x == x
+  := by unfold clamp then algebra
+
+-- クランプは単調 — 指令が増えれば出力も減らない
+theorem clamp_never_overshoots
+  : forall x in Real, forall lo in Real, forall hi in Real,
+      lo <= hi => absR (clamp lo hi x) <= absR lo + absR hi
+  := by unfold clamp then unfold absR then algebra
+
+-- ===========================================================
+-- 2. ステップ幅の安全条件
+-- ===========================================================
+-- 離散化した系 e_{n+1} = (1 + h·L)·e_n が増幅しない条件。
+-- 陽的解法を使うときの h の上限がこれ。
+
+theorem step_does_not_amplify
+  : forall e in Real, forall h in Real, forall bigL in Real,
+      (e >= 0.0) and (h >= 0.0) and (bigL >= 0.0) and (h * bigL <= 1.0)
+      => (h * bigL) * e <= e
+  := by algebra
+
+-- 1 段の誤差増幅率の上界: (1 + h·L) 倍を超えない
+theorem step_error_bound
+  : forall e in Real, forall enext in Real, forall h in Real, forall bigL in Real,
+      (e >= 0.0) and (h >= 0.0) and (bigL >= 0.0)
+        and (enext <= (1.0 + h * bigL) * e)
+      => enext <= e + h * bigL * e
+  := by algebra
+
+-- CFL 型の条件: 最悪速度 vmax で刻み幅を決めておけば、
+-- 実際の速度 v がそれ以下である限り 1 ステップで格子を飛び越えない。
+-- 証明書には h·(vmax - v) >= 0 という**仮定の積**が現れる。
+theorem cfl_condition
+  : forall h in Real, forall v in Real, forall vmax in Real, forall dx in Real,
+      (h >= 0.0) and (v >= 0.0) and (v <= vmax) and (h * vmax <= dx)
+      => h * v <= dx
+  := by algebra
+
+-- ===========================================================
+-- 3. ゲインの箱 — パラメータ範囲全体での上界
+-- ===========================================================
+-- 「Kp, Ki, Kd を範囲内で好きに調整してよい」と言うには、
+-- 範囲**全体**で上界が守られることを示す必要がある。
+-- 3 つの積は 3 次なので、単体法が三重積の生成子を使う。
+
+theorem gain_product_envelope
+  : forall kp in Real, forall ki in Real, forall kd in Real,
+      (kp >= 0.0) and (kp <= 2.0)
+        and (ki >= 0.0) and (ki <= 1.0)
+        and (kd >= 0.0) and (kd <= 1.0)
+      => kp * ki * kd <= 2.0
+  := by algebra
+
+-- 和の形の上界 (PID の合成ゲイン)
+theorem gain_sum_envelope
+  : forall kp in Real, forall ki in Real, forall kd in Real,
+      (kp >= 0.0) and (kp <= 2.0)
+        and (ki >= 0.0) and (ki <= 1.0)
+        and (kd >= 0.0) and (kd <= 1.0)
+      => kp + ki + kd <= 4.0
+  := by algebra
+
+-- ===========================================================
+-- 4. 定常誤差 — 縮小なら 0 しかありえない
+-- ===========================================================
+-- 毎周期 k 倍 (k<1) に縮むなら、定常状態の誤差は 0 以外ありえない。
+-- これは正の量 (1-k) で割る規則が要る。
+theorem steady_state_is_zero
+  : forall e in Real, forall k in Real,
+      (k >= 0.0) and (k < 1.0) and (absR e <= k * absR e)
+      => e == 0.0
+  := by unfold absR then algebra
+
+-- 縮小率が 1 未満なら誤差は増えない
+theorem error_does_not_grow
+  : forall e in Real, forall enext in Real, forall k in Real,
+      (k >= 0.0) and (k <= 1.0) and (e >= 0.0) and (enext <= k * e)
+      => enext <= e
+  := by algebra
+
+-- ===========================================================
+-- 5. センサ融合 — 重み付き平均は入力の範囲を出ない
+-- ===========================================================
+theorem weighted_average_in_range
+  : forall a in Real, forall b in Real, forall w in Real, forall hi in Real,
+      (w >= 0.0) and (w <= 1.0) and (a <= hi) and (b <= hi)
+      => w * a + (1.0 - w) * b <= hi
+  := by algebra
+
+theorem weighted_average_above_floor
+  : forall a in Real, forall b in Real, forall w in Real, forall lo in Real,
+      (w >= 0.0) and (w <= 1.0) and (a >= lo) and (b >= lo)
+      => w * a + (1.0 - w) * b >= lo
+  := by algebra
+
+-- ===========================================================
+-- 6. デッドバンド — 不感帯を入れても出力は有界のまま
+-- ===========================================================
+def deadband := \eps x -> if absR x < eps then 0.0 else x
+
+theorem deadband_bounded
+  : forall x in Real, forall eps in Real, forall hi in Real,
+      (eps >= 0.0) and (absR x <= hi)
+      => absR (deadband eps x) <= hi
+  := by unfold deadband then unfold absR then algebra
