@@ -2054,6 +2054,12 @@ impl<'a> Prover<'a> {
                 Ok(Cert::Assumption)
             }
             Proof::Witness { var, term } => {
+                // Run the tactic first.  `certify` must fail when the
+                // tactic does — building a certificate the kernel will
+                // reject is not the same thing, because a rejected
+                // *evaluation* step is reported as sampled rather than as
+                // an error, and a false goal then came back "proved".
+                self.verify(prop, proof, env)?;
                 let (new_goal, _) = instantiate_existential(prop, var, term).ok_or_else(|| {
                     SekiError::Proof(format!(
                         "by witness: the goal's conclusion is not `exists {} in ..., ...`",

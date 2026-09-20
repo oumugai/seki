@@ -37,6 +37,13 @@ pub enum TrustLevel {
     /// so `crate::kernel` could not re-establish it.  The proposition is
     /// probably true; nothing here proves it independently.
     Unchecked,
+    /// Settled by floating-point evaluation.  **This can accept a false
+    /// proposition**: `Real` means ℝ, and `f64` rounds — `0.1 + 0.2` is
+    /// `0.3` in the first reading and not in the second.  A numerical
+    /// tolerance check such as `|x - 1| < 1e-5` is a claim about doubles,
+    /// not about the reals, and the audit says so rather than reporting it
+    /// as re-established from primitives.
+    Approximate,
     /// Checked on a finite sample of an infinite domain.  **This can accept
     /// a false proposition** — see `docs/spec/06-soundness.md` §6.0.
     Sampled,
@@ -51,6 +58,9 @@ impl TrustLevel {
     pub fn from_verdict(v: &crate::kernel::Verdict) -> Self {
         if v.is_sampled() {
             return TrustLevel::Sampled;
+        }
+        if v.is_approximate() {
+            return TrustLevel::Approximate;
         }
         if !v.fully_checked {
             return TrustLevel::Unchecked;
@@ -89,6 +99,7 @@ impl TrustLevel {
             TrustLevel::Sound => "",
             TrustLevel::Axiomatic => "  [axiomatic]",
             TrustLevel::Unchecked => "  [unchecked — no proof term]",
+            TrustLevel::Approximate => "  [approximate — floating point]",
             TrustLevel::Sampled => "  [sampled — NOT a proof]",
         }
     }
@@ -104,6 +115,11 @@ impl TrustLevel {
                 "the tactic that closed it emits no proof term, so the kernel could \
                  not re-establish it independently",
             ),
+            TrustLevel::Approximate => Some(
+                "it was settled by floating-point evaluation, and `Real` means ℝ — \
+                 the two disagree wherever rounding does, so this is a claim about \
+                 doubles rather than a proof about the reals",
+            ),
             TrustLevel::Sampled => Some(
                 "it quantifies over an infinite domain but was only checked on a \
                  finite sample, so it is not a proof (see docs/spec/06-soundness.md §6.0)",
@@ -118,6 +134,7 @@ impl fmt::Display for TrustLevel {
             TrustLevel::Sound => "sound",
             TrustLevel::Axiomatic => "axiomatic",
             TrustLevel::Unchecked => "unchecked",
+            TrustLevel::Approximate => "approximate",
             TrustLevel::Sampled => "sampled",
         };
         f.write_str(s)

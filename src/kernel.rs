@@ -235,6 +235,12 @@ pub enum TrustReason {
     /// establishes it independently, so a bug in that tactic would go
     /// unnoticed.
     NoWitnessYet,
+    /// Settled by evaluating real arithmetic in floating point.  `Real` is
+    /// ℝ here — `by algebra` reads `0.1` as one tenth — while the evaluator
+    /// computes in `f64`, where `0.1 + 0.2` is not `0.3`.  Where the two
+    /// disagree the exact reading is the one the language means, so a
+    /// verdict that rests on the approximation is recorded as such.
+    FloatingPoint,
 }
 
 /// A polynomial fact together with the witness that makes it checkable.
@@ -392,6 +398,15 @@ impl Verdict {
         self.trusted_steps
             .iter()
             .any(|s| s.reason == TrustReason::Sampled)
+    }
+
+    /// Did any step rest on floating-point evaluation?  That is the other
+    /// kind of gap that can admit a *false* proposition — `Real` means ℝ,
+    /// and `f64` rounds.
+    pub fn is_approximate(&self) -> bool {
+        self.trusted_steps
+            .iter()
+            .any(|s| s.reason == TrustReason::FloatingPoint)
     }
 
     /// Does the proof rest on an `axiom`, or on a theorem that itself was
@@ -553,7 +568,53 @@ impl Checker<'_, '_> {
 
     fn check_ground(&self, prop: &Expr) -> KResult<Verdict> {
         self.no_generalized(prop)?;
-        match self.eval(prop)? {
+        // A comparison of real arithmetic is decided *exactly*, not by the
+        // evaluator.  `0.1 + 0.2 == 0.3` is true of the reals and false of
+        // `f64`, and the kernel used to certify both it and its negation —
+        // one via polynomial arithmetic, the other via evaluation.  Only
+        // one of them can be what the language means, and it is the exact
+        // one, because that is what `by algebra` proves with.
+        match self.exact_real_comparison(prop) {
+            Some(true) => return Ok(Verdict::sound()),
+            Some(false) => {
+                return err(format!(
+                    "the goal {} is false over the reals (the evaluator's \
+                     floating-point answer may differ)",
+                    prop
+                ))
+            }
+            None => {}
+        }
+        // Otherwise evaluate, and see whether the answer rested on
+        // floating point.  A syntactic check for real literals does not
+        // close this — `def a := 0.1` hides them — so the evaluator reports
+        // whether it ever operated on a real.
+        self.ctx.touched_real.set(false);
+        let value = self.eval(prop)?;
+        if self.ctx.touched_real.get() {
+            return match value {
+                Value::Bool(true) => Ok(Verdict {
+                    fully_checked: false,
+                    trusted_steps: vec![TrustedStep {
+                        tactic: "by eval",
+                        reason: TrustReason::FloatingPoint,
+                    }],
+                    assumptions: vec![format!(
+                        "`by eval` is not kernel-checked: `{}` was settled by \
+                         floating-point evaluation, and `Real` means ℝ — the two \
+                         disagree wherever rounding does",
+                        prop
+                    )],
+                }),
+                Value::Bool(false) => err(format!("the goal {} evaluates to false", prop)),
+                other => err(format!(
+                    "the goal {} evaluates to {}, not a Bool",
+                    prop,
+                    other.type_name()
+                )),
+            };
+        }
+        match value {
             Value::Bool(true) => Ok(Verdict::sound()),
             Value::Bool(false) => err(format!("the goal {} evaluates to false", prop)),
             other => err(format!(
@@ -562,6 +623,47 @@ impl Checker<'_, '_> {
                 other.type_name()
             )),
         }
+    }
+
+    /// Decide a ground comparison of real arithmetic exactly, when both
+    /// sides lie in the rational fragment.  `None` means "not this kind of
+    /// goal", which is the common case and costs one failed conversion.
+    fn exact_real_comparison(&self, prop: &Expr) -> Option<bool> {
+        let Expr::BinOp(op, l, r) = prop else {
+            return None;
+        };
+        if !is_relation(op) {
+            return None;
+        }
+        if !mentions_a_real_literal(prop) {
+            return None;
+        }
+        let lp = crate::algebra::expr_to_poly(l)?;
+        let rp = crate::algebra::expr_to_poly(r)?;
+        let diff = lp.sub(rp);
+        if diff.has_overflow() {
+            return None;
+        }
+        // Ground: no variables left, so the difference is a number.
+        if diff.terms.iter().any(|m| !m.vars.is_empty()) {
+            return None;
+        }
+        let d = diff
+            .terms
+            .iter()
+            .fold(Rat::from_int(0), |a, m| a.add(m.coeff));
+        if d.is_poison() {
+            return None;
+        }
+        Some(match op {
+            BinOp::Eq => d.sign() == 0,
+            BinOp::Neq => d.sign() != 0,
+            BinOp::Lt => d.sign() < 0,
+            BinOp::Le => d.sign() <= 0,
+            BinOp::Gt => d.sign() > 0,
+            BinOp::Ge => d.sign() >= 0,
+            _ => return None,
+        })
     }
 
     fn check_forall_finite(&self, prop: &Expr, subs: &[Cert]) -> KResult<Verdict> {
@@ -1779,6 +1881,12 @@ pub fn domain_hypotheses(prop: &Expr, ctx: &EvalCtx, env: &Env) -> Vec<Expr> {
 /// without this a goal that needs one has no certificate at all.  The
 /// kernel derives them itself rather than taking a certificate's word for
 /// which direction it meant.
+/// Does the expression contain a real literal anywhere?
+fn mentions_a_real_literal(e: &Expr) -> bool {
+    matches!(e, Expr::Real(_))
+        || crate::ast::children(e).into_iter().any(mentions_a_real_literal)
+}
+
 fn add_equality_consequences(available: &mut Vec<Expr>) {
     for h in available.clone() {
         if let Expr::BinOp(crate::ast::BinOp::Eq, a, b) = &h {
@@ -1977,6 +2085,7 @@ impl Cert {
                 match reason {
                     TrustReason::Sampled => "sampled an infinite domain",
                     TrustReason::NoWitnessYet => "no witness form yet",
+                    TrustReason::FloatingPoint => "floating-point evaluation",
                 },
                 why
             )),

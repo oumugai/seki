@@ -81,6 +81,18 @@ pub struct EvalCtx<'a> {
     /// are allowed to *search* however they like, because whatever they
     /// find has to survive the kernel afterwards.
     pub finite_only: bool,
+    /// Did evaluating anything in this context touch a floating-point real?
+    ///
+    /// `Real` means ℝ: `by algebra` reads `0.1` as one tenth, and proves
+    /// `0.1 + 0.2 == 0.3`.  The evaluator computes in `f64`, where that is
+    /// false.  Both used to be certified, which made the kernel accept a
+    /// proposition *and* its negation.
+    ///
+    /// A syntactic check for real literals does not close it — routing them
+    /// through definitions hides them — so the evaluator records whether a
+    /// real was ever operated on, and the kernel refuses to settle such a
+    /// goal by evaluation.  See `Checker::check_ground`.
+    pub touched_real: std::cell::Cell<bool>,
 }
 
 /// Restores the evaluator's nesting count when it goes out of scope, so the
@@ -112,6 +124,7 @@ impl<'a> EvalCtx<'a> {
         EvalCtx {
             globals,
             finite_only: false,
+            touched_real: std::cell::Cell::new(false),
             steps_left: std::cell::Cell::new(eval_budget()),
             depth: std::cell::Cell::new(0),
         }
@@ -125,6 +138,7 @@ impl<'a> EvalCtx<'a> {
             finite_only: true,
             steps_left: std::cell::Cell::new(eval_budget()),
             depth: std::cell::Cell::new(0),
+            touched_real: std::cell::Cell::new(false),
         }
     }
 
@@ -666,6 +680,25 @@ impl<'a> EvalCtx<'a> {
         }
         let lv = self.eval(l, env)?;
         let rv = self.eval(r, env)?;
+        // Note any operation that involved a floating-point real.  The
+        // kernel reads this to refuse settling such a goal by evaluation —
+        // see `EvalCtx::touched_real`.
+        if matches!(
+            op,
+            BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Eq
+                | BinOp::Neq
+                | BinOp::Lt
+                | BinOp::Le
+                | BinOp::Gt
+                | BinOp::Ge
+        ) && (matches!(lv, Value::Real(_)) || matches!(rv, Value::Real(_)))
+        {
+            self.touched_real.set(true);
+        }
         match op {
             BinOp::Add => arith(lv, rv, "+", i64::checked_add, |a, b| a + b),
             BinOp::Sub => arith(lv, rv, "-", i64::checked_sub, |a, b| a - b),

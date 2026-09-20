@@ -3801,3 +3801,96 @@ fn an_equality_hypothesis_can_carry_a_proof() {
         TrustLevel::Sound
     );
 }
+
+// ---------------------------------------------------------------------------
+// `Real` means ℝ, and the evaluator computes in `f64`.  The kernel used to
+// certify a proposition through one reading and its negation through the
+// other, which is the worst thing a prover can do.
+
+#[test]
+fn the_kernel_does_not_certify_a_proposition_and_its_negation() {
+    // `by algebra` reads `0.1` as one tenth and proves this.
+    assert_eq!(
+        trust_of("theorem p : (0.1 + 0.2) == 0.3 := by algebra", "p"),
+        TrustLevel::Sound
+    );
+    // `by eval` computes `0.30000000000000004` and used to prove the
+    // negation, with the kernel endorsing both.
+    assert!(run_err("theorem notp : (0.1 + 0.2) != 0.3 := by eval").is_proof_error());
+}
+
+#[test]
+fn hiding_the_literals_in_definitions_does_not_reopen_it() {
+    // A syntactic check for real literals misses this: the proposition is
+    // `(a + b) != c` and mentions none.  The evaluator reports instead
+    // whether it ever operated on a real.
+    let g = run("def a := 0.1\n                 def b := 0.2\n                 def c := 0.3\n                 theorem viaDefs : (a + b) != c := by eval\n");
+    assert_eq!(g.theorem_trust["viaDefs"], TrustLevel::Approximate);
+}
+
+#[test]
+fn an_exact_real_claim_is_still_kernel_checked() {
+    // Deciding real comparisons exactly must not cost the ones that are
+    // exact: these are in the rational fragment and stay sound.
+    for src in [
+        "theorem t : (1.0 + 2.0) == 3.0 := by eval",
+        "theorem t : (0.5 * 4.0) == 2.0 := by algebra",
+        "theorem t : (1.0 / 4.0) < 0.3 := by algebra",
+    ] {
+        assert_eq!(trust_of(src, "t"), TrustLevel::Sound, "for: {}", src);
+    }
+}
+
+#[test]
+fn a_numerical_tolerance_check_is_reported_as_approximate() {
+    // `|sqrt 2 - 1.414| < 0.001` is a claim about doubles.  It used to
+    // audit as "kernel-checked from primitives", which it was not.
+    let g = run("theorem approx : (absR ((sqrt 2.0) - 1.414)) < 0.001 := by eval\n");
+    assert_eq!(g.theorem_trust["approx"], TrustLevel::Approximate);
+}
+
+#[test]
+fn strict_mode_refuses_a_floating_point_verdict() {
+    let mut session = Session::new();
+    session.strict = true;
+    let err = session
+        .run_source(
+            "theorem approx : (absR ((sqrt 2.0) - 1.414)) < 0.001 := by eval\n",
+            true,
+        )
+        .expect_err("--strict must refuse a floating-point verdict");
+    assert!(err.is_proof_error(), "got {:?}", err);
+    assert!(
+        err.message().contains("floating-point"),
+        "error should say why: {}",
+        err.message()
+    );
+}
+
+#[test]
+fn a_witness_that_does_not_work_is_refused() {
+    // `certify` must fail when the tactic does.  Building a certificate
+    // and letting the kernel reject it is not the same thing: a rejected
+    // *evaluation* step is reported as sampled rather than as an error, so
+    // these came back "proved" with a sampling caveat.
+    for src in [
+        "theorem bad : exists x in Real, x * x == (0.0 - 1.0) := by witness x := 0.0",
+        "theorem bad : forall e in Real, e > 0.0 => (exists d in Real, d > e) \
+         := by witness d := e",
+        "theorem bad : forall e in Real, (exists d in Real, d > 0.0) := by witness d := e",
+    ] {
+        assert!(run_err(src).is_proof_error(), "accepted: {}", src);
+    }
+}
+
+#[test]
+fn a_witness_that_works_is_still_accepted() {
+    assert_eq!(
+        trust_of(
+            "theorem ok : forall e in Real, e > 0.0 => (exists d in Real, d > 0.0) \
+             := by witness d := e",
+            "ok"
+        ),
+        TrustLevel::Sound
+    );
+}

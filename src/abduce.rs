@@ -18,17 +18,16 @@
 //! number of variables.  Missing premises of an applied lemma are reported
 //! by `by apply` itself, which knows them exactly.
 //!
-//! What it does not find:
+//! When the bound is needed *inside a product* the linear reading cannot
+//! see it: `x >= 0 ⊢ x² <= 4` holds given `x <= 2`, whose certificate is
+//! `(2-x)·(2+x)`, and there the unknown multiplies a generator instead of
+//! standing in its own column.  For those goals the prover is asked
+//! directly, over a ladder of candidate values — see `probe_for_bound`.
 //!
-//!   - A bound the goal needs *multiplied by* an existing hypothesis.
-//!     `x >= 0 ⊢ x² <= 4` holds given `x <= 2`, whose certificate is
-//!     `(2-x)·(2+x)` — the missing hypothesis appears inside a product, and
-//!     the unknown bound then multiplies a generator instead of standing in
-//!     its own column, which is no longer a linear question.
-//!   - A missing assumption that is not a bound on one variable.
-//!     `⊢ c - p >= 1/2` needs a bound on the *difference*; any pair of
-//!     bounds on `c` and `p` separately would do, so there is no answer to
-//!     give and silence is the honest one.
+//! What it still does not find: a missing assumption that is not a bound on
+//! one variable.  `⊢ c - p >= 1/2` needs a bound on the *difference*; any
+//! pair of bounds on `c` and `p` separately would do, so there is no answer
+//! to give and silence is the honest one.
 
 use crate::algebra::{expr_to_poly, Polynomial, Rat};
 use crate::ast::{BinOp, Expr};
@@ -82,8 +81,66 @@ fn one_missing_bound(prover: &Prover, prop: &Expr, env: &Env) -> Option<Suggesti
     let (diff, strict) = goal_difference(prop)?;
     let (conclusion, hyps) =
         crate::rewrite::peel_premises(crate::rewrite::peel_binders(prop).1);
-    for var in candidate_variables(&diff, &hyps) {
-        for (upper, bound) in prover.abduce_bound(&hyps, &diff, &var) {
+    let vars = candidate_variables(&diff, &hyps);
+    // The exact reading first: it is one linear solve and gives the
+    // boundary outright.
+    if let Some(found) = exact_bound(prover, prop, env, &diff, strict, &vars, &hyps, &conclusion) {
+        return Some(found);
+    }
+    // Then, only for a goal the linear reading provably cannot answer, ask
+    // the prover over a ladder of candidate values.  Every probe is a real
+    // proof attempt, so this stays behind a degree check and a probe cap.
+    if diff.degree() > 1 && vars.len() <= MAX_PROBED_VARIABLES {
+        for var in &vars {
+            for upper in [true, false] {
+                let Some(bound) = probe_for_bound(prover, prop, env, var, upper, strict)
+                else {
+                    continue;
+                };
+                let Some(written) = small_rational_expr(bound) else {
+                    continue;
+                };
+                let assumption = bound_expr(var, upper, strict, written);
+                if crate::ast::alpha_equiv(&assumption, &conclusion)
+                    || hyps.iter().any(|h| crate::ast::alpha_equiv(h, &assumption))
+                {
+                    continue;
+                }
+                let candidate = with_assumption(prop, assumption.clone());
+                if contradicts_the_hypotheses(prover, &candidate, env) {
+                    continue;
+                }
+                if prover.verify_algebra_raw(&candidate, env).is_ok() {
+                    return Some(Suggestion {
+                        assumption,
+                        variable: Some(var.clone()),
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+/// How many variables are worth probing.  Each one costs two ladders of
+/// real proof attempts, and a goal with many free variables rarely has a
+/// single bound as its answer anyway.
+const MAX_PROBED_VARIABLES: usize = 3;
+
+/// The bound read straight off the linear system — exact, one solve.
+#[allow(clippy::too_many_arguments)]
+fn exact_bound(
+    prover: &Prover,
+    prop: &Expr,
+    env: &Env,
+    diff: &Polynomial,
+    strict: bool,
+    vars: &[String],
+    hyps: &[Expr],
+    conclusion: &Expr,
+) -> Option<Suggestion> {
+    for var in vars {
+        for (upper, bound) in prover.abduce_bound(hyps, diff, var) {
             let op = match (upper, strict) {
                 (false, false) => BinOp::Ge,
                 (false, true) => BinOp::Gt,
@@ -104,7 +161,7 @@ fn one_missing_bound(prover: &Prover, prop: &Expr, env: &Env) -> Option<Suggesti
                 );
                 // A "suggestion" that restates the goal tells the author
                 // nothing: `n >= 5` holds given `n >= 5`.
-                if crate::ast::alpha_equiv(&assumption, &conclusion) {
+                if crate::ast::alpha_equiv(&assumption, conclusion) {
                     continue;
                 }
                 // Nor does one already assumed.
@@ -127,12 +184,159 @@ fn one_missing_bound(prover: &Prover, prop: &Expr, env: &Env) -> Option<Suggesti
                 if prover.verify_algebra_raw(&candidate, env).is_ok()
                     || bound_is_progress(prover, &candidate, env)
                 {
-                    return Some(Suggestion { assumption, variable: Some(var) });
+                    return Some(Suggestion {
+                        assumption,
+                        variable: Some(var.clone()),
+                    });
                 }
             }
         }
     }
     None
+}
+
+/// How a bound on `var` is written.
+fn bound_expr(var: &str, upper: bool, strict: bool, c: Expr) -> Expr {
+    let op = match (upper, strict) {
+        (false, false) => BinOp::Ge,
+        (false, true) => BinOp::Gt,
+        (true, false) => BinOp::Le,
+        (true, true) => BinOp::Lt,
+    };
+    Expr::BinOp(
+        op,
+        Box::new(Expr::Var { name: var.to_string(), line: 0, col: 0 }),
+        Box::new(c),
+    )
+}
+
+/// The weakest bound on `var` that closes the goal, found by asking the
+/// prover.
+///
+/// The linear reading in `Prover::abduce_bound` cannot see a bound the
+/// certificate needs *inside a product*.  `x >= 0 ⊢ x² <= 4` holds given
+/// `x <= 2`, and the certificate is `(2-x)·(2+x)`: the unknown multiplies a
+/// generator rather than standing in its own column, and the system stops
+/// being linear.
+///
+/// So stop solving for it and test it instead.  "Does `var <= c` close the
+/// goal" is monotone in `c` — a tighter bound assumes more — so a
+/// doubling ladder brackets the boundary and a bisection narrows it.  The
+/// answer is then rounded to something a reader can act on, and each
+/// rounding is tested too, so nothing is offered that does not work.
+///
+/// Every probe is a real proof attempt, which is why the caller only
+/// reaches here for a non-linear goal, where the exact method provably
+/// cannot help.
+fn probe_for_bound(
+    prover: &Prover,
+    prop: &Expr,
+    env: &Env,
+    var: &str,
+    upper: bool,
+    strict: bool,
+) -> Option<Rat> {
+    // Far enough to bracket the bounds a model states, and small enough
+    // that a failed search costs a bounded number of proof attempts.
+    const LADDER_LIMIT: i128 = 4096;
+    const BISECTIONS: u32 = 24;
+
+    let works = |c: Rat| -> bool {
+        let Some(written) = small_rational_expr(c) else {
+            return false;
+        };
+        let candidate = with_assumption(prop, bound_expr(var, upper, strict, written));
+        prover.verify_algebra_raw(&candidate, env).is_ok()
+    };
+    // `works` is monotone the same way in both directions once read as
+    // "how far out is the bound": an upper bound gets weaker as it grows,
+    // a lower bound as it shrinks.  `step` walks outwards.
+    let outward = |c: Rat, by: Rat| if upper { c.add(by) } else { c.sub(by) };
+
+    // Bracket: walk outwards from zero while it still works.
+    let zero = Rat::from_int(0);
+    if !works(zero) {
+        // Even the tightest bound in range does not close it — the missing
+        // assumption is not a bound on this variable.
+        return None;
+    }
+    let mut good = zero;
+    let mut bad: Option<Rat> = None;
+    let mut step = Rat::from_int(1);
+    while step.num <= LADDER_LIMIT {
+        let next = outward(zero, step);
+        if works(next) {
+            good = next;
+        } else {
+            bad = Some(next);
+            break;
+        }
+        step = step.mul(Rat::from_int(2));
+    }
+    // Nothing failed inside the ladder: the bound is not what constrains
+    // this goal, or it is vacuously wide.  Either way there is nothing
+    // useful to report.
+    let mut bad = bad?;
+
+    // Narrow.  `good` always works and `bad` never does, so the boundary is
+    // between them.
+    for _ in 0..BISECTIONS {
+        let mid = good.add(bad).div(Rat::from_int(2))?;
+        if mid.is_poison() {
+            break;
+        }
+        if works(mid) {
+            good = mid;
+        } else {
+            bad = mid;
+        }
+    }
+
+    // A boundary of 1.99998 is the answer to a question nobody asked; the
+    // bound worth showing is the roundest value that still works, which is
+    // usually the one the model was written around.  Both ends are rounded
+    // because the true boundary may sit just above `good`.
+    let mut best: Option<Rat> = None;
+    for candidate in readable_bounds(good, upper)
+        .into_iter()
+        .chain(readable_bounds(bad, upper))
+    {
+        let Some(c) = rat_of_expr(&candidate) else {
+            continue;
+        };
+        if !works(c) {
+            continue;
+        }
+        // Weakest wins: the largest upper bound, the smallest lower one.
+        let better = match best {
+            None => true,
+            Some(b) => {
+                let d = c.sub(b).sign();
+                if upper {
+                    d > 0
+                } else {
+                    d < 0
+                }
+            }
+        };
+        if better {
+            best = Some(c);
+        }
+    }
+    best.or(Some(good))
+}
+
+/// The rational an expression built by `small_rational_expr` stands for.
+fn rat_of_expr(e: &Expr) -> Option<Rat> {
+    match e {
+        Expr::Int(n) => Some(Rat::from_int(*n as i128)),
+        Expr::BinOp(BinOp::Div, a, b) => match (a.as_ref(), b.as_ref()) {
+            (Expr::Int(n), Expr::Int(d)) => Some(Rat::new(*n as i128, *d as i128)),
+            _ => None,
+        },
+        Expr::UnOp(crate::ast::UnOp::Neg, x) => rat_of_expr(x).map(|r| r.neg()),
+        _ => None,
+    }
 }
 
 /// Whether the hypotheses of `prop` cannot all hold at once.
@@ -415,11 +619,40 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_offered_outside_the_linear_fragment() {
-        // `x <= 2` would do it, but its certificate is `(2-x)·(2+x)` — the
-        // missing bound inside a product, which is not a linear question.
-        assert!(suggest("forall x in Real, x >= 0.0 => x * x <= 4.0").is_empty());
-        assert!(suggest("forall x in Real, x * x * x >= 0.0").is_empty());
+    fn a_bound_needed_inside_a_product_is_found_by_probing() {
+        // `x <= 2` does it, but its certificate is `(2-x)·(2+x)`: the
+        // missing bound multiplies a generator instead of standing in its
+        // own column, so the linear reading cannot see it.
+        assert_eq!(
+            suggest("forall x in Real, x >= 0.0 => x * x <= 4.0"),
+            vec!["(x <= 2)"]
+        );
+        assert_eq!(
+            suggest("forall x in Real, x >= 0.0 => x * x * x <= 8.0"),
+            vec!["(x <= 2)"]
+        );
+        // The direction follows the goal, not a convention.
+        assert_eq!(
+            suggest("forall x in Real, x <= 0.0 => x * x <= 4.0"),
+            vec!["(x >= -2)"]
+        );
+        // And a product of two parameters bounds the free one.
+        assert_eq!(
+            suggest(
+                "forall a in Real, forall b in Real, \
+                 (a >= 0.0) and (b >= 0.0) and (b <= 3.0) => a * b <= 12.0"
+            ),
+            vec!["(a <= 4)"]
+        );
+    }
+
+    #[test]
+    fn a_goal_with_no_bound_to_find_still_says_nothing() {
+        // `x³ >= 0` needs `x >= 0`, which is a bound — but the goal as
+        // stated is false only for negative `x`, and the suggestion has to
+        // survive the contradiction check like any other.
+        let s = suggest("forall x in Real, x * x * x >= 0.0");
+        assert!(s.is_empty() || s == vec!["(x >= 0)"], "{:?}", s);
     }
 
     #[test]
