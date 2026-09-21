@@ -1,343 +1,326 @@
 # seki
 
-集合論ベースの定理証明言語 + プログラミング言語のプロトタイプ。Lean のような証明体験を、ZF 風の素朴集合論セマンティクスで実現することを目指している。Rust 実装、外部依存ゼロ。
+集合論ベースの証明言語 + プログラミング言語。Rust 実装、外部依存ゼロ、単一バイナリ。
+
+**seki の単位は「証明」ではなく「主張とその根拠の等級」です。**
+
+計算を走らせることと、その計算について何かを主張することが同じ行為になっていて、
+処理系は主張ごとに**どの種類の根拠が得られたか**を報告します。成果物は
+`seki --audit` が出す表であって、`theorem` はその行を生む手段です。
 
 ```seki
--- 集合は2通りの定義
-def Days     := {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}     -- 列挙
-def EvenNat  := {x in Nat | x mod 2 == 0}                             -- 内包(述語)
+def consume := \tokens cost -> if tokens >= cost then tokens - cost else tokens
 
--- ラムダ計算 + 集合論ベースの型注釈
-def double : Nat -> Nat := \(n : Nat) -> n * 2
-
--- タプル / リスト / 木 / 直積
-def Pair := Nat times Bool
-def xs   := [1, 2, 3, 4, 5]
-def t    := node (node leaf 1 leaf) 2 (node leaf 3 leaf)
-
--- 無限ケースの「真の」証明
-theorem distrib                                    -- ℤ 上の多項式恒等式
-  : forall a in Int, forall b in Int, forall c in Int,
-        a * (b + c) == a * b + a * c
-  := by algebra
-
-theorem cauchy                                     -- 不等式 (PSD 2次形式)
-  : forall a in Int, forall b in Int,
-        a*a + b*b >= 2 * a * b
-  := by algebra
-
-def sum := \n -> if n == 0 then 0 else n + sum (n - 1)
-theorem gauss                                      -- ℕ 上の数学的帰納法
-  : forall n in Nat, 2 * sum n == n * (n + 1)
-  := by induction
-
-def listLen := \xs -> if null xs then 0 else 1 + listLen (tail xs)
-theorem ll_nn                                      -- リスト構造帰納法
-  : forall xs in (List Int), listLen xs >= 0
-  := by induction
-
-def fib := \n -> if n < 2 then n else fib (n - 1) + fib (n - 2)
-theorem fib_nn                                     -- 強帰納法 (深さ2)
-  : forall n in Nat, fib n >= 0
-  := by strong_induction
+theorem consume_never_goes_negative
+  : forall tokens in Real, forall cost in Real,
+      (tokens >= 0.0) and (cost >= 0.0) => consume tokens cost >= 0.0
+  := by unfold consume then algebra
 ```
 
-## 特徴
+`consume` は普通の実装です。足したのは `theorem` だけ。境界を書き間違えると
+(`tokens >= cost` を `tokens > 0.0` に)、代表的なテストケースは**全部通ったまま**
+この定理が落ちます。
 
-- **集合 = 型** — 任意の集合 `T` は型として使える。`v : T` は本質的に `v in T` (set membership)。`Bool == {false, true}` は文字通りの集合等価で、`refl` で証明できる。
-- **2 種類の集合定義** — 列挙 `{1, 2, 3}` と 述語による内包 `{x in S | P(x)}`。
-- **数値型** — `Nat`、`Int`、`Real` (f64) を組込。`Int ⊂ Real` で算術は自動昇格 (`1 + 2.5 == 3.5`)。
-- **seki 自身で書かれた標準ライブラリ** — `src/stdlib.seki` で **List / Tree のコンストラクタ・デストラクタ** (`nil`/`cons`/`head`/`tail`/`null`/`length`/`map`/...; `leaf`/`node`/`isLeaf`/`treeVal`/...)、`Pos`/`Neg`/`Even`/`Byte`/`Int8` 等の述語サブタイプ、`Rat = Int × Pos` の有理数、算術ヘルパ (`succ`/`pred`/`abs`/`square`/...) を構築。起動時に自動ロード。Rust 層は最小限のプリミティブ (タプル・算術演算子・I/O) のみ。
-- **代数的データ型を集合から構築** — タプル `(a, b)` のみを Rust プリミティブとし、リスト `[1, 2, 3]` (= `(1, (1, ..., (0, ())))`) や二分木 `node l v r` (= `(3, (l, (v, r)))`) は **seki 言語自身でタグ付きペアとして集合論的に構築**。`data` 宣言と `match` 式で簡潔に書け (`data Maybe A = None | Some A`、`match m with | None -> ... | Some x -> ...`)、内部表現はやはりタグ付きペア (純粋な構文糖)。
-- **エラーハンドリング** — stdlib に `Option`/`Result` + ヘルパ (`mapOption`/`bindResult`/`unwrapOr`/`okOr`)、`?` 演算子で `let x = expr ? in body` の形でエラー伝播 (Result の `Err` を自動再パック)。
-- **モジュールシステム** — `import "path/file.seki"` で他ファイルを読込、`import ... as M` で `M.name` 形式の修飾アクセス、循環依存検出。**ライブラリパス自動探索**: `import "cas/calc.seki"` のように lib/ 相対パスでも書ける (検索順: 現ファイル相対 → `SEKI_LIB_PATH` → `<cwd>/lib` → `<binary>/../lib` → `~/.seki/lib` → `-I` 引数)。
-- **依存型** — `(x : A) -> B(x)` で引数の値に応じて返り値の型 (集合) が変わる関数を表現。`Vec n` 型 (長さ n のリスト集合)、`{x : T \| P(x)}` の refinement 型を統一的に扱う。型注釈付き定義はサンプル検査で member 判定。
-- **型推論** — `def double := \x -> x * 2` のように注釈なしで定義しても、本体や引数注釈から最も具体的な型を推論し `def double : (Set -> Int) = <fn:x>` のように表示する。REPL では `:type expr` で式の型を直接問い合わせ可能。
-- **終了性検査** — 構造的減少 (`n - C`, `n / C` (`C ≥ 2`), `tail`, `snd`, `treeLeft`/`treeRight`) で見える再帰は静的に検証。確認できなければ `warning` を出すが定義は受理する (false positive を許容)。
-- **型クラス** — `class Eq A where eq : A -> A -> Bool` と `instance EqInt : Eq Int where eq = ...` を提供。純粋な desugar で `data EqDict` (辞書 record) と projection 関数に変換し、`eq EqInt 3 3` のように **辞書を明示的に渡す** スタイル。Lean / Haskell のような自動解決はないが静的型なしでも安全。
-- **記号は単語** — `forall`, `exists`, `in`, `notin`, `union`, `intersect`, `subset`, `times`, `lambda`/`\` 等。Unicode 記号は使わない。
-- **証明項 (proof term) と独立した kernel** — タクティクが「証明できた」と言っても、それは証明ではない。タクティクは証明項を**生成**し、タクティクを一切呼ばない小さな **kernel** がそれを原始推論規則から再構成する。探索は難しくバグりうるが、検査は易しく、正しくなければならないのはそこだけ ([docs/spec/06-soundness.md](docs/spec/06-soundness.md) §6.0)。
+```
+proof error: by algebra (then-branch of `if (tokens > 0)`):
+  cannot prove (tokens - cost) >= 0 over Real
+```
 
-  ```
-  $ seki --proof examples/13_advanced_tactics.seki abs_int_nonneg
-  theorem abs_int_nonneg : (forall x in Int, ((if (x >= 0) then x else (- x)) >= 0))
-  case split on the goal's first `if`:
-    when the condition holds:
-      the hypotheses [(x >= 0)] add up to `x` - `0` (over Int)
-    when it does not:
-      the hypotheses [(x < 0)] add up to `(- x)` - `0` (over Int)
+テストは「この入力で動いた」を言い、定理は「**この範囲のすべての入力で**成り立つ」
+を言います。
 
-  kernel verdict: every step re-established from primitives
-  ```
+## `--audit` — 何が証明で、何が計算で、何が仮定か
 
-  kernel は `EvalCtx::finite_only` を通して評価するので、**無限ドメインのサンプリングを構造的に受理できない**。TCB は約 9,000 行から約 2,600 行に縮んだ。全 968 定理のうち **925 (95.6%) が kernel 検証済み**で、残りは `--audit` で名前と理由が出る。
+```
+$ seki --audit examples/assurance/system.seki
 
-  ```
-  $ seki file.seki
-  theorem all_pos ✓ proved
-  theorem f_zero ✓ proved  [sampled — NOT a proof]
-  theorem consequence ✓ proved  [sampled — NOT a proof]   ← 引用先に伝播する
-  theorem gauss ✓ proved  [unchecked — no proof term]
+theorem                                       how it was verified
+------------------------------------------------------------------------------
+calibration_stays_in_spec                     kernel-checked from primitives
+control_effort_within_rating                  axiom `disturbance_bounded`
+                                              confidence >= 9/10 (from `disturbance_bounded` 9/10)
+displayed_temperature_is_trustworthy          axiom `sensor_drift_bounded`
+                                              confidence >= 4/5 (from `sensor_drift_bounded` 4/5)
+gain_envelope                                 kernel-checked from primitives
+```
 
-  $ seki --audit file.seki      # 各定理がどう検証されたか
-  $ seki --strict file.seki     # Sound 以外を拒否
-  ```
+信頼水準は 5 段の格子です。低いほうの 2 つは**偽を通しうる**と明記されています —
+seki は不健全なタクティクを排除せず、**等級をつけて管理する**ことを選んでいます。
+これが純粋な証明系と違うところで、実用言語でもあることを可能にしています。
 
-  導入した日に、kernel は `by algebra` の**実在する健全性バグ**を発見した — `f n = -5` に対して `forall n in Nat, f n >= 0` が証明できていた ([§6.0.4](docs/spec/06-soundness.md))。
+| 水準 | 意味 | 表示 |
+|---|---|---|
+| `sound` | カーネルが原始推論規則から再構成した | (印なし) |
+| `axiomatic` | 証明は正しいが `axiom` に乗っている | `[axiomatic]` |
+| `unchecked` | タクティクは閉じたが証明項が無い | `[unchecked — no proof term]` |
+| `approximate` | 浮動小数点で決めた — **偽を通しうる** | `[approximate — floating point]` |
+| `sampled` | 無限ドメインの有限標本 — **証明ではない** | `[sampled — NOT a proof]` |
 
-- **演繹** — `by apply` (modus ponens)、`by have` (カット規則)、`by assumption`。0.8.0 まで証明済みの事実を再利用する手段は等式 (`by simp`) と存在命題 (`by obtain`) だけで、**含意や不等式は再利用できず**、955 定理のうち他の定理を使っていたのは 12 件だけだった。`lib/` は数学ライブラリではなく独立した判定結果の集積だった。
+`--strict` は `sound` 以外を拒否し、`--min-confidence 0.8` は仮定の確度に下限を
+切ります。ディレクトリを渡すとシステム全体で 1 枚の報告になり、証明以外に立って
+いる主張から始まります (審査で実際に見るのはそのリストなので、良い知らせの下に
+埋めません)。弱い主張が残っていれば exit code が非ゼロなので、ビルドのゲートに
+なります。
 
-  ```seki
-  theorem le_trans : forall x in Real, forall y in Real, forall z in Real,
-      (x <= y) and (y <= z) => x <= z := by algebra
+```
+$ seki --audit examples/services
 
-  theorem chained : forall a in Real, forall c in Real,
-      (a <= 5.0) and (5.0 <= c) => a <= c
-    := by apply le_trans with y := 5.0
-  ```
+claims resting on something other than a kernel proof
+------------------------------------------------------------------------------
+  axiomatic   serial_availability_meets_slo  (sla.seki)
+              axiom `auth_availability`; axiom `cdn_availability`; axiom `db_availability`
+              confidence >= 13/20 (from `auth_availability` 9/10, ...)
 
-  束縛変数は結論と目標の照合で推論されるので、`with` が要るのは結論に現れない変数だけ。前提は「仮定にあるか」「`by algebra` で落ちるか」を確かめてから適用され、飛ばすことはできない。動く例は [`examples/40_deduction.seki`](examples/40_deduction.seki) (13 定理すべて kernel 検証済み)。
+assumed without proof
+------------------------------------------------------------------------------
+  auth_availability     9/10 — ベンダー SLA + 12か月の実測 (2025-09〜2026-08)
+  db_availability       4/5 — 自社運用、計画停止を除外した集計
 
-- **確からしい事実からの推論** — LLM が抽出した事実のように「100% 確実ではないが確率的に正しそう」な前提を `axiom ... with confidence 0.9 from "..."` と書ける。**確率は kernel に入れない** — 入れると `Sound` が連続量になり「kernel 検証済み」が意味を失う。依存の推移的追跡は証明項が既に持っているので、その上に載せるだけで済む。
+==============================================================================
+18 claims across 5 file(s), 3 assumption(s)
+  sound:       17
+  axiomatic:   1
+```
 
-  ```
-  $ seki --audit file.seki
-  both   axiom `customer_spend`; axiom `gold_implies_discount`
-         confidence >= 7/10 (from `customer_spend` 4/5, `gold_implies_discount` 9/10)
-  ```
+## 「この集合のすべての値について」を言う 3 つの方法
 
-  合成は**掛け算ではなく Fréchet 下界** `max(0, Σpᵢ − (n−1))`。`0.9 × 0.8 = 0.72` は独立性を仮定した数字で、同じ抽出パス由来の事実は独立ではない。しかも含意に付けた確信度に対して Fréchet は**厳密**なので、確からしいルールの連鎖は独立性を仮定せず正しく合成する。`--min-confidence 0.85` で下限を切れる。
+seki は同じことを 3 通りで担い、`--audit` が**どれが担ったか**を記録します。
 
-- **仮定の逆算** — 証明が失敗するのはたいてい主張が誤っているからではなく仮定が足りないから。seki は**何を仮定すれば成り立つか**を言う:
+| 方法 | 書き方 | 届く範囲 | 代償 |
+|---|---|---|---|
+| 記号的 | `forall x in Real, 仮定 => 結論` + `by algebra` | 多項式関係、次数 4 まで。**厳密** | 多項式の外に出られない |
+| 数値的 | `lo .. hi` / `中心 +- 許容差` + `by eval` | 再帰・分岐・`exp`/`ln`/`sin`/`cos` を含む**任意の計算** | 囲いが広がる (依存性) |
+| 列挙 | 有限集合 + `by eval` | 有限ドメイン | 無限では標本になる |
 
-  ```
-  proof error: by algebra: cannot prove (100 - (200 * r)) > 0 over Real
-    it would hold given `(r < (1 / 2))` — add it as a hypothesis ...
-  ```
+```seki
+-- 記号的: 多項式なので厳密に決まる
+theorem gain_box : forall a in Real, forall b in Real,
+  (a >= 0.0) and (a <= 1.0) and (b >= 0.0) and (b <= 1.0) => a * b <= 1.0 := by algebra
 
-  提案は「仮定として足して実際に通るか」を確認してから出るので必ず効きます。パラメータが推定値のモデルでは、この「どこまでなら成り立つか」が証明そのものより有用なことがあります (感度解析)。
+-- 数値的: 対数が入るので多項式では書けない。範囲を丸ごと運んで証明する
+def rToTemp := \r -> 1.0 / (0.00335 + 0.000257 * (ln (r / 10000.0)))
+theorem temp_in_spec
+  : (rToTemp (8000.0 .. 12000.0) >= 270.0) and (rToTemp (8000.0 .. 12000.0) <= 310.0)
+  := by eval
 
-- **型注釈も証明される** — `def f : A -> {y in B | Q y}` は「どんな引数でも結果が `Q` を満たす」という主張で、seki はこれを関数の標本適用で検査していた。0.9.0 からは `forall x in A, Q[y := f x]` という**証明義務**として定理と同じ prover・同じ kernel に流す。`sample/ledger` の overdraft 不変条件が型として証明できる:
+-- 解析が結論を出せるだけ精密かも主張できる
+theorem enclosure_is_tight : width (evolve 50 (22.5 +- 7.5)) < 0.2 := by eval
+```
 
-  ```seki
-  def NonNeg := {x in Int | x >= 0}
-  def safeWithdraw : Nat -> Nat -> NonNeg := \bal amt ->
-      if amt <= bal then bal - amt else bal     -- 証明される
-  def unsafeWithdraw : Nat -> Nat -> NonNeg := \bal amt -> bal - amt
-  --                                            [sampled — NOT a proof]
-  ```
+数値的な方法は**保証された囲い** (`src/interval.rs`) で計算します。演算は外側に
+丸めるので囲いは広がることしかなく、比較は範囲全体が決めたときだけ答えます。
+`exp`/`ln`/`sin`/`cos` は Lagrange の剰余で抑えた級数で、境界が保証されている
+範囲の外は**推定せず拒否**します。
 
-  落とせない義務は標本検査に戻りますが、**そう記録されます** — `--audit` が義務そのものを見せ、`--strict` が拒否します。動く例は [`examples/41_refinement_types.seki`](examples/41_refinement_types.seki)。
+`width` が重要なのは、**囲いが広がっていないことを主張できる**ことです。
+これが無いと「仕様を守った」が「たまたま囲いが収まった」のか区別がつきません。
 
-- **区間上の推論** — `0.05 <= r <= 0.15` のような範囲の仮定から結論を導く形は、モデル検証で最も言いたい形。`by algebra` は Fourier-Motzkin で乗数を探し、証明項には **Farkas 証明書** が載るので kernel は掛けて足すだけで検査できる。
+## 探索と検査の分離
 
-  ```
-  $ seki --proof examples/40_deduction.seki npv_positive_on_range
-  `(100 - (200 * r))` - `0` = 200·((r <= 0.15)) + ~70 (over Real)
-  kernel verdict: every step re-established from primitives
-  ```
+タクティクが「証明できた」と言っても、それは証明ではありません。タクティクは
+証明項を**生成**し、タクティクを一切呼ばない小さな **kernel** がそれを原始推論
+規則から再構成します。探索は難しくバグりうるが、検査は易しく、正しくなければ
+ならないのはそこだけです ([docs/spec/06-soundness.md](docs/spec/06-soundness.md))。
 
-- **12 種類の証明戦術 + 合成**:
+```
+$ seki --proof examples/13_advanced_tactics.seki abs_int_nonneg
+theorem abs_int_nonneg : (forall x in Int, ((if (x >= 0) then x else (- x)) >= 0))
+case split on the goal's first `if`:
+  when the condition holds:
+    this is one of the hypotheses in scope
+  when it does not:
+    `(- x)` - `0` = ((x < 0)) (over Int)
 
-  | 戦術 | 種別 | 用途 |
-  |---|---|---|
-  | `by eval` | closer | 命題を簡約 (有限ドメイン、または定義から決まる場合のみ健全 — それ以外は `[sampled]` と表示される) |
-  | `refl` | closer | 等式の構造的等価 |
-  | `by algebra` | closer | 多項式正規化 + 符号解析 + 定数 div/mod + PSD 2次形式 (∞ ✓) |
-  | `by induction` | closer | Nat / List / Tree 上の構造帰納法 (∞ ✓) |
-  | `by strong_induction` | closer | 深さ 2 強帰納法 (Fibonacci 等、ℕ ∞ ✓) |
-  | `by simp` / `by simp [l1, l2]` | both | 既存の等式 theorem を方向付き書換え規則として連鎖適用 |
-  | `by unfold f` | transformer | 関数 f の定義を 1 段 β-展開 (closer と組合せる) |
-  | `by intros` | transformer | 先頭の forall を剥がして free var 化 |
-  | 証明項 | closer | Curry-Howard 風 (forall は関数, exists は witness) |
-  | `tac1 then tac2 [then tac3 ...]` | combinator | タクティク合成: `by intros then unfold f then algebra` |
+kernel verdict: every step re-established from primitives
+```
 
-- **REPL とファイル実行** — 1 バイナリ、外部依存ゼロ。
-- **システム開発機能 (汎用言語層)** — Phase 1 (基盤): 文字列演算 (`strLen` / `strSplit` / `strJoin` / `strReplace` / `substring` / `strToUpper` 等)、ファイル I/O (`readFile` / `writeFile` / `appendFile` / `fileExists` — すべて `Result E A` を返す)、CLI 引数 (`args : List String`)、環境変数 (`getEnv`)、可変参照 (`mkRef` / `readRef` / `writeRef` — `Ref A` は記憶セルの集合)、効率的辞書 (`Dict K V` ⊂ K × V、O(1) 操作)。Phase 2 (拡張): 時刻 (`nowSecs` / `nowMillis` / `monotonicMillis` / `sleep`)、乱数 (xorshift64* PRNG: `randomSeed` / `randomInt` / `randomRange`)、ビット演算 (`bitAnd` / `bitOr` / `bitXor` / `bitShl` / `bitShr` / `bitNot` / `popcount`)、プロセス実行 (`execShell` シェル経由、`runCommand` 直接 spawn)、JSON 完全サポート (`Json` ADT + `jsonParse` + `jsonEncode`、外部依存ゼロ)、TCP ネットワーキング (`tcpListen` / `tcpAccept` / `tcpConnect` / `tcpRead` / `tcpWrite` / `tcpClose` — `Handle` は I/O escape hatch)。Phase 3 (Web 層 + 並行性): URL parser (`urlParse`)、HTTP request/response codec (`httpParseRequest` / `httpFormatResponse`)、blocking HTTP client (`httpGet`)、stdlib の `httpServe` ハンドラ駆動サーバ (`HttpRequest` / `HttpResponse` ADT + `reqMethod` / `reqPath` / `reqHeaders` / `reqBody` + `httpOk` / `httpJson` / `httpNotFound`)、原子整数による真の並行性 (`atomicNew` / `atomicGet` / `atomicSet` / `atomicAdd` / `atomicCas` + `spawnAtomicAdd` で OS スレッド起動)、IO 型マーカ (`IO A == A`、将来の effect tracking のための予約)。 Phase 4 (クロージャ並行性 + FFI): **Rc → Arc 全面移行** で `Value : Send + Sync`、クロージャベース `spawn : (() -> A) -> Thread A` / `join : Thread A -> A`、mpsc channel (`chanNew` / `chanSend` / `chanRecv` / `chanClose`)、FFI via libc dlopen (`ffiLoad` / `ffiCallIntInt` / `ffiCallStrInt` / `ffiClose`、Linux/macOS、外部 Rust クレートなし)。すべて集合論的に解釈可能で `forall x in S, P x` がそのまま使える。
+kernel は `EvalCtx::finite_only` を通して評価するので、**無限ドメインのサンプリング
+を構造的に受理できません**。TCB (kernel + rewrite + unfold + interval) は **4,896 行**、
+処理系全体 28,000 行あまりの 17% です。TCB は「小さいほうがいい」ではなく
+**予算**として扱われていて、機能を足すたびに「信頼すべきものが増えるか」で判断
+しています。
+
+導入した日に、kernel は `by algebra` の**実在する健全性バグ**を見つけました —
+`f n = -5` に対して `forall n in Nat, f n >= 0` が証明できていました。
+
+## 仮定は消さずに追跡する
+
+「全部証明しろ」ではなく「仮定してよい、ただし結論まで運ぶ」。
+
+```seki
+axiom db_availability : dbA >= 0.9990
+  with confidence 0.8 from "自社運用、計画停止を除外した集計"
+```
+
+合成は**掛け算ではなく Fréchet 下界** `max(0, Σpᵢ − (n−1))`。`0.9 × 0.8 = 0.72` は
+独立性を仮定した数字で、同じ抽出パス由来の事実は独立ではありません。確率は
+kernel に入れません — 入れると `sound` が連続量になり「kernel 検証済み」が意味を
+失います。
+
+## 失敗が情報を返す
+
+証明が失敗するのはたいてい主張が誤っているからではなく仮定が足りないからです。
+
+```
+$ seki capacity.seki
+proof error: by algebra: cannot prove (perNode * nodes) >= rps over Real
+  it would hold given `(perNode >= 625)` — add it as a hypothesis ...
+```
+
+5000 rps ÷ 8 台 = 625。Farkas を逆向きに走らせて境界を求め、**最弱の**ものを
+選びます (境界は 2 つの未知数の比なので Charnes–Cooper 変換が要ります)。非線形
+なら証明器に直接訊きます。矛盾する提案は ex falso で何でも「証明」できてしまう
+ので候補から外します。
+
+囲いが決まらなかったときも、**幅と理由**を返します。
+
+```
+interval arithmetic does not settle this claim
+  ([-1, 1] and [1/2, 1/2] overlap — the left enclosure is 2 wide).
+  An enclosure widens wherever a value appears more than once, so this
+  shows neither that the claim holds nor that it fails
+```
+
+「偽である」ではなく「**この方法では決まらない**」と読めることが要点です。
+
+## 限界 — 名前と理由がついている
+
+```
+$ for f in $(find examples tests/seki lib -name '*.seki'); do
+    seki --audit "$f" | grep -oE '^  [a-z]+: +[0-9]+'
+  done | awk -F'[: ]+' '{t[$2]+=$3} END {for (k in t) print k, t[k]}'
+
+sound        1148
+unchecked      22
+sampled        20
+axiomatic      16
+approximate     8
+```
+
+- **`approximate` 8 件**はすべて**反復アルゴリズムの区間依存性** (wrapping effect)。
+  Newton 法の `x - (x³-8)/(3x²)` は `x` が 3 回出るので、実数の反復が縮む場面で
+  囲いは広がります。埋めるには区間 Newton 法が要り、TCB がさらに増えます。
+- **`unchecked` 22 件**の大半は `by induction` のステップ (基底ケースは kernel が
+  検証しますが、ステップの正規化に witness 形式がまだありません)。
+- **`sampled` 20 件**は無限ドメインの標本検査で、**証明ではありません**。
+  `--strict` が拒否します。
+- 初期条件が集合のとき、`by algebra` は多項式の外に出られず、区間は依存性で
+  広がります。その中間 (区間 Newton、平均値形式) は未実装です。
 
 ## クイックスタート
 
-ビルド (Rust 1.70+):
-
 ```sh
-cargo build --release
+cargo build --release                                # Rust 1.70+、依存ゼロ
+cargo run -- examples/04_proofs.seki                 # ファイル実行
+cargo run -- --audit examples/services               # プロジェクト監査
+cargo run -- -e 'theorem t : 2 + 2 == 4 := by eval'  # ワンライナー
+cargo run                                            # REPL
 ```
 
-ファイル実行:
+## 証明戦術
 
-```sh
-cargo run -- examples/06_boolean_algebra.seki
-```
+| 戦術 | 種別 | 用途 |
+|---|---|---|
+| `by eval` | closer | 命題を簡約 (有限ドメイン / 厳密有理数 / 区間のときだけ `sound`) |
+| `refl` | closer | 等式の構造的等価 |
+| `by algebra` / `by linarith` | closer | 多項式正規化 + Positivstellensatz (仮定の積、次数 4)・反対称性・正の量で割る |
+| `by induction` | closer | Nat / List / Tree / 任意の `data` 上の構造帰納法 |
+| `by strong_induction <N>` | closer | 深さ可変の強帰納法 |
+| `by decide` | closer | Bool に落とせる命題を強制的に決定 |
+| `by auto` | closer | 戦術のポートフォリオ探索 |
+| `by apply L [with x := e]` | closer | modus ponens — 定理/公理の引用 |
+| `by assumption` | closer | 結論がすでに仮定にある |
+| `by have h : P := <proof>` | transformer | カット規則 (前向きの積み上げ) |
+| `by witness v := <項>` | transformer | 存在導入 — ε-δ はこれが無いと書けても証明できない |
+| `by obtain c from L` | transformer | 存在除去 |
+| `by unfold f` | transformer | 定義を 1 段 β-展開 |
+| `by intros` | transformer | 先頭の forall を剥がす |
+| `by simp [l1, l2]` | both | 等式 theorem を書換え規則として連鎖適用 |
+| `tac1 then tac2 ...` | combinator | 合成 |
 
-ワンライナー:
+## 言語としての seki
 
-```sh
-cargo run -- -e 'theorem t : 2 + 2 == 4 := by eval'
-```
+証明の話ばかりしましたが、seki は**普通に動くプログラミング言語**です。
+`lib/` の `def` は 653 個に対し `theorem` は 52 個で、数学ライブラリではありません。
 
-REPL:
+- **集合 = 型** — 任意の集合 `T` は型。`v : T` は本質的に `v in T`。
+  `Bool == {false, true}` は文字通りの集合等価で `refl` で証明できる。
+- **stdlib は seki 自身で書かれている** — List / Tree / Option / Result / Rat を
+  タグ付きペアとして構築。Rust 層は最小限のプリミティブのみ。
+- **ADT と `match`**、`data` 宣言、`?` によるエラー伝播、モジュール (`import`)、
+  依存型 `(x : A) -> B(x)`、Σ型、型クラス、型推論、終了性検査。
+- **システム開発の機能** — 文字列、ファイル I/O、`Ref`、`Dict`、時刻、乱数、
+  ビット演算、プロセス実行、JSON、TCP、HTTP (codec / client / `httpServe`)、
+  原子整数と真の並行性 (`spawn` / `join` / channel)、FFI (dlopen)、
+  Bytecode VM、LSP。
+- **記号は単語** — `forall`, `exists`, `in`, `union`, `subset`, `times` 等。
+  Unicode 記号は使わない。
 
-```sh
-cargo run
-seki> def S := {1, 2, 3}
-seki> 2 in S
-true
-seki> :defs
-seki> :q
-```
+型注釈も証明されます。`def f : A -> {y in B | Q y}` は「どんな引数でも結果が `Q` を
+満たす」という主張で、定理と同じ prover・同じ kernel に流れます。
+
+## 何に向くか
+
+(a) 証明・計算・仮定の混在が避けられず、(b) その違いで誰かが行動を変える領域。
+
+- **運用包絡線の検証** — 入力・パラメータ・初期状態がこの範囲のどこであっても
+  仕様を守る、を普通に書いたコードのまま証明する
+- **アシュアランスケース** — `--audit DIR` の出力が安全性論証の断片になる
+  ([`examples/assurance/`](examples/assurance/))
+- **システム開発の不変条件** — 金額の保存、資源の上限、締切の予算、容量計画、
+  SLA の合成 ([`examples/services/`](examples/services/))
+- **LLM 出力の検証層** — 確度つきの事実から推論し、結論の確度の下界と
+  足りない仮定を返す
+
+向かないもの: **数学** (答えが二値であるべきで、等級は役に立たない — Lean の
+設計が正しい)。**普通のテスト** (誰も等級を読まないなら遅い assert)。
 
 ## ディレクトリ構成
 
 ```
 seki/
-├── src/             Rust 実装 (lexer・parser・eval・prover・termination・...)
-├── stdlib.seki      自動ロードされる stdlib (Rat / List / Tree / Option / Result / ...)
-├── lib/             再利用可能な seki モジュール群 (algebra / cas / numeric)
-├── tests/
-│   ├── integration.rs    Rust 統合テスト
-│   └── seki/             lib/ に対応する seki テスト
-├── examples/        walking-tour サンプル (01〜37)
-├── sample/          実サービス志向のミニアプリ (calc/wordcount/ledger/todo_api)
+├── src/             Rust 実装
+│   ├── kernel.rs      証明項の検査 (TCB)
+│   ├── interval.rs    保証された囲い (TCB)
+│   ├── rewrite.rs     書換えと場合分け (TCB)
+│   ├── unfold.rs      定義展開 (TCB)
+│   ├── prover.rs      タクティク (探索 — 信頼しない)
+│   ├── abduce.rs      足りない仮定の逆算
+│   ├── confidence.rs  Fréchet 下界
+│   └── stdlib.seki    自動ロードされる stdlib
+├── lib/             再利用可能な seki モジュール (analysis / control / algebra / cas / numeric / ui)
+├── examples/        walking-tour (01〜46) + assurance/ + services/
+├── sample/          実サービス志向のミニアプリ (calc / wordcount / ledger / todo_api)
+├── tests/           Rust 統合テスト + lib/ に対応する seki テスト
 └── docs/            ドキュメント
 ```
 
-詳細:
-- [lib/README.md](lib/README.md) — ライブラリ構成と使い方
-- [tests/seki/README.md](tests/seki/README.md) — テスト一覧
-
-## サンプル
-
-| ファイル | 内容 |
-|---|---|
-| `examples/01_basic.seki` | 数値・関数・let・if |
-| `examples/02_sets.seki` | 列挙集合 / 内包集合 / union, intersect, diff, subset |
-| `examples/03_lambda.seki` | カリー化・高階関数・関数型による型検査 |
-| `examples/04_proofs.seki` | forall/exists・theorem の3戦術 |
-| `examples/05_number_theory.seki` | 階乗・素数集合・gcd の証明 |
-| `examples/06_boolean_algebra.seki` | De Morgan・分配律・吸収律 (22 個) |
-| `examples/07_modular.seki` | Z/12Z 加法群の公理検証 (10 個) |
-| `examples/08_set_identities.seki` | 集合論恒等式 (18 個) |
-| `examples/09_algorithms.seki` | Gauss 公式・パスカル・冪乗則 (9 個) |
-| `examples/10_puzzles.seki` | ピタゴラス数・年齢パズル・鳩の巣 (7 個) |
-| `examples/11_tuples_lists.seki` | タプル・直積・リスト・map/filter/foldr |
-| `examples/12_infinite_proofs.seki` | by algebra / by induction で**無限域**を証明 (20 個) |
-| `examples/13_advanced_tactics.seki` | 不等式・div/mod・list/tree 帰納法・強帰納法 (24 個) |
-| `examples/14_types_and_real.seki` | 型の集合論的実装・実数型 (Real)・自動昇格 (13 個) |
-| `examples/15_set_definition_proofs.seki` | 集合の定義から forall/exists を健全に判定 (17 個) |
-| `examples/16_stdlib_constructions.seki` | stdlib (Rat / Pos / range / map / treeSize…) の活用 (13 個) |
-| `examples/17_pair_encoded_adt.seki` | リスト/木のタグ付きペア符号化 (集合論的構築) (6 個) |
-| `examples/18_data_match.seki` | 代数的データ型 (`data`) とパターンマッチ (`match`) |
-| `examples/19_modules_and_errors.seki` | Option/Result/`?` 演算子/モジュール (`import`) |
-| `examples/20_dependent_types.seki` | 依存関数型 `(x : A) -> B(x)` と Vec n |
-| `examples/21_inference_termination_classes.seki` | 型推論 / 終了性検査 / 型クラス (`class`/`instance`) |
-| `examples/22_group_theory.seki` | 群論 — `lib/algebra/axioms.seki` + `Z/nZ` で半群/モノイド/可換群を任意 n で検証 (17 個) |
-| `examples/23_indexed_adts.seki` | 値添字付き ADT (Vec n / Fin n / Sigma 型) — refinement で構築 (3 個) |
-| `examples/24_rings_fields.seki` | 環・可換環・有限体 GF(p) (p 素数) — 汎用述語 `isField`/`isCommutativeRing` (17 個) |
-| `examples/25_linear_algebra.seki` | 汎用 n-次元ベクトル + n×m 行列 (`lib/algebra/vector.seki`, `matrix.seki`) — 2/3/5-D 同一関数で検証 (25 個) |
-| `examples/26_cas.seki` | **計算機代数 (CAS)**: 記号微分・積分・FTC・Leibniz — 主に `parseSym` 記法、ADT/DSL との同値性も検証 (16 個) |
-| `examples/27_cas_advanced.seki` | **高度な CAS**: 多項式正規化 (`parseSym "pow (x+1) 5"`)・GCD (PRS)・因数分解・solve・BigInt (22 個) |
-| `examples/28_cas_linalg_ode.seki` | **線形代数 & ODE**: n×n 行列式・2x2 固有値・Euler/RK4・Newton 法・Gauss 消去 (17 個) |
-| `examples/29_analysis.seki` | **解析学**: 数値微分・積分・Taylor 級数 (exp/sin/cos/ln)・Leibniz・固定点 (Babylonian, φ) (20 個) |
-| `examples/30_system.seki` | **システム開発 (Phase 1)**: 文字列・ファイル I/O・CLI 引数・`Ref`・`Dict` (32 個) |
-| `examples/31_system_advanced.seki` | **システム開発 (Phase 2)**: 時刻・乱数 (PRNG)・ビット演算・プロセス実行・JSON・TCP (26 個) |
-| `examples/32_system_phase3.seki` | **システム開発 (Phase 3)**: HTTP codec/client/サーバ・原子整数 + 真の並行性・IO 型マーカ (24 個) |
-| `examples/33_phase4_concurrency.seki` | **システム開発 (Phase 4)**: クロージャベース並行性 (`spawn`/`join`)・mpsc channel・FFI (10 個) |
-| `examples/34_phase5.seki` | **システム開発 (Phase 5)**: Bytecode VM・parMap・IO 強制・SMT-lite (linarith)・LSP (26 個) |
-| `examples/35_call_syntax.seki` | **関数呼出 (Phase 11)**: `f(a, b, c)` C 流と `f a b c` curried の共存 (16 個) |
-| `examples/36_for_loops.seki` | Python の `for` 文の seki での書き方 11 通り |
-| `examples/37_python_for.seki` | **for 構文 (Phase 12)**: `for x in xs do body` の Python 風 syntax |
-| `examples/38_ui_counter.seki` | **サーバ駆動 UI**: `lib/ui/` で MVU カウンタアプリ (dry-run + SSE/実サーバ起動) (3 個) |
-| `examples/39_ui_todo.seki` | **サーバ駆動 UI**: 同上、Todo リストアプリ (追加/完了/削除/クリア) (4 個) |
-| `examples/helpers_mod.seki` | (支援ファイル) 19 のモジュール例から `import` される補助関数 |
-
-合計で **482 件** の theorem と 1 件の axiom が `examples/` に含まれている。
-
-## sample/ — 実サービス志向ミニアプリ
-
-`examples/` がチュートリアル的な単一ファイルなのに対し、`sample/` は
-**実サービスを模した小さなアプリ集**:
-
-| パス | 内容 | 強みの軸 |
-|---|---|---|
-| [`sample/calc/`](sample/calc/) | 多項式 f(x) を CAS で微分・積分し、結果を 14 個の定理で検証 | **CAS + 証明** の統合 (他言語にない) |
-| [`sample/wordcount/`](sample/wordcount/) | テキストファイル → 単語頻度集計 → 上位 N 件表示 | 文字列処理 + Dict + 自前ソートの実用例 |
-| [`sample/ledger/`](sample/ledger/) | JSON 取引履歴を読み、`by algebra` で総和保存を証明しつつ適用 | 不変条件 + 健全な検証 + JSON + ファイル I/O |
-| [`sample/todo_api/`](sample/todo_api/) | TODO REST API (GET/POST/DELETE)。dry-run + 実サーバ起動の両モード | HTTP + JSON + Ref<Dict> + ルーティング |
-
-詳細は [`sample/README.md`](sample/README.md) を参照。
-
 ## ドキュメント
 
-**使用者向け** (まずはここから):
+**使用者向け**: [docs/tutorial.md](docs/tutorial.md) · [docs/cheatsheet.md](docs/cheatsheet.md) · [docs/cookbook.md](docs/cookbook.md)
 
-- [docs/tutorial.md](docs/tutorial.md) — 段階的なチュートリアル (30〜60 分で一周)
-- [docs/cheatsheet.md](docs/cheatsheet.md) — 構文・演算子・組込関数・戦術の早見表
-- [docs/cookbook.md](docs/cookbook.md) — 「~したい」「~を証明したい」レシピ集
+**リファレンス**: [docs/language.md](docs/language.md) · [docs/proofs.md](docs/proofs.md) · [docs/spec/](docs/spec/)
 
-**リファレンス**:
+**健全性の議論**: [docs/spec/06-soundness.md](docs/spec/06-soundness.md) — 何が健全で、
+何がそうでなく、なぜそう設計したか。kernel が見つけた実在のバグも記録してある。
 
-- [docs/language.md](docs/language.md) — 言語仕様 (構文・型・演算子・BNF)
-- [docs/proofs.md](docs/proofs.md) — 定理証明ガイド (9 戦術 + 合成の詳細・パターン集・限界)
+**実装者向け**: [docs/internals.md](docs/internals.md)
 
-**実装者向け**:
+## この設計の弱点
 
-- [docs/internals.md](docs/internals.md) — 実装アーキテクチャ (モジュール・データフロー・拡張ポイント)
+5 段の格子は**正直さの上にしか成り立ちません**。各段の境界は過大主張が隠れうる
+場所です。実際、開発中に見つかった例:
 
-## ステータス
+- `Real` に ℝ と `f64` の 2 つの読みがあり、kernel が `0.1 + 0.2 == 0.3` と
+  その否定を**両方**承認していた
+- `by witness` の `certify` がタクティクを実行しておらず、偽のゴールが
+  「proved [sampled]」になっていた
+- 整数の離散性が証明書側に無く、`if i < r` の else 枝から出る等式に証明書が
+  付かなかった
 
-動作するプロトタイプ。下記が動く:
-
-- 集合論的セマンティクス (列挙集合・内包集合・所属/部分集合/和/積/差/直積)
-- ラムダ計算 + カリー化 + 再帰 + 集合論ベースの型注釈検査
-- タプル / リスト / 二分木 (タグ付きペア符号化、stdlib で seki 自身が実装)
-- 代数的データ型 (`data`) + パターンマッチ (`match`)
-- エラーハンドリング (`Option`/`Result` + `?` 演算子)
-- モジュールシステム (`import "path"` / `import ... as M`)
-- 多項式正規化による**無限域**等式・不等式の証明
-- 整数除算 `/c`・剰余 `mod c` (定数除数) の代数判定
-- 半正定値 2次形式の自動判定 (Sylvester 基準・最大 4 変数)
-- Nat / List / Tree 上の構造帰納法 (`==`, `<=`, `>=`, `<`, `>` 全対応)
-- 深さ 2 の強帰納法 (Fibonacci 等)
-- 集合の定義 (内包の述語) からの forall/exists 自明判定
-- 依存関数型 `(x : A) -> B(x)` (サンプル検査ベースの member 判定)
-- 軽量な型推論 (Arrow 型まで再構築)・REPL `:type` 問い合わせ
-- 構造帰納・辞書順 (lex)・`mod`・`fst`/`snd` チェイン・`match` パターン束縛変数を扱う終了性検査 (warning 報告)
-- 型クラス (`class`/`instance`) — **辞書の自動解決** (`eq 3 3` で `Eq Int` インスタンスを自動補完) + 明示的辞書渡しもサポート
-- `by simp` / `by unfold` / `by intros` 戦術 + `then` によるタクティク合成 (`by intros then unfold f then algebra`)
-- **AC-canonicalization for `by simp`**: 可換和/可換積を正規形に変換、対称規則 (`a+b == b+a`) も oscillate せず使える
-- **`by linarith`** (線形不等式戦術 — algebra のサブセットとして提供)
-- **`by decide`** (Bool に落とせる命題を強制的に決定)
-- **`let rec`**: ローカル再帰関数 (`let rec f := \x -> ... f (x-1) ... in body`)
-- **enum-style `data` の自動セット化**: `data Color = Red | Green | Blue` で `def Color := {Red, Green, Blue}` が自動生成、`forall x in Color, ...` が動く
-- **任意 `data` 型に対する `by induction`** (recursive ADT も含む): 各構築子について自動で case 分析。recursive ctor の引数は IH/opaque atom として扱う
-- エラーの位置情報 (`[line:col]` プレフィックス) + **ソース行 + キャレット表示** + 機械可読なエラーコード (`E001`〜`E005`)
-- **`forall (x y z) in S` 多変数 sugar**、**match の tuple パターン** (`Some (a, b)` 等)、**match 網羅性検査 (warning)**
-- **命題 implication `P => Q`** (右結合、`not P or Q` への parse 時 desugar)
-- **`by strong_induction <N>`**: 深さ可変の強帰納法 (Fibonacci は `N=2`、tribonacci 型は `N=3` 等)。depth が実際の参照深さより小さいと、基底境界を跨ぐ未解決の `if` を検出して証明を失敗させる (2026-08、実際に偽の命題が通ってしまう既存バグを発見・修正)
-- **相互再帰関数の unfold 境界検出**: `by unfold f then ...` の推移展開が呼び出しグラフを辿って相互再帰サイクルを認識するようになり、`isEven`/`isOdd` のような組を「非再帰」と誤判定して展開が暴走する (32回上限まで交互展開) 問題を修正 (2026-08)
-- **可変除数の mod 単項キャンセル**: `<expr> mod v == 0` (`v` が変数) を、`v` が分子の全項に literal factor として現れる場合に健全に証明 (`Polynomial::exact_div_by_var`)。符号に関係なく成立 (2026-08)
-- **`--strict-match` / `SEKI_STRICT_MATCH`**: パターンマッチ網羅性チェックを警告からコンパイル時エラーへオプトインで昇格 (既存コードへの影響ゼロを確認済み — `lib/`/`examples/`/`tests/`/`sample/` 全体で非網羅 match は現状0件) (2026-08)
-- **LSP `textDocument/hover` / `textDocument/definition`**: 組込関数はメタデータ (シグネチャ/副作用/性質/doc) を、トップレベル `def`/`theorem`/`axiom` はその定義/命題を表示 (hover)、または宣言位置へジャンプ (definition、組込関数はジャンプ先の seki ソースが無いので null)。カーソル位置の識別子をテキストベースで抽出する簡易実装 (スコープ解決はしない — 詳細は `src/lsp_main.rs`) (2026-08)
-- **依存ペア型 (Σ) `sigma (x : A), B(x)`**: `DepArrow` (Π) と対をなす新しい `Expr`/`SetVal` variant。`(a, b)` のメンバーシップは `a in A and b in B[x:=a]` で判定 — 候補の pair を直接持っているので `DepArrow` のようなサンプリング近似は不要で完全に健全。`B` が `x` を参照しなければ `A times B` と同義 (2026-08)
-- **多変数 Fourier-Motzkin 消去 (`by algebra`/`by linarith`)**: 仮定 (連言) + 否定したゴールを線形制約に変換し、変数を1つずつ消去して充足不能性を判定 (`algebra::fm_is_unsat`)。ヒポthesis のスケーリング (`x <= 3 ⊢ 2x <= 6`) やゴールに出てこない変数の消去 (`x <= y and y <= 10 ⊢ x <= 10`) など、単純な等重み1の和 (`hyps_sum_proves`) では届かないケースに対応。健全性は「証明できる」方向のみに限定 (有理数緩和が unsat なら整数系も unsat — 逆に SAT でも整数解が無い場合があるため反証には使わない) (2026-08)
-
-主要な未対応:
-
-- 依存型の完全検査 (現状はサンプリングのみ — 任意の引数で必ず正しい保証はない)。**これが残る最大の sample-based な穴**: theorem 側のサンプリングは信頼水準として記録・拒否できるようになったが、型注釈の member check にはまだ同等の仕組みが無い
-- 依存パラメトリック ADT の専用構文 (`data Vec : Nat -> Set where ...`) — refinement + 既存 ADT で代用可
-- 3 次以上の不等式判定 (2次形式の PSD 判定 (`quadratic_psd`) と偶数次かつ係数非負な単項式の和は扱えるが、一般の3次以上は未対応)
-- 可変除数の **不等式** (`<`, `<=`, `>`, `>=`) と、剰余が0以外になる **mod** (`<expr> mod v == R` で `R != 0`) — `==` かつ剰余0の場合 (`(a*n)/n == a`、`(a*n) mod n == 0` 等の単項キャンセル) は既に健全に対応済み (`ratpoly_equal` / `exact_div_by_var`)
-- 整列性原理 (well-ordering) の一般形
-- **相互帰納法** (2つの関数の性質を互いを IH として同時に証明する戦術) — `by unfold f then ...` は相互再帰の呼び出しグラフを検出して1段先をオペーク項として扱う程度で、それより先は未対応 (2026-08、以前あった「相互再帰を非再帰と誤判定して展開が暴走する」バグは修正済み)
-- 真のスコープ分離されたモジュール (現状はフラットな名前空間に prefix 追加)
-- AST span (Expr 単位の位置情報) — エラーは decl 単位の `[line:col]` まで
-- `by induction` のステップの証明項 — 基底ケースは kernel が検証するが、ステップ (後者側を展開して多項式の差を比べる正規化) には witness 形式がまだ無い。`[unchecked]` 23 件のうち 20 件がこれ
-- 引数位置の refinement (`(amt : {a in Nat | a <= bal}) -> ...`) はまだサンプリング — 返り値位置は 0.9.0 で証明義務になった
-- LSP の completion / インタラクティブなタクティクモード (goal-stack) — diagnostics 配信 (パース + **静的 shape 検査**、宣言ごとに継続するので複数のエラーを同時に報告)・簡易 hover・goto-definition (組込関数のメタデータ + トップレベル `def`/`theorem`/`axiom` 名、テキストベースでスコープ非対応) は実装済み。証明検証は LSP では行わない — キー入力ごとに書きかけのバッファを**評価**することになり、`execShell` やソケットが実際に走ってしまうため (`seki --check` を使う)
-
-※ `by simp` の対称規則 (`add_comm` 等) は AC-canonicalization により解消済み ([docs/spec/05-tactics.md](docs/spec/05-tactics.md))。`by decide` は型クラス無しの直接評価版として実装済み (`Decidable` 型クラスへの一般化は未対応)。
-
-詳細は [docs/internals.md](docs/internals.md) の「今後の拡張」を参照。
+防御は `--strict` と、**自分の体系を攻撃し続けること**の 2 つしかありません。
+偽の命題を並べて拒否されることを確かめるテストが `tests/integration.rs` に
+入っているのはそのためです。
 
 ## ライセンス
 
