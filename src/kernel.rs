@@ -1182,6 +1182,10 @@ impl Checker<'_, '_> {
                 let mut available = goal_hypotheses(prop);
                 available.extend(domain_hypotheses(prop, self.ctx, &self.env));
                 add_equality_consequences(&mut available);
+                add_integer_consequences(
+                    &mut available,
+                    goal_is_integral(prop, self.ctx, &self.env),
+                );
                 let mut acc = Polynomial::zero();
                 for (h, lambda) in used {
                     if !available.iter().any(|a| crate::ast::alpha_equiv(a, h)) {
@@ -1220,6 +1224,10 @@ impl Checker<'_, '_> {
                 let mut available = goal_hypotheses(prop);
                 available.extend(domain_hypotheses(prop, self.ctx, &self.env));
                 add_equality_consequences(&mut available);
+                add_integer_consequences(
+                    &mut available,
+                    goal_is_integral(prop, self.ctx, &self.env),
+                );
                 let mut acc = Polynomial::from_rat(*slack);
                 let mut strict_available = false;
                 for g in used {
@@ -1921,6 +1929,69 @@ pub fn domain_hypotheses(prop: &Expr, ctx: &EvalCtx, env: &Env) -> Vec<Expr> {
 
 /// Peel `(not P) or Q` / `P -> Q` chains into the final conclusion and the
 /// premises collected along the way.
+/// Whether every binder of `prop` ranges over the integers.
+///
+/// `Nat` and `Int` are *discrete*, which is a fact about the goal the
+/// arithmetic below can use and the reals cannot.
+fn goal_is_integral(prop: &Expr, ctx: &EvalCtx, env: &Env) -> bool {
+    let mut cur = prop;
+    let mut saw = false;
+    while let Expr::Forall { domain, body, .. } = cur {
+        saw = true;
+        match ctx.eval(domain, env) {
+            Ok(Value::Set(s)) => match &*s {
+                SetVal::Atomic(crate::value::AtomicSet::Nat)
+                | SetVal::Atomic(crate::value::AtomicSet::Int) => {}
+                _ => return false,
+            },
+            _ => return false,
+        }
+        cur = body;
+    }
+    saw
+}
+
+/// What a strict inequality means when the values are whole numbers.
+///
+/// `i < r` over `Nat` is `r >= i + 1`, and a certificate often needs that
+/// stronger form: the else-branch of `if i < r` assumes both `i < r` and
+/// `i >= r`, and the contradiction only adds up with the `+1`.  Without it
+/// every equality that follows from a contradictory branch — which is every
+/// `match` arm the condition rules out — went uncertified.
+///
+/// Derived by the kernel rather than supplied, and only when the goal's
+/// binders all range over the integers.
+fn add_integer_consequences(available: &mut Vec<Expr>, integral: bool) {
+    if !integral {
+        return;
+    }
+    let plus_one = |e: &Expr| {
+        Expr::BinOp(
+            crate::ast::BinOp::Add,
+            Box::new(e.clone()),
+            Box::new(Expr::Int(1)),
+        )
+    };
+    for h in available.clone() {
+        if let Expr::BinOp(op, a, b) = &h {
+            let stronger = match op {
+                // a > b  =>  a >= b + 1
+                crate::ast::BinOp::Gt => Some((a.as_ref().clone(), plus_one(b))),
+                // a < b  =>  b >= a + 1
+                crate::ast::BinOp::Lt => Some((b.as_ref().clone(), plus_one(a))),
+                _ => None,
+            };
+            if let Some((big, small)) = stronger {
+                available.push(Expr::BinOp(
+                    crate::ast::BinOp::Ge,
+                    Box::new(big),
+                    Box::new(small),
+                ));
+            }
+        }
+    }
+}
+
 /// Both inequalities that an assumed equality entails.
 ///
 /// Models are full of equalities — "the price is 50", "capacity equals C" —

@@ -4243,3 +4243,77 @@ fn a_widened_enclosure_says_so_and_says_how_wide() {
     );
     assert!(err.message().contains("wide"), "{}", err.message());
 }
+
+// ---------------------------------------------------------------------------
+// Three gaps that showed up while writing ordinary service code in seki.
+
+#[test]
+fn an_equality_from_contradictory_integer_hypotheses_is_certified() {
+    // The else-branch of `if i < r` assumes both `i < r` and `i >= r`, and
+    // the contradiction only adds up over the integers, where `i < r` means
+    // `r >= i + 1`.  Without that step every `match` arm the condition
+    // rules out went uncertified.
+    assert_eq!(
+        trust_of(
+            "theorem t : forall b in Nat, forall i in Nat, forall r in Nat, \
+             (i < r) and (i >= r) => b == b + 1 := by algebra",
+            "t"
+        ),
+        TrustLevel::Sound
+    );
+    // Over the reals there is no such step.  The hypotheses are still
+    // contradictory and the tactic still closes the goal, but the Farkas
+    // form cannot express "a strict sum came to zero", so the kernel gets
+    // no certificate and says so rather than pretending.
+    assert_eq!(
+        trust_of(
+            "theorem t : forall b in Real, forall i in Real, forall r in Real, \
+             (i < r) and (i >= r) => b == b + 1.0 := by algebra",
+            "t"
+        ),
+        TrustLevel::Unchecked
+    );
+}
+
+#[test]
+fn an_equality_containing_an_if_is_case_split() {
+    // A `match` that returns a value desugars to this, and an equality goal
+    // used to give up before trying to split.
+    assert_eq!(
+        trust_of(
+            "theorem t : forall b in Nat, forall r in Nat, forall i in Nat, \
+             i < r => (if i < r then b + 1 else b) == b + 1 := by algebra",
+            "t"
+        ),
+        TrustLevel::Sound
+    );
+}
+
+#[test]
+fn abduction_looks_in_the_strong_direction_too() {
+    // `perNode >= 0` proves nothing about `perNode · nodes >= rps`, so
+    // bracketing only on the weak side of zero found nothing.  The bound
+    // that works is stronger, not weaker.
+    let err = run_err(
+        "theorem missing : forall rps in Real, forall perNode in Real, \
+         forall nodes in Real, (rps <= 5000.0) and (nodes >= 8.0) \
+         => perNode * nodes >= rps := by algebra",
+    );
+    assert!(
+        err.message().contains("(perNode >= 625)"),
+        "should name the bound that makes it hold: {}",
+        err.message()
+    );
+}
+
+#[test]
+fn the_service_examples_hold_together() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--audit")
+        .arg("examples/services")
+        .output()
+        .expect("run seki --audit");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("18 claims across 5 file(s)"), "{}", stdout);
+    assert!(stdout.contains("sound:       17"), "{}", stdout);
+}

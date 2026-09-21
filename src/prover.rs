@@ -2306,6 +2306,36 @@ impl<'a> Prover<'a> {
                 "one conjunct of the goal has no witness form",
             );
         }
+        // Mirror the kernel: over the integers a strict inequality is a
+        // non-strict one a step further along, and a certificate often needs
+        // that form.  The kernel derives the same facts itself
+        // (`add_integer_consequences`), so what is searched here is exactly
+        // what is checkable there.
+        if matches!(dom, PolyDomain::Nat | PolyDomain::Int) {
+            for h in hyps.clone() {
+                if let Expr::BinOp(op, a, b) = &h {
+                    let plus_one = |e: &Expr| {
+                        Expr::BinOp(
+                            BinOp::Add,
+                            Box::new(e.clone()),
+                            Box::new(Expr::Int(1)),
+                        )
+                    };
+                    let stronger = match op {
+                        BinOp::Gt => Some((a.as_ref().clone(), plus_one(b))),
+                        BinOp::Lt => Some((b.as_ref().clone(), plus_one(a))),
+                        _ => None,
+                    };
+                    if let Some((big, small)) = stronger {
+                        hyps.push(Expr::BinOp(
+                            BinOp::Ge,
+                            Box::new(big),
+                            Box::new(small),
+                        ));
+                    }
+                }
+            }
+        }
         let (op, gl, gr) = match &conclusion {
             Expr::BinOp(op, l, r) if is_relation(op) => {
                 (op.clone(), (**l).clone(), (**r).clone())
@@ -2375,6 +2405,15 @@ impl<'a> Prover<'a> {
                 return Cert::Antisymmetry { ge: Box::new(gc), le: Box::new(lc) };
             }
         }
+            // An equality with an `if` in it still needs splitting — a
+            // `match` that returns a value desugars to exactly this, and
+            // giving up here left every such goal without a certificate.
+            if crate::rewrite::case_split_goals(prop).is_some() {
+                let split = self.case_split_or_give_up(prop, &conclusion, _env);
+                if !matches!(split, Cert::Trusted { .. }) {
+                    return split;
+                }
+            }
             return self.no_witness(
                 "by algebra",
                 "the two sides do not normalize to the same polynomial by ring \

@@ -1,0 +1,31 @@
+-- 例2: レートリミッタ (トークンバケット)
+-- 「トークン数が容量を超えない・負にならない」を全入力について証明する。
+
+def minR := \a b -> if a < b then a else b
+def maxR := \a b -> if a < b then b else a
+
+-- 補充: 経過時間 dt の間に rate トークン/秒 で補充、容量 cap で頭打ち
+def refill := \tokens cap rate dt -> minR cap (tokens + rate * dt)
+-- 消費: cost を引く。足りなければ据え置き (拒否)
+def consume := \tokens cost -> if tokens >= cost then tokens - cost else tokens
+
+theorem refill_never_exceeds_capacity
+  : forall tokens in Real, forall cap in Real, forall rate in Real, forall dt in Real,
+      refill tokens cap rate dt <= cap
+  := by unfold refill then unfold minR then algebra
+
+theorem refill_never_loses_tokens
+  : forall tokens in Real, forall cap in Real, forall rate in Real, forall dt in Real,
+      (tokens <= cap) and (rate >= 0.0) and (dt >= 0.0)
+      => refill tokens cap rate dt >= tokens
+  := by unfold refill then unfold minR then algebra
+
+theorem consume_never_goes_negative
+  : forall tokens in Real, forall cost in Real,
+      (tokens >= 0.0) and (cost >= 0.0) => consume tokens cost >= 0.0
+  := by unfold consume then algebra
+
+theorem consume_never_gains
+  : forall tokens in Real, forall cost in Real,
+      cost >= 0.0 => consume tokens cost <= tokens
+  := by unfold consume then algebra

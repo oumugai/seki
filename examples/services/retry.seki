@@ -1,0 +1,39 @@
+-- 例3: リトライのバックオフ — 締切を破らないか
+--
+-- 「指数バックオフ + ジッタで、合計待ち時間が締切を超えない」。
+-- ジッタは範囲なので `..` で表す。範囲内のどの実現値でも成り立つことを
+-- 区間演算が保証する。
+
+def absR2 := \r -> if r < 0.0 then 0.0 - r else r
+
+-- n 回目の待ち: base * 2^n、上限 capMs
+def minR := \a b -> if a < b then a else b
+def backoff := \base capMs n ->
+    if n <= 0 then minR capMs base
+    else minR capMs (2.0 * backoff base capMs (n - 1))
+
+-- 合計待ち時間 (n 回)
+def totalWait := \base capMs n ->
+    if n <= 0 then 0.0 else backoff base capMs (n - 1) + totalWait base capMs (n - 1)
+
+-- ジッタ付き: 各待ちが ±20%
+def jitter := 1.0 +- 0.2
+
+-- (1) 上限つきバックオフは capMs を超えない
+theorem backoff_respects_cap
+  : forall base in Real, forall capMs in Real,
+      base <= capMs => backoff base capMs 0 <= capMs
+  := by unfold backoff then unfold minR then algebra
+
+-- (2) 100ms 基準・上限 2s で 6 回リトライしても合計 7 秒以内
+theorem six_retries_fit_in_budget
+  : totalWait 100.0 2000.0 6 < 7000.0 := by eval
+
+-- (3) ジッタ ±20% を入れても締切 9 秒を破らない
+--     (範囲内のどの実現値についても)
+theorem jittered_retries_meet_deadline
+  : (totalWait 100.0 2000.0 6) * jitter < 9000.0 := by eval
+
+-- (4) 解析が結論を出せるだけ精密か — 囲いが余裕より細いこと
+theorem the_bound_is_conclusive
+  : width ((totalWait 100.0 2000.0 6) * jitter) < 3000.0 := by eval

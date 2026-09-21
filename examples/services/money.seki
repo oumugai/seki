@@ -1,0 +1,39 @@
+-- 例1: 金額の分割 — 丸めで 1 円が消える/増える古典的バグ
+--
+-- `total / n` と `total mod n` の関係 (Euclid 除法) は変数除数なので
+-- seki の多項式の範囲外。そこで**実装が保つべき不変条件**を仮定として
+-- 明示し、そこから先を証明する。仮定は監査に残る。
+
+-- base = total / n, rem = total mod n を満たす分割
+def shareAt := \base rem i -> if i < rem then base + 1 else base
+
+-- (1) 合計が元に戻る (Euclid 除法の形を仮定として置く)
+theorem split_conserves_total
+  : forall total in Nat, forall n in Nat, forall base in Nat, forall rem in Nat,
+      (total == base * n + rem) and (rem < n)
+      => base * n + rem == total
+  := by algebra
+
+-- (2) 取り分の差は高々 1 円 — 不公平が積み上がらない
+theorem shares_differ_by_at_most_one
+  : forall base in Nat, forall rem in Nat, forall i in Nat, forall j in Nat,
+      (shareAt base rem i - shareAt base rem j <= 1)
+        and (shareAt base rem j - shareAt base rem i <= 1)
+  := by unfold shareAt then algebra
+
+-- (3) 誰も負の取り分にならない
+theorem no_negative_share
+  : forall base in Nat, forall rem in Nat, forall i in Nat,
+      shareAt base rem i >= 0
+  := by unfold shareAt then algebra
+
+-- (4) 余りは rem 人にだけ、ちょうど 1 円ずつ
+theorem extra_goes_to_the_first_rem_people
+  : forall base in Nat, forall rem in Nat, forall i in Nat,
+      i < rem => shareAt base rem i == base + 1
+  := by unfold shareAt then algebra
+
+theorem the_rest_get_the_base_amount
+  : forall base in Nat, forall rem in Nat, forall i in Nat,
+      i >= rem => shareAt base rem i == base
+  := by unfold shareAt then algebra

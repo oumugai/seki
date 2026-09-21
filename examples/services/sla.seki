@@ -1,0 +1,35 @@
+-- 例4: SLA の合成 — 仮定に確度と出所をつける
+--
+-- 「3 つの依存サービスを直列に呼ぶ構成で、合成可用性が SLO を満たすか」。
+-- 各サービスの可用性は**測定値からの推定**なので、確度と出所を書く。
+
+axiom auth_availability
+  : authA >= 0.9995
+  with confidence 0.9 from "ベンダー SLA + 12か月の実測 (2025-09〜2026-08)"
+
+axiom db_availability
+  : dbA >= 0.9990
+  with confidence 0.8 from "自社運用、計画停止を除外した集計"
+
+axiom cdn_availability
+  : cdnA >= 0.9999
+  with confidence 0.95 from "CDN の公開ステータス API"
+
+-- 直列合成の下界: 1 - (1-a) - (1-b) - (1-c) <= a*b*c (Fréchet と同じ発想)
+theorem serial_availability_meets_slo
+  : (authA + dbA + cdnA - 2.0) >= 0.998
+  := by have a : authA >= 0.9995 := by apply auth_availability
+     then have b : dbA >= 0.9990 := by apply db_availability
+     then have c : cdnA >= 0.9999 := by apply cdn_availability
+     then algebra
+
+-- 冗長化した場合: DB を 2 重にすれば片方落ちても持つ
+theorem redundant_db_raises_the_floor
+  : forall p in Real, (p >= 0.999) and (p <= 1.0)
+      => (1.0 - (1.0 - p) * (1.0 - p)) >= 0.999999
+  := by algebra
+
+-- エラーバジェット: 30日で許される停止時間 (分)
+theorem error_budget_is_43_minutes
+  : forall slo in Real, slo == 0.999 => (1.0 - slo) * 43200.0 <= 43.2
+  := by algebra

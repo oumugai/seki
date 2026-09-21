@@ -253,25 +253,52 @@ fn probe_for_bound(
     // a lower bound as it shrinks.  `step` walks outwards.
     let outward = |c: Rat, by: Rat| if upper { c.add(by) } else { c.sub(by) };
 
-    // Bracket: walk outwards from zero while it still works.
+    // Bracketing is two moves, not one.  The bound that works may be
+    // *stronger* than anything near zero — `perNode >= 0` proves nothing
+    // about `perNode · nodes >= rps`, while `perNode >= 625` proves it —
+    // so first walk in the strong direction until something works, then
+    // walk back toward the weak side to find where it stops.
     let zero = Rat::from_int(0);
-    if !works(zero) {
-        // Even the tightest bound in range does not close it — the missing
-        // assumption is not a bound on this variable.
-        return None;
-    }
+    let strong = |c: Rat, by: Rat| if upper { c.sub(by) } else { c.add(by) };
+
     let mut good = zero;
-    let mut bad: Option<Rat> = None;
-    let mut step = Rat::from_int(1);
-    while step.num <= LADDER_LIMIT {
-        let next = outward(zero, step);
-        if works(next) {
-            good = next;
-        } else {
-            bad = Some(next);
-            break;
+    let mut weakest_failure: Option<Rat> = None;
+    if !works(zero) {
+        let mut step = Rat::from_int(1);
+        let mut found = None;
+        while step.num <= LADDER_LIMIT {
+            let c = strong(zero, step);
+            if works(c) {
+                found = Some(c);
+                break;
+            }
+            // Still failing, and this is the weakest failure seen so far.
+            weakest_failure = Some(c);
+            step = step.mul(Rat::from_int(2));
         }
-        step = step.mul(Rat::from_int(2));
+        good = found?;
+        // Anything weaker than `good` that already failed brackets it; if
+        // the very first strong step worked, zero is the bracket.
+        if weakest_failure.is_none() {
+            weakest_failure = Some(zero);
+        }
+    }
+
+    // Now walk toward the weak side while it still works.
+    let outward = |c: Rat, by: Rat| if upper { c.add(by) } else { c.sub(by) };
+    let mut bad = weakest_failure;
+    if bad.is_none() {
+        let mut step = Rat::from_int(1);
+        while step.num <= LADDER_LIMIT {
+            let next = outward(zero, step);
+            if works(next) {
+                good = next;
+            } else {
+                bad = Some(next);
+                break;
+            }
+            step = step.mul(Rat::from_int(2));
+        }
     }
     // Nothing failed inside the ladder: the bound is not what constrains
     // this goal, or it is vacuously wide.  Either way there is nothing
