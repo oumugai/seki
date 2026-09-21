@@ -248,11 +248,9 @@ fn probe_for_bound(
         let candidate = with_assumption(prop, bound_expr(var, upper, strict, written));
         prover.verify_algebra_raw(&candidate, env).is_ok()
     };
-    // `works` is monotone the same way in both directions once read as
-    // "how far out is the bound": an upper bound gets weaker as it grows,
-    // a lower bound as it shrinks.  `step` walks outwards.
-    let outward = |c: Rat, by: Rat| if upper { c.add(by) } else { c.sub(by) };
-
+    // `works` is monotone once read as "how far out is the bound": an
+    // upper bound gets weaker as it grows, a lower bound as it shrinks.
+    //
     // Bracketing is two moves, not one.  The bound that works may be
     // *stronger* than anything near zero — `perNode >= 0` proves nothing
     // about `perNode · nodes >= rps`, while `perNode >= 625` proves it —
