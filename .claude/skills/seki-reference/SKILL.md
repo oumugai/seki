@@ -1,6 +1,6 @@
 ---
 name: seki-reference
-description: seki の構文・演算子・組込関数・タクティクの早見表と、正確な情報の探し方。.seki コードを書く/読む、または組込関数の正確なシグネチャを知りたいときに読み込む。
+description: seki の構文・演算子・区間記法・CLI・組込関数・タクティクの早見表と、正確な情報の探し方。.seki コードを書く/読む、または組込関数の正確なシグネチャを知りたいときに読み込む。
 ---
 
 # seki 構文・組込関数リファレンス
@@ -29,7 +29,17 @@ forall x in S, body         -- forall (x y) in S, body で多変数 (共通ド�
 exists x in S, body
 sigma (x : A), B            -- 依存ペア型 Σ (B は x を参照可能; 非依存なら A times B と同義)
 {x in S | P}                 -- 内包集合
+
+lo .. hi                    -- その間のすべての実数を表す値 (区間)
+centre +- tolerance         -- 同じものを中心と許容差で書く
+lo x / hi x / width x / mid x  -- 囲いの端・幅・中心 (ただの数は幅ゼロの帯)
+
+axiom name : Prop with confidence 0.8 from "出所"   -- 確度と出所つきの仮定
 ```
+
+`..` と `+-` は算術より緩く比較より強く結合します
+(`1.0 + 2.0 .. 5.0` は 3 から 5 の帯)。どちらも `interval lo hi` への
+糖衣で、パーサで展開されます。
 
 主なドメイン: `Nat` `Int` `Real` `Bool` `Str` `Unit`、`List T`、`Tree T`、
 `data` で定義した ADT、列挙集合 `{1,2,3}`。
@@ -53,6 +63,14 @@ for do
 `sigma` `where` `fn` `for` `do` `diff` あたりは変数名に使いがちなので注意
 — 実際 `lib/probability/` が `sigma` を仮引数に使っていて壊れていたことがある。
 キーワードを仮引数位置に書くと専用のエラーが出る。
+
+### `Real` は ℝ、`f64` はその近似 (0.11.x〜)
+
+小数リテラルは**書いたとおりの 10 進数**です — `0.6` は 3/5 であって
+「0.6 に最も近い double」ではありません。評価器は `f64` で計算しますが、
+カーネルは実数の比較を (a) 厳密な有理数、(b) 保証された囲い (区間演算)、
+(c) 浮動小数点 の順に判定し、(c) に落ちたものは `[approximate]` と
+表示して**検査したとは言いません**。
 
 ### `Set` は集合ではない (0.8.0〜)
 
@@ -82,14 +100,20 @@ wrapping せず **runtime error** になる (`by eval` と `by algebra` が
 seki <file>                 # 実行 (各宣言の結果を表示)
 seki --check <file>         # 検証のみ (値を表示しない)
 seki --audit <file>         # 各 theorem がどう検証されたかを一覧
+seki --audit <dir>          # ディレクトリ配下を1枚のアシュアランス報告に —
+                            #   証明以外に立つ主張から始まり、弱い主張が
+                            #   残れば exit 1 (ビルドのゲートになる)
 seki --proof <file> <名前>  # その theorem の証明項を表示
-seki --strict <file>        # Sound でない theorem を拒否 (SEKI_STRICT=1 でも可)
+seki --strict <file>        # sound でない theorem を拒否 (SEKI_STRICT=1 でも可)
+seki --min-confidence 0.8 <file>  # 仮定の確度に下限を切る
 seki --strict-match <file>  # 非網羅的な match をパースエラーに
 seki -e '<expr>'            # 式を1つ評価
 seki -I <dir>               # lib の探索パスを追加 (繰り返し可)
 ```
 
-`--strict` は「`[sampled]` / `[axiomatic]` が付く theorem をエラーにする」
+`--strict` は `sound` 以外 (`[axiomatic]` / `[unchecked]` /
+`[approximate]` / `[sampled]`) をエラーにします。信頼水準は 5 段の格子で、
+**下の 2 つ (`approximate` / `sampled`) は偽を通しうる**
 — 詳細は `seki-tactics` skill と `docs/spec/06-soundness.md` §6.0。
 
 ## 組込関数の正確な情報の探し方
@@ -110,11 +134,18 @@ seki -I <dir>               # lib の探索パスを追加 (繰り返し可)
 
 ## タクティク一覧 (詳細は `seki-tactics` skill)
 
-`refl` / `by eval` / `by algebra` (= `by linarith`) / `by induction` /
-`by strong_induction` / `by simp [lemmas...]` / `by unfold f` / `by intros` /
-`by decide` / `by auto` / `by obtain w from L [with x:=e,...]` (existential
-elimination, 2026-08 追加) / `then` での合成。証明戦術の選び方や健全性の注意は
-`seki-tactics` skill を読み込むこと。
+closer: `refl` / `by eval` / `by algebra` (= `by linarith`) / `by induction` /
+`by strong_induction <N>` / `by decide` / `by auto` /
+`by apply L [with x := e]` (modus ponens) / `by assumption`
+
+transformer (`then` で closer と組む): `by unfold f` / `by intros` /
+`by have h : P := <1タクティク>` (カット) /
+`by witness v := <項>` (存在導入 — ε-δ に必須) /
+`by obtain w from L [with x := e]` (存在除去)
+
+both: `by simp [lemmas...]`
+
+証明戦術の選び方や健全性の注意は `seki-tactics` skill を読み込むこと。
 
 ## その他のドキュメント
 

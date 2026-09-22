@@ -1,6 +1,6 @@
 ---
 name: seki-tactics
-description: seki の theorem 証明で使うタクティク (by eval/algebra/induction/strong_induction/simp/unfold/intros/decide/linarith/auto) の選び方・健全性・既知の落とし穴をまとめる。theorem を書く/直す/レビューするときに読み込む。
+description: seki の theorem 証明で使うタクティク (by eval/algebra/induction/apply/have/witness/obtain/simp/unfold/intros/auto ほか) の選び方・5 段の信頼水準・区間演算・既知の落とし穴をまとめる。theorem を書く/直す/レビューするときに読み込む。
 ---
 
 # seki 証明戦術ガイド
@@ -11,7 +11,7 @@ seki は `theorem name : <命題> := <証明>` の形で命題を機械検証す
 あるいは `cargo build --bin seki --quiet && ./target/debug/seki <file>`)。
 
 このドキュメントの記述はビルド済みの `seki` バイナリで **実際に動かして
-検証済み** (2026-08 時点)。ただし `docs/` 配下の記述は実装より古くなっている
+検証済み** (2026-09 時点)。ただし `docs/` 配下の記述は実装より古くなっている
 ことがあるので、この skill と食い違う場合は実際に動かして確かめること
 (このリポジトリではそれが何度も起きている — 詳細は `seki-dev` skill)。
 
@@ -52,19 +52,54 @@ theorem trivial : forall p in Real, p > 0.0 => p > 0.0 := by assumption
 - 前提は「仮定にある」か「`by algebra` で落ちる」必要があります。
   飛ばして適用はできません
 
-## 率・割合は `1.0/10.0` と書く (0.10.1〜)
+## 小数リテラルは書いたとおりの 10 進数 (0.11.x〜)
 
-`by algebra` は `f64` リテラルを厳密な有理数に変換します。`0.1` は
-1/10 ではなく分母 2^55 の有理数なので、**3 つ掛けると i128 をあふれ**、
-「多項式の範囲外」になって証明できません。
+`0.6` は「0.6 に最も近い double」ではなく **3/5** として扱われます。
 
 ```seki
-theorem ng : (0.1 * 0.2 * 0.3) == 0.006 := by algebra      -- 通らない
-theorem ok : ((1.0/10.0) * (2.0/10.0) * (3.0/10.0)) == (6.0/1000.0) := by algebra
+theorem t : forall a in Real, a >= 0.6 => (a * 50.0) >= 30.0 := by algebra   -- 通る
+theorem u : (0.1 * 0.2 * 0.3) == 0.006 := by algebra                          -- 通る
 ```
 
-0.10.0 まではあふれが飽和して**偽の定理が通っていました**
-(`0.1 * 0.2 * 0.3 == 1.0`)。現在は poison として拒否されます。
+⚠️ 古い skill / docs にある「率は `0.1` でなく `1.0/10.0` と書け」という
+**注意はもう不要**です (二進の厳密値だと `0.6` が 3/5 より僅かに小さく、
+上の `t` が偽になっていました。桁あふれも解消)。
+
+これに伴い **`Real` は ℝ、`f64` はその近似**と決まっています。カーネルは
+実数の比較を有理数の範囲内では厳密に決め、範囲外では評価器の答えを
+**信頼するが検査したとは言いません** (`[approximate — floating point]`)。
+
+## 区間 — 「この範囲のすべての値について」(0.11.x〜)
+
+`lo .. hi` と `中心 +- 許容差` は、その間の**すべての実数**を表す値です。
+演算は範囲を丸ごと運び、比較は範囲全体が決めたときだけ答えます。
+
+```seki
+def startup := 22.5 +- 7.5                    -- 15〜30 のどこか
+theorem never_overheats : evolve 10 startup <= 25.0 := by eval
+theorem tight : width (evolve 50 startup) < 0.2 := by eval
+```
+
+**`by algebra` が多項式の外に出られない場面でこれが効きます** — 再帰・
+条件分岐・`exp`/`ln`/`sin`/`cos` を含む任意の計算を通して、範囲内の
+どの値についても成り立つことを保証できます。
+
+`lo` / `hi` / `width` / `mid` で囲いを読めます。`width` が重要なのは
+**囲いが広がっていないことを主張できる**ことで、これが無いと「仕様を
+守った」が「たまたま囲いが収まった」のか区別がつきません。
+
+落とし穴 — **区間の依存性 (wrapping effect)**。同じ値が式に複数回現れると
+囲いは広がります。Newton 法の `x - (x³-8)/(3x²)` は `x` が 3 回出るので、
+実数の反復が縮む場面で囲いは発散します。そのとき出るのは:
+
+```
+interval arithmetic does not settle this claim (... — the left enclosure is 2 wide).
+An enclosure widens wherever a value appears more than once, so this shows
+neither that the claim holds nor that it fails
+```
+
+「偽である」ではなく「**この方法では決まらない**」です。式を書き換えて
+変数の出現を減らすか、範囲を狭めるか、`[approximate]` を受け入れます。
 
 ## 証明が通らないときは、まずエラーを読む (0.10.0〜)
 
@@ -75,8 +110,12 @@ cannot prove (100 - (200 * r)) > 0 over Real
   it would hold given `(r < (1 / 2))` — add it as a hypothesis ...
 ```
 
-提案は検証済みなので、そのまま仮定に足せば通ります。出ない場合は
-「線形の断片の外」か「提案がゴールの言い換えにしかならない」かです。
+提案は検証済みなので、そのまま仮定に足せば通ります。**多変数でも非線形でも
+出ます** — `perNode * nodes >= rps` に `perNode >= 625` を返すところまで届きます。
+出ない場合は「足りない仮定が 1 変数の bound の形をしていない」
+(`c - p >= 1/2` はどちらを縛ってもよく、答えが一意でない) か、
+「提案がゴールの言い換えにしかならない」か、「矛盾する仮定しか作れない」
+(ex falso なので候補から外れる) かです。
 
 `by apply` の前提が落ちないときは、どの前提か・スコープに何があるか・
 `by have` でどう供給するかまで出ます。補題名の綴り違いには候補が出ます。
@@ -132,7 +171,11 @@ theorem f_zero ✓ proved  [sampled — NOT a proof]      ← 無限ドメイン
 theorem consequence ✓ proved  [sampled — NOT a proof] ← f_zero を引用したので伝播
 theorem uses_ax ✓ proved  [axiomatic]                 ← axiom に依存
 theorem gauss ✓ proved  [unchecked — no proof term]   ← タクティクが witness を出さない
+theorem numeric ✓ proved  [approximate — floating point] ← 浮動小数点で決めた
 ```
+
+5 段の格子で、**下の 2 つ (`approximate` / `sampled`) は偽を通しうる**。
+`--strict` はどちらも拒否します。
 
 ```sh
 seki --audit FILE      # 各定理がどう検証されたかを一覧 (CI 向け)
@@ -152,7 +195,8 @@ seki --strict FILE     # Sound 以外をエラーにする
 | `forall x in Real, f x >= 0 := by eval` (`f` はユーザ定義) | `by unfold f then algebra` — `then` チェーンでは**実際に閉じたステップ**だけが評価されるので、`unfold` は水準を下げない |
 | `axiom` を使っている | 直せない (それが `axiom` の意味)。意図的なら `[axiomatic]` のままでよい |
 | `match` でタグ文字列を比較する関数について無限ドメインで主張 | `by algebra` が畳めないので原理的に直らない。ドメインを有限にするか、`[sampled]` である理由をコメントに書く |
-| `[unchecked]` が出る | そのタクティクに witness 形式がまだ無いという意味で、命題が偽だという意味ではない。`--audit` でどのタクティクか分かる。現状 `by induction` のステップ・`by algebra` の符号解析/FM/`!=`・`by obtain` のチェーン中変換・`by strong_induction` がこれ |
+| `[unchecked]` が出る | そのタクティクに witness 形式がまだ無いという意味で、命題が偽だという意味ではない。`--audit` でどのタクティクか分かる。現状の大半は `by induction` のステップ |
+| `[approximate]` が出る | 浮動小数点で決めたという意味。`exp`/`ln`/`sin`/`cos` は囲いを持つので大半は `sound` になるが、**反復アルゴリズムの区間依存性**で広がった場合は残る。式の変数の出現を減らすか、範囲を狭める |
 
 詳細: `docs/spec/06-soundness.md` §6.0。
 
@@ -161,11 +205,11 @@ seki --strict FILE     # Sound 以外をエラーにする
 | タクティク | 健全性 | 注意点 |
 |---|---|---|
 | `refl` | ✅ | 構文的に完全一致する場合のみ。alpha-renaming なし |
-| `by eval` | ✅ 有限ドメイン / ✅ 定義から決まる場合 / 🔴 それ以外の無限ドメインは `SAMPLE_BOUND`=200 の標本検査 | 無限ドメインでも次は `Sound`: (a) 内包の述語そのもの、またはその**連言肢ひとつ** (`{x in Int \| -3<=x and x<=3}` の元が `x<=3` を満たす)、(b) `Nat`/`Int`/**`Real`** 上の多項式関係 (**同じドメインの入れ子 `forall` も剥がす** ので `forall a b c in Int, a*(b+c)==a*b+a*c` も記号的に決まる)、(c) `exists` が witness を実際に見つけた場合。それ以外は `[sampled]` と表示される |
+| `by eval` | ✅ 有限ドメイン / ✅ 定義から決まる場合 / ✅ **厳密有理数または保証された囲いで決まる場合** / 🔴 それ以外の無限ドメインは `SAMPLE_BOUND`=200 の標本検査 | 無限ドメインでも次は `Sound`: (a) 内包の述語そのもの、またはその**連言肢ひとつ** (`{x in Int \| -3<=x and x<=3}` の元が `x<=3` を満たす)、(b) `Nat`/`Int`/**`Real`** 上の多項式関係 (**同じドメインの入れ子 `forall` も剥がす** ので `forall a b c in Int, a*(b+c)==a*b+a*c` も記号的に決まる)、(c) `exists` が witness を実際に見つけた場合、(d) **実数の比較が厳密有理数または区間演算で決まる場合** (`|expTaylor 30 1 - e| < 1e-7` のような数値の許容範囲チェックが `sound` になる)。それ以外の無限ドメインは `[sampled]`、浮動小数点に頼った場合は `[approximate]` |
 | `by apply L [with ...]` | ✅ modus ponens (0.8.0) | 補題を具体化し、前提を落とし、結論を読む。束縛変数は結論と目標の照合で推論。前提は仮定→`by algebra` の順で落とす。証明項は `Cert::Apply` で、kernel が前提をひとつ残らず検査する |
 | `by have h : P := <1タクティク>` | ✅ カット規則 (0.8.0) | `P` は現在の仮定の下で証明される。transformer なので `then` で closer と組む |
 | `by assumption` | ✅ (0.8.0) | ゴールの結論が仮定にあるとき閉じる |
-| `by algebra` | ✅ Int/Rat/**Real** (Real は `f64_to_rat` で厳密な有理数化) | **仮定付きの線形算術が Farkas 証明書付きになった** (0.8.0) — 仮定のスケーリング (`x<=3 ⊢ 2x<=6`)、緩み (`2a<=10 ⊢ 2a<=12`)、区間 (`0.05<=r<=0.15 ⊢ 100-200r>0`)、等式仮定の並べ替え (`w³-w-2=0 ⊢ w³=w+2`) がすべて kernel 検証済みで通る。**不透明部分式 (関数呼び出し・`if`・超越関数) を Nat 上で非負と仮定しなくなった** (0.8.0) — 以前は `def neg := \n -> 0 - 5` に対して `forall n in Nat, neg n >= 0` が通っていた実バグがあり、証明項の導入で発覚した。`if` の場合分けは**ゴール側・仮定側の両方**に対応 (2026-08、仮定側の if — `absR`等を unfold した結果生じるものが場合分けされないバグを修正)。仮定の連言 (`a>0 and b>0 => ...`) は個別の仮定に分解され、**複数仮定の等重み1の和** がゴールと一致すれば閉じる (`hyps_sum_proves`) — 例: `x>0, y>0 ⊢ x+y>0` は通るが `x>0, y>0 ⊢ x-y>0` は通らない (健全)。Nat/Int では**厳密不等式が整数の離散性を含意する**強化を追加 (`poly>0 ⊢ poly>=1`、2026-08) — `n>0 (Nat) ⊢ n-1>=0` のような、実数緩和だけでは証明できない事実が通るようになった。`let` とリテラルタプルの `fst`/`snd`、`intToReal` は透過的に扱う (不透明アトム化しない)。**リスト等価性は構造分解される** (`cons h1 t1 == cons h2 t2` ⟺ `h1==h2 and t1==t2`、Nil/Cons不一致は矛盾)。可変除数は `==` かつ単項キャンセルで閉じる場合のみ (`(a*n)/n == a`、`(a*n) mod n == 0`) — 可変除数の不等式や剰余非零の一般ケースは未対応。`sin`/`cos`/`exp`/`ln` 等の超越関数は常に不透明アトム — 代数的性質が要る場合は `lib/analysis/elementary.seki` の axiom を `by simp` で使う |
+| `by algebra` | ✅ Int/Rat/**Real** (小数リテラルは書いたとおりの 10 進数) | **仮定付きの線形算術が Farkas 証明書付きになった** (0.8.0) — 仮定のスケーリング (`x<=3 ⊢ 2x<=6`)、緩み (`2a<=10 ⊢ 2a<=12`)、区間 (`0.05<=r<=0.15 ⊢ 100-200r>0`)、等式仮定の並べ替え (`w³-w-2=0 ⊢ w³=w+2`) がすべて kernel 検証済みで通る。**不透明部分式 (関数呼び出し・`if`・超越関数) を Nat 上で非負と仮定しなくなった** (0.8.0) — 以前は `def neg := \n -> 0 - 5` に対して `forall n in Nat, neg n >= 0` が通っていた実バグがあり、証明項の導入で発覚した。`if` の場合分けは**ゴール側・仮定側の両方**に対応 (2026-08、仮定側の if — `absR`等を unfold した結果生じるものが場合分けされないバグを修正)。仮定の連言 (`a>0 and b>0 => ...`) は個別の仮定に分解され、**複数仮定の等重み1の和** がゴールと一致すれば閉じる (`hyps_sum_proves`) — 例: `x>0, y>0 ⊢ x+y>0` は通るが `x>0, y>0 ⊢ x-y>0` は通らない (健全)。Nat/Int では**厳密不等式が整数の離散性を含意する**強化を追加 (`poly>0 ⊢ poly>=1`、2026-08) — `n>0 (Nat) ⊢ n-1>=0` のような、実数緩和だけでは証明できない事実が通るようになった。`let` とリテラルタプルの `fst`/`snd`、`intToReal` は透過的に扱う (不透明アトム化しない)。**リスト等価性は構造分解される** (`cons h1 t1 == cons h2 t2` ⟺ `h1==h2 and t1==t2`、Nil/Cons不一致は矛盾)。可変除数は `==` かつ単項キャンセルで閉じる場合のみ (`(a*n)/n == a`、`(a*n) mod n == 0`) — 可変除数の不等式や剰余非零の一般ケースは未対応。`sin`/`cos`/`exp`/`ln` 等の超越関数は `by algebra` にとっては常に不透明アトム — 代数的性質が要る場合は `lib/analysis/elementary.seki` の axiom を `by simp` で使うか、**具体的な値なら `by eval` に任せる** (区間演算が囲いを出すので `sound` になる)。**仮定の積 (Positivstellensatz)** で線形算術の外に出られる (0.11.0) — 生成子の個数はゴールの次数から決まり最大 4、どれを使うかは厳密有理数の phase-1 単体法が決める (`a³ <= 1` や `x·y·z <= 1` が通る)。**反対称性** (`<=` と `>=` から `==`)、**正の量で割る** (`c > 0` と `c·l OP c·r` から `l OP r` — 縮小写像の議論はここで止まる)、**等式の仮定** (`p == 50` は 2 本の不等式を含意)、**整数の離散性** (`i < r` over Nat は `r >= i+1` — 証明書側でもカーネルが導出する) |
 | `by linarith` | ✅ `by algebra` と全く同じ実装への別名 | 仮定の加算結合 (`hyps_sum_proves`、等重み1の和) に加え、**多変数 Fourier-Motzkin 消去** (`fm_is_unsat`) も内蔵 — スケーリングが必要な仮定 (`x<=3 ⊢ 2x<=6`) やゴールに現れない変数の消去 (`x<=y and y<=10 ⊢ x<=10`) にも対応。FM は「証明できる」方向のみ健全 (有理数 unsat⟹整数 unsat だが逆は不成立なので反証には使わない)。専用の単変数ソルバ (`linarithProve` builtin, `src/linarith.rs`) は別実装でタクティクには未接続 |
 | `by induction` | ✅ 構造帰納 (Nat/List/Tree/data)。ただし**基底ケースのみ kernel 検証済み**でステップは `[unchecked]` になる (0.8.0) | ステップは不透明原子を帰納法の仮定として非負と仮定する (`polynomial_nonneg_under_ih`) — これは正しい用法だが witness 形式がまだ無い。真の**相互帰納法** (2つの関数の性質を互いを IH として同時に証明) は未対応。**List帰納法は補助パラメータの汎化をサポート** (2026-08、`verify_list_induction_generalized`) — `forall p in List T, forall k in Nat, forall c in Real, LHS(p,k,c)==RHS(p,k,c)` のように、帰納変数の後ろにさらに `forall` が続く形 (`==` ゴールのみ) なら、IH を「forall k c, ...」という汎化された書き換え規則として使う。積分の分母インデックスのような、再帰呼び出しごとに変わる補助引数を持つ関数の証明に必要 (例: `lib/cas/poly.seki` の `ftc_poly_general`)。Nat帰納法はまだこの汎化に非対応、かつ乗法的/指数的な漸化式 (`width(n+1)==width(n)/2` のような) はステップの差分ベース判定と相性が悪く通らないことがある |
 | `by strong_induction <N>` | ✅ well-founded on Nat (`N` 省略時2) | `N` は「関数が実際に何段前を参照するか」であり探索深さではない — 小さすぎる `N` は証明失敗になる (基底境界を跨ぐ未解決の `if` を検出するガードあり。2026-08、これが無いと偽の命題が通ってしまうバグがあった)。大きすぎる `N` は余分な基底を検査するだけで安全 |
@@ -174,6 +218,7 @@ seki --strict FILE     # Sound 以外をエラーにする
 | `by unfold f` | ✅ 1段展開 + 非再帰の呼び出し先を推移的に展開 | 再帰関数 `f` 自身は1段だけ展開されて止まる (無限展開しない安全策)。相互再帰の組 (`isEven`/`isOdd` 等) も呼び出しグラフのサイクル検出で正しく「再帰」と判定され、同様に1段で止まる (2026-08 修正 — 以前は誤って「非再帰」判定され32回まで交互展開が暴走した) |
 | `by intros` | ✅ 全称除去 | transformer なので単体では閉じない。`then` で closer と組む |
 | `by auto` | ✅ (個々の候補の健全性に従う) | 固定順のポートフォリオ探索。`theorem t : P` (`:=` 省略形) はこれに desugar される。**信頼水準は実際に採用された候補のもの** — `by auto` が裏で `by eval` に落ちていれば `[sampled]` と出る |
+| `by witness v := <項> then <closer>` | ✅ 存在導入 (`Cert::Witness`、0.11.x) | `by obtain` の双対。`exists v in D, P(v)` を `P(<項>)` に置き換えて次のタクティクに渡す。**ε-δ はこれが無いと書けても証明できない** — 連続性の主張はすべて `forall eps, eps>0 => exists delta, ...` の形で、証明するとは δ を ε の関数として差し出すこと。項は束縛変数とリテラルから `+ - * /` で組んだものに限り、**割り算の分母は非零リテラル**でなければならない (`eps / 2.0` は可、`1.0 / eps` は不可 — `eps != 0` が仮定にあっても、それを読むのは推論であって所属判定ではない)。動く例は `lib/analysis/continuity.seki` (29 件すべて kernel 検証済み) |
 | `by obtain w from L [with x:=e,...] then <closer>` | ✅ (existential elimination、2026-08 追加) | `L` (axiom/theorem名) を `with` の束縛で具体化し、前提を discharge した上で `exists v, P(v)` の `v` を `w` として `P(w)` を後続の `<closer>` の仮定に注入する transformer。**`w` は計算可能な値ではなく純粋にシンボリックな名前** — `by eval`等で評価しようとするとエラーになる。`L` が `forall`で束縛していない自由変数 (関数など、`Set`で表現しにくいドメイン) を持つ場合はその名前を明示的に `with` で与える。`axiom` で宣言した古典的事実 (IVT等、構成的に証明できない) を「宣言するだけ」から「実際に使って他の定理を導出する」に変える鍵 |
 
 ## 既知のクラッシュ・性能上の注意
