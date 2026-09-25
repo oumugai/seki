@@ -672,7 +672,7 @@ impl<'a> Prover<'a> {
         // same reason the goal-side split is: each branch only needs to
         // hold under the extra assumption that got it there.
         for (i, (h, htrue)) in hyps.iter().enumerate() {
-            if let Some((then_h, else_h, cond)) = split_first_if(h) {
+            if let Some((then_h, else_h, cond)) = split_on_atom(h) {
                 let mut then_hyps = hyps.to_vec();
                 then_hyps[i] = (then_h, *htrue);
                 then_hyps.push((cond.clone(), true));
@@ -689,7 +689,7 @@ impl<'a> Prover<'a> {
                 return self.prove_algebra_rel_at(body, dom, &else_hyps, cancel_budget);
             }
         }
-        if let Some((then_body, else_body, cond)) = split_first_if(body) {
+        if let Some((then_body, else_body, cond)) = split_on_atom(body) {
             // In the then-branch, propagate `cond ⇒ true` everywhere by
             // rewriting matching `if cond then T else E` subterms to `T`.
             // Mirror in the else-branch.  This collapses repeat occurrences
@@ -4326,6 +4326,31 @@ fn mentions_a_real_literal(e: &Expr) -> bool {
 /// simple variable and `literal` is a constant Int/Real, return `(v, literal)`.
 /// Used by case-splitting to substitute the known value of `v` in the
 /// then-branch — sound because the then-branch only runs when `cond` is true.
+/// [`split_first_if`], but splitting a compound condition on its leftmost
+/// atom — the same choice `crate::rewrite::case_split_goals` makes for the
+/// kernel.
+///
+/// `if (r >= 0 and r <= 1/2) then A else B` used to be split on the whole
+/// conjunction, and the conjunction then sat among the hypotheses as a
+/// single opaque fact: the then branch could not use `r >= 0`, and the else
+/// branch had only `not (...)`, a disjunction.  Splitting on `r >= 0` gives
+/// `if r <= 1/2 then A else B` and `B`, and the next round splits the rest.
+fn split_on_atom(e: &Expr) -> Option<(Expr, Expr, Expr)> {
+    let (then_e, else_e, cond) = split_first_if(e)?;
+    let atom = crate::rewrite::split_atom(&cond);
+    if atom == cond {
+        return Some((then_e, else_e, cond));
+    }
+    let then_e = collapse_if_cond(e, &atom, true);
+    let else_e = collapse_if_cond(e, &atom, false);
+    // `collapse_if_cond` does not descend into every node `split_first_if`
+    // does; without progress the split would recurse forever.
+    if then_e == *e || else_e == *e {
+        return None;
+    }
+    Some((then_e, else_e, atom))
+}
+
 fn eq_var_value(cond: &Expr) -> Option<(String, Expr)> {
     if let Expr::BinOp(BinOp::Eq, l, r) = cond {
         if let (Expr::Var { name, .. }, lit) = (l.as_ref(), r.as_ref()) {

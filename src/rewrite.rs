@@ -672,12 +672,60 @@ pub fn case_split_goals(prop: &Expr) -> Option<(Expr, Expr)> {
     Some((under(cond.clone(), true), under(neg, false)))
 }
 
-/// The condition of the first `if` anywhere in `e`, in source order.
+/// The condition to split on for the first `if` anywhere in `e`, in
+/// source order.
+///
+/// A compound condition is not split on whole: `not (a and b)` — the
+/// negation the else branch would have to assume — is a disjunction, which
+/// no linear hypothesis can express, so the branch that needs it would be
+/// left with an opaque fact.  Splitting on the leftmost *atom* instead
+/// keeps every assumption a relation; [`collapse_if_cond`] then reduces
+/// the compound condition under that atom's value, and the rest of it is
+/// split on by the next round.
 pub fn first_if_condition(e: &Expr) -> Option<Expr> {
     if let Expr::If { cond, .. } = e {
-        return Some((**cond).clone());
+        return Some(split_atom(cond));
     }
     crate::ast::children(e).into_iter().find_map(first_if_condition)
+}
+
+/// The leftmost atomic condition of a boolean combination.
+pub fn split_atom(c: &Expr) -> Expr {
+    match c {
+        Expr::BinOp(BinOp::And | BinOp::Or, l, _) => split_atom(l),
+        Expr::UnOp(UnOp::Not, x) => split_atom(x),
+        other => other.clone(),
+    }
+}
+
+/// `c` with every occurrence of `target` read as `value`, and `and` /
+/// `or` / `not` simplified as far as that settles them.  `Ok(b)` when the
+/// whole condition is decided, `Err(residual)` otherwise.
+///
+/// Each step is a propositional identity (`true and x == x`, `false and x
+/// == false`, ...), so on the branch where `target` has `value` the
+/// residual is equivalent to `c`.
+fn reduce_cond(c: &Expr, target: &Expr, value: bool) -> Result<bool, Expr> {
+    if c == target {
+        return Ok(value);
+    }
+    match c {
+        Expr::BinOp(op @ (BinOp::And | BinOp::Or), l, r) => {
+            let is_and = *op == BinOp::And;
+            match (reduce_cond(l, target, value), reduce_cond(r, target, value)) {
+                // The absorbing value (false for `and`, true for `or`)
+                // decides the whole; the identity value drops out.
+                (Ok(b), _) | (_, Ok(b)) if b != is_and => Ok(b),
+                (Ok(_), other) | (other, Ok(_)) => other,
+                (Err(l), Err(r)) => Err(Expr::BinOp(op.clone(), Box::new(l), Box::new(r))),
+            }
+        }
+        Expr::UnOp(UnOp::Not, x) => match reduce_cond(x, target, value) {
+            Ok(b) => Ok(!b),
+            Err(x) => Err(Expr::UnOp(UnOp::Not, Box::new(x))),
+        },
+        other => Err(other.clone()),
+    }
 }
 
 
@@ -800,18 +848,16 @@ pub fn collapse_if_cond(e: &Expr, target_cond: &Expr, target_value: bool) -> Exp
             let inner_then = collapse_if_cond(then_branch, target_cond, target_value);
             let inner_else = collapse_if_cond(else_branch, target_cond, target_value);
             let inner_cond = collapse_if_cond(cond, target_cond, target_value);
-            if inner_cond == *target_cond {
-                if target_value {
-                    inner_then
-                } else {
-                    inner_else
-                }
-            } else {
-                If {
-                    cond: Box::new(inner_cond),
+            // `target_cond` may be one atom of a compound condition (see
+            // `first_if_condition`), so reduce rather than compare.
+            match reduce_cond(&inner_cond, target_cond, target_value) {
+                Ok(true) => inner_then,
+                Ok(false) => inner_else,
+                Err(residual) => If {
+                    cond: Box::new(residual),
                     then_branch: Box::new(inner_then),
                     else_branch: Box::new(inner_else),
-                }
+                },
             }
         }
         BinOp(op, l, r) => BinOp(

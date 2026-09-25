@@ -451,8 +451,13 @@ fn audit_file(path: &str, extra_libs: Vec<PathBuf>, prog_args: Vec<String>) -> E
     // plainly rather than making the reader compare numbers.
     if counts.keys().all(|l| l.is_sound()) {
         println!("\nevery claim in this file was re-established by the kernel.");
+        ExitCode::SUCCESS
+    } else {
+        // The same gate as `--audit DIR`: a file is one project, and a
+        // build that asked for the report should not pass on a claim that
+        // was only sampled because the argument happened to be a file.
+        ExitCode::FAILURE
     }
-    ExitCode::SUCCESS
 }
 
 /// Audit every `.seki` file under `dir` as one report.

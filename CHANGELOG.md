@@ -15,6 +15,44 @@ seki は **pre-1.0** です。これは次を意味します:
 
 ## [Unreleased]
 
+### `if` の複合条件で場合分けできるようになった / `--audit FILE` もゲートになる
+
+**`and` / `or` / `not` の条件。** ガードは普通こう書きます:
+
+```seki
+def discount := \price rate ->
+  if (rate >= 0.0) and (rate <= 0.5) then price * (1.0 - rate) else price
+
+theorem never_increases : forall price in Real, forall rate in Real,
+    price >= 0.0 => discount price rate <= price
+  := by unfold discount then algebra
+```
+
+これが `cannot prove (price * (1 - rate)) <= price` で落ちていました。
+場合分けが条件を連言のまま 1 つの仮定として積んでいたため、then 枝で
+`rate >= 0` が使えず、else 枝には `not (...)` — 線形の仮定では書けない
+選言 — しか残らなかったためです。`if` を入れ子に書き直せば通るので、
+利用者の側で回避されていました。
+
+いまは**先頭の原子条件**で分けます。`rate >= 0` が真の枝では条件の残りが
+`if rate <= 0.5 then ... else ...` として残って次の場合分けに回り、偽の枝では
+条件全体が偽と決まって else に落ちます。各段は命題論理の恒等式
+(`true and x == x` など) なので、カーネル側の新しい推論規則は要りません。
+分け方はタクティクとカーネルで同じ関数 (`rewrite::first_if_condition` /
+`collapse_if_cond`) を通るので、証明書が条件を選ぶ余地もありません。
+偽の主張 (`discount >= 0.6 * price`、`or` / `not` / 入れ子の条件) が
+拒否されることを確かめるテストも足しました。コーパスの信頼水準の分布は
+変わっていません (sound 1148 / unchecked 22 / sampled 20 / axiomatic 16 /
+approximate 8)。
+
+**`--audit FILE` の終了コード。** README は「弱い主張が残っていれば exit code が
+非ゼロなので、ビルドのゲートになる」と書いていましたが、そうなっていたのは
+`--audit DIR` だけで、単一ファイルは `[sampled]` があっても exit 0 でした。
+ファイル 1 つもプロジェクトなので同じ規則にしました: kernel 証明以外の主張
+(axiomatic / unchecked / approximate / sampled) があれば exit 1。報告の内容は
+変わりません。axiom に乗った結論を意図して置いているファイルを監査して
+exit 0 を期待していたスクリプトは、終了コードの扱いを見直してください。
+
 ### README をコンセプト中心に書き直した
 
 README は機能の一覧でした — 「集合論ベースの定理証明言語 + プログラミング言語」

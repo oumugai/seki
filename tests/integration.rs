@@ -2800,7 +2800,9 @@ fn the_audit_command_reports_every_theorem() {
         .output()
         .expect("run seki --audit");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{}", stdout);
+    // Not every claim is a kernel proof, so the audit fails the gate —
+    // the same exit code `--audit DIR` gives.
+    assert_eq!(out.status.code(), Some(1), "{}", stdout);
     assert!(stdout.contains("kernel-checked from primitives"), "{}", stdout);
     assert!(stdout.contains("sampled"), "{}", stdout);
     assert!(stdout.contains("2 theorems"), "{}", stdout);
@@ -3216,7 +3218,9 @@ fn the_refinement_example_is_audited_as_documented() {
         .output()
         .expect("run seki --audit");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{}", stdout);
+    // Not every claim is a kernel proof, so the audit fails the gate —
+    // the same exit code `--audit DIR` gives.
+    assert_eq!(out.status.code(), Some(1), "{}", stdout);
     assert!(stdout.contains("safeWithdraw"), "{}", stdout);
     assert!(
         stdout.contains("the obligation was proved and kernel-checked"),
@@ -3374,7 +3378,9 @@ fn the_uncertain_facts_example_reports_the_frechet_bound() {
         .output()
         .expect("run seki --audit");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{}", stdout);
+    // Not every claim is a kernel proof, so the audit fails the gate —
+    // the same exit code `--audit DIR` gives.
+    assert_eq!(out.status.code(), Some(1), "{}", stdout);
     assert!(stdout.contains("confidence >= 7/10"), "{}", stdout);
     assert!(stdout.contains("confidence >= 9/10"), "{}", stdout);
 }
@@ -3417,7 +3423,9 @@ fn the_probabilistic_reasoning_examples_report_their_bounds() {
             .output()
             .expect("run seki --audit");
         let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(out.status.success(), "{}: {}", file, stdout);
+        // Not every claim is a kernel proof, so the audit fails the gate —
+        // the same exit code `--audit DIR` gives.
+        assert_eq!(out.status.code(), Some(1), "{}: {}", file, stdout);
         assert!(stdout.contains(expect), "{} should report {}:\n{}", file, expect, stdout);
     }
 }
@@ -3547,7 +3555,9 @@ fn the_nonlinear_example_is_kernel_checked() {
         .output()
         .expect("run seki --audit");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{}", stdout);
+    // Not every claim is a kernel proof, so the audit fails the gate —
+    // the same exit code `--audit DIR` gives.
+    assert_eq!(out.status.code(), Some(1), "{}", stdout);
     assert!(stdout.contains("sound:     7"), "{}", stdout);
 }
 
@@ -3721,7 +3731,9 @@ fn the_audit_lists_what_a_file_assumes() {
         .output()
         .expect("run seki --audit");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{}", stdout);
+    // Not every claim is a kernel proof, so the audit fails the gate —
+    // the same exit code `--audit DIR` gives.
+    assert_eq!(out.status.code(), Some(1), "{}", stdout);
     // Each assumption, with its confidence and where it came from.
     assert!(stdout.contains("assumed without proof"), "{}", stdout);
     assert!(stdout.contains("adoption_floor"), "{}", stdout);
@@ -4316,4 +4328,114 @@ fn the_service_examples_hold_together() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("18 claims across 5 file(s)"), "{}", stdout);
     assert!(stdout.contains("sound:       17"), "{}", stdout);
+}
+
+// ---------------------------------------------------------------------------
+// Compound `if` conditions.  `if (r >= 0 and r <= 1/2) then ... else ...` —
+// the way a guard is ordinarily written — used to be split on the whole
+// conjunction, which then sat among the hypotheses as one opaque fact: the
+// then branch could not use `r >= 0`, and a true claim failed.  The split is
+// now on the condition's first atom (`crate::rewrite::first_if_condition`),
+// in the tactic and in the kernel alike.
+
+const DISCOUNT_AND: &str = r"
+    def discount := \price rate ->
+      if (rate >= 0.0) and (rate <= 0.5) then price * (1.0 - rate) else price
+";
+
+#[test]
+fn a_conjunctive_guard_is_usable_in_its_then_branch() {
+    let src = format!(
+        "{DISCOUNT_AND}theorem never_increases : forall price in Real, forall rate in Real, \
+         price >= 0.0 => discount price rate <= price := by unfold discount then algebra"
+    );
+    assert_eq!(trust_of(&src, "never_increases"), TrustLevel::Sound);
+}
+
+#[test]
+fn disjunctive_and_negated_guards_are_kernel_checked() {
+    for (src, name) in [
+        // The else branch of an `or` needs both bounds: 0 <= x <= 1.
+        (
+            r"def e := \x -> if (x < 0.0) or (x > 1.0) then 1.0 else x * x
+              theorem t : forall x in Real, e x <= 1.0 := by unfold e then algebra",
+            "t",
+        ),
+        (
+            r"def a := \x -> if not (x < 0.0) then x else 0.0 - x
+              theorem t : forall x in Real, a x >= 0.0 := by unfold a then algebra",
+            "t",
+        ),
+        (
+            r"def f := \x y -> if (x > 0.0) and ((y > 0.0) or (y < 0.0 - 5.0)) then x * y else 0.0
+              theorem t : forall x in Real, forall y in Real, y >= 0.0 => f x y >= 0.0
+                := by unfold f then algebra",
+            "t",
+        ),
+    ] {
+        assert_eq!(trust_of(src, name), TrustLevel::Sound, "for: {}", src);
+    }
+}
+
+#[test]
+fn false_claims_behind_compound_guards_are_refused() {
+    for src in [
+        // rate = 0.5 gives 0.5 * price.
+        format!(
+            "{DISCOUNT_AND}theorem bad : forall price in Real, forall rate in Real, \
+             price >= 0.0 => discount price rate >= price * 0.6 := by unfold discount then algebra"
+        ),
+        // x = 7 is inside [0, 10].
+        r"def c := \x -> if (x < 0.0) or (x > 10.0) then 0.0 else x
+          theorem bad : forall x in Real, c x <= 5.0 := by unfold c then algebra"
+            .to_string(),
+        // x = 0.
+        r"def a := \x -> if not (x < 0.0) then x else 0.0 - x
+          theorem bad : forall x in Real, a x >= 1.0 := by unfold a then algebra"
+            .to_string(),
+        // x = 1, y = -6.
+        r"def f := \x y -> if (x > 0.0) and ((y > 0.0) or (y < 0.0 - 5.0)) then x * y else 0.0
+          theorem bad : forall x in Real, forall y in Real, f x y >= 0.0
+            := by unfold f then algebra"
+            .to_string(),
+        // Outside (0, 1) the value is 2.
+        "theorem bad : forall x in Real, (if (x > 0.0) and (x < 1.0) then x else 2.0) < 1.0 \
+         := by algebra"
+            .to_string(),
+    ] {
+        assert!(run_err(&src).is_proof_error(), "should be refused: {}", src);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `--audit FILE` gates a build the same way `--audit DIR` does.
+
+#[test]
+fn a_file_audit_fails_when_a_claim_is_only_sampled() {
+    let dir = std::env::temp_dir().join("seki_audit_exit_test");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let sampled = dir.join("sampled.seki");
+    // False past 1000, and `by eval` only looks at 200 points.
+    std::fs::write(
+        &sampled,
+        "def f := \\n -> if n > 1000 then 0 - 1 else n\n\
+         theorem f_nonneg : forall n in Nat, f n >= 0 := by eval\n",
+    )
+    .expect("write");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--audit")
+        .arg(&sampled)
+        .output()
+        .expect("run seki --audit");
+    assert_eq!(out.status.code(), Some(1), "{}", String::from_utf8_lossy(&out.stdout));
+
+    let sound = dir.join("sound.seki");
+    std::fs::write(&sound, "theorem t : forall x in Real, x * x >= 0.0 := by algebra\n")
+        .expect("write");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_seki"))
+        .arg("--audit")
+        .arg(&sound)
+        .output()
+        .expect("run seki --audit");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
 }

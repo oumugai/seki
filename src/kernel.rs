@@ -2710,6 +2710,38 @@ mod forgery_tests {
     }
 
     #[test]
+    fn a_compound_condition_is_split_on_its_first_atom() {
+        // Splitting on `x > 0 and x < 1` whole would leave the else branch
+        // assuming `not (x > 0 and x < 1)` — a disjunction no linear
+        // hypothesis expresses.  The kernel splits on `x > 0`; the rest of
+        // the condition stays behind as an `if` for the next split, and
+        // the else branch drops straight to `2`.
+        let (t, f) = crate::rewrite::case_split_goals(&parse_prop(
+            "forall x in Real, (if (x > 0.0) and (x < 1.0) then x else 2.0) < 1.0",
+        ))
+        .expect("there is an `if` to split on");
+        let (t, f) = (format!("{}", t), format!("{}", f));
+        assert!(t.contains("not (x > 0)") && t.contains("if (x < 1) then x else 2"), "{}", t);
+        assert!(f.contains("not (x <= 0)") && !f.contains("if"), "{}", f);
+        assert!(!t.contains(" and (x < 1)") && !f.contains(" and (x < 1)"), "{} / {}", t, f);
+    }
+
+    #[test]
+    fn a_decided_atom_settles_or_and_not_in_the_condition() {
+        use crate::rewrite::collapse_if_cond;
+        let atom = parse_prop("x < 0.0");
+        let e = parse_prop("if (x < 0.0) or (y > 1.0) then 1.0 else 2.0");
+        assert_eq!(format!("{}", collapse_if_cond(&e, &atom, true)), "1");
+        assert_eq!(
+            format!("{}", collapse_if_cond(&e, &atom, false)),
+            "(if (y > 1) then 1 else 2)"
+        );
+        let n = parse_prop("if not (x < 0.0) then 1.0 else 2.0");
+        assert_eq!(format!("{}", collapse_if_cond(&n, &atom, true)), "2");
+        assert_eq!(format!("{}", collapse_if_cond(&n, &atom, false)), "1");
+    }
+
+    #[test]
     fn a_trusted_step_is_accepted_but_recorded() {
         let g = make_prelude();
         let v = check_in(
