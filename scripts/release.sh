@@ -59,7 +59,7 @@ cp target/release/seki target/release/seki-lsp "${DIST}/bin/"
 # strip if available (smaller binary, no functional impact)
 command -v strip >/dev/null && strip "${DIST}/bin/seki" "${DIST}/bin/seki-lsp" || true
 
-cp README.md CHANGELOG.md ROADMAP.md CONTRIBUTING.md SECURITY.md "${DIST}/"
+cp README.md README.jp.md LICENSE CHANGELOG.md ROADMAP.md CONTRIBUTING.md SECURITY.md "${DIST}/"
 [ -f LICENSE ] && cp LICENSE "${DIST}/" || true
 cp -r lib "${DIST}/"
 cp -r examples "${DIST}/"

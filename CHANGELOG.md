@@ -15,6 +15,24 @@ seki は **pre-1.0** です。これは次を意味します:
 
 ## [Unreleased]
 
+### MIT ライセンスと英語版 README
+
+- `LICENSE` (MIT) を追加し、`Cargo.toml` に `license = "MIT"` を入れた。
+  公開リポジトリなのにライセンスが無く、利用してよいかが分からない状態だった
+- `README.md` を英語にし、日本語版を `README.jp.md` に移した。冒頭で相互に
+  リンクしている。`docs/` はまだ日本語のみで、英語版 README にもそう書いた
+- `README.jp.md` の TCB の行数を実測値に更新 (4,896 → **4,974 行**)。
+  `--audit` の集計 (sound 1,148 ほか) は変わっていなかった
+- 英語版に載せた出力 (`--audit`・`--proof`・逆算・区間の診断) は
+  すべて実際に走らせて確かめた
+- `ROADMAP.md` の「現在の位置」が 0.10.0 時点のまま (約 18,000 行、
+  955 定理、TCB 約 2,600 行) だったので実測値に更新し、0.11.0 以降の完了
+  項目と、すでに済んでいた計画 (didYouMean・REPL の `:help` / `:builtins`・
+  多変数 FM・実数の線形算術・LSP の hover / definition) に印を付けた。
+  残る `unchecked` 22 件の内訳は `by induction` 19・`by strong_induction` 1・
+  `by algebra` 2
+- `scripts/release.sh` が配布物に `README.jp.md` と `LICENSE` も含める
+
 ### `if` の複合条件で場合分けできるようになった / `--audit FILE` もゲートになる
 
 **`and` / `or` / `not` の条件。** ガードは普通こう書きます:
