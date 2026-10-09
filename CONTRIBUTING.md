@@ -66,8 +66,9 @@ done
 
 ## ドキュメント
 
-- ユーザ向け: `README.md`、`docs/tutorial.md`、`docs/cookbook.md`、
+- ユーザ向け: `README.md` (英語) と `README.jp.md` (日本語)、`docs/tutorial.md`、`docs/cookbook.md`、
   `docs/cheatsheet.md`、`docs/language.md`、`docs/proofs.md`。
+  README は 2 言語で同じ内容を保つ。片方だけ直すと数字や出力例が食い違う。
 - 実装者向け: `docs/internals.md`。
 
 新機能は最低 1 つはドキュメントに記述してください。

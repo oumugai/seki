@@ -4,19 +4,21 @@
 「現実的に何が必要で、なぜ難しいか」を記録します。
 予定が確定しているものとそうでないものを明示します。
 
-## 現在の位置 (2026-09)
+## 現在の位置 (2026-10)
 
-- **バージョン**: 0.10.0 (Phase 6 進行中)
-- **コード規模**: ~18,000 行 Rust + stdlib
-- **builtin**: 120 個
-- **テスト**: 192 統合 + 46 単体 + 12 property + 8 LSP、
-  `.seki` テスト 31 ファイル (全て `cargo test` に配線済み)、
-  `lib/` + `examples/` + `tests/seki/` 合計 955 定理
-  (**kernel 検証済み 925 / `axiomatic` 3 / `unchecked` 23 / `sampled` 17**)
-- **TCB**: 約 2,600 行 (`kernel.rs` + `unfold.rs` + `rewrite.rs` +
-  多項式算術)。`prover.rs` の 4,134 行は TCB の外
+- **バージョン**: 0.11.0 + Unreleased (Phase 6 進行中)
+- **コード規模**: ~28,700 行 Rust + stdlib
+- **builtin**: 131 個
+- **テスト**: 282 統合 + 109 単体 + 12 property + 8 LSP、
+  `.seki` テスト 38 ファイル (全て `cargo test` に配線済み)
+- **主張**: `examples/` + `lib/` + `tests/seki/` 合計 1,214 件
+  (**kernel 検証済み 1,148 / `axiomatic` 16 / `unchecked` 22 / `sampled` 20 /
+  `approximate` 8**)。`sample/` を含めると sound 1,162
+- **TCB**: 4,974 行 (`kernel.rs` + `rewrite.rs` + `unfold.rs` +
+  `interval.rs`)、全体の 17%。`prover.rs` の 5,868 行は TCB の外
 - **依存クレート**: ゼロ
 - **バイナリ**: `seki` + `seki-lsp`
+- **ライセンス**: MIT
 
 ---
 
@@ -30,54 +32,80 @@
 - [x] CHANGELOG / ROADMAP / CONTRIBUTING / SECURITY
 - [x] `seki --version` + semver ポリシー
 - [x] リリースビルドスクリプト
+- [x] **ライセンス (MIT) と英語版 README** — 日本語版は `README.jp.md`。
+      `docs/` はまだ日本語のみ
 
-### 完了 (0.8.0)
+### 完了 (0.11.0 〜 Unreleased)
+- [x] **`if` の複合条件で場合分け** — `and` / `or` / `not` の条件を先頭の
+      原子条件で分ける。kernel に新しい推論規則は要らない
+- [x] **`--audit FILE` もゲートになる** — 弱い主張が残れば非ゼロで終了
+- [x] **アシュアランスケースを成果物に** — `--audit DIR` が
+      システム全体を 1 枚の報告にまとめ、証明以外に立つ主張から並べる
+- [x] **区間演算** — 保証された囲い (`src/interval.rs`、TCB)。
+      `lo .. hi` / `中心 +- 許容差` / `width` の記法。「浮動小数点の主張」の
+      86% が実は証明できた
+- [x] **超越関数の囲い** — `exp` / `ln` / `sin` / `cos` を Lagrange の剰余で
+      抑える。`approximate` 22 件 → 8 件
+- [x] **`Real` を ℝ に一本化** — kernel が `0.1 + 0.2 == 0.3` とその否定を
+      両方承認していた問題を修正
+- [x] **非線形算術** (0.11.0) — 仮定の積 (Positivstellensatz)、次数 3 以上、
+      厳密有理数の単体法。ε-δ が検証できるようになった
+- [x] **ℝ の公理化と解析の演繹的な構築**
+- [x] **逆算が非線形の仮定に届く**
+- [x] **システム開発の例** (`examples/services/`) — 書く過程で見つかった
+      3 つの穴 (整数の離散性・等式ゴールの `if`・逆算の方向) を修正
+- [x] **didYouMean** — 未束縛の名前に近い候補を提案
+- [x] **REPL の改善** — `:help`、`:builtins [<prefix>]`、`~/.seki_history`
+      への履歴保存
+
+### 完了 (0.8.0 〜 0.10.x)
 - [x] **演繹 (`by apply` / `by have` / `by assumption`)** — 証明が初めて
-      合成できるようになった。955 定理中 12 件しか他の定理を使っていなかった
-      状態を解消する土台
+      合成できるようになった
 - [x] **Farkas 証明書** — 仮定付き線形算術 (スケーリング・緩み・区間) が
       kernel 検証済みで通るようになった
 - [x] **確からしい事実からの推論** (0.10.0) — `with confidence` + Fréchet
       下界。確率は kernel の外 (`src/confidence.rs`)
 - [x] **仮定の逆算** (0.10.0) — 失敗したゴールについて「何を仮定すれば
       成り立つか」を検証済みで提案 (`src/abduce.rs`)
+- [x] **区間 refinement 型** (0.10.2)
 - [x] **型注釈が証明義務になった** (0.9.0) — `def f : A -> {y | Q y}` が
       生む `forall x in A, Q[y := f x]` を定理と同じ prover・同じ kernel で
-      検証する。`docs/spec/06-soundness.md` が「残る最大の穴」と呼んでいた
-      部分。落ちない義務は `--audit` で名前と内容が出る
+      検証する。落ちない義務は `--audit` で名前と内容が出る
 - [x] **`by auto` が健全な証明を優先** (0.9.0)
 - [x] **分出公理** (0.8.1) — 無制限内包をやめ、Russell の逆理を到達不能に
 - [x] **評価ステップ予算と深さ上限** (0.8.1) — 非停止の定義がハングや
       プロセス abort ではなくエラーで止まるようになった
 - [x] **証明項 (proof term) と kernel** — タクティクは信頼されなくなった。
-      TCB が約 9,000 行から約 2,600 行へ。`--audit` / `--proof` で可視化。
-      導入時に `by algebra` の実在する健全性バグを発見
+      `--audit` / `--proof` で可視化。導入時に `by algebra` の実在する
+      健全性バグを発見
 - [x] **有界な内包を有限と認識** — `{x in Nat | x < 12}` 上の証明が
       標本検査ではなく網羅列挙になった
 - [x] **信頼水準 (`TrustLevel`) + `--strict`** — 「証明された」の機械検査。
       `docs/spec/06-soundness.md` §6.0
-- [x] **Int overflow を runtime error に** — `by eval` と `by algebra` が
-      同一命題について矛盾する状態を解消
+- [x] **Int overflow を runtime error に**
 - [x] **`Session` をライブラリへ** — 統合テストが本物のドライバを通り、
       LSP が静的 shape 検査の診断を出せるようになった
-- [x] **構造的エンコーディングの簡約を表駆動に** — データ型を足すのに
-      Rust のコードを増やさない形へ
+- [x] **構造的エンコーディングの簡約を表駆動に**
 - [x] **`target/` を git 管理下から外した**
 - [x] **未配線テストの検出** — `.seki` テストの配線忘れを `cargo test` が落とす
 
 ### 計画
-- [ ] **`by induction` のステップの証明項** — 残る `unchecked` 29 件のうち
-      19 件。基底ケースは既に kernel が検証している。ステップの正規化
-      (後者側の展開 + `if` の簡約) に witness 形式を与える必要がある
-- [ ] **`by algebra` の残り** — 符号解析・`!=`・有理関数の約分 (各 1 件)
+- [ ] **`by induction` のステップの証明項** — 残る `unchecked` 22 件のうち
+      19 件 (+ `by strong_induction` 1 件)。基底ケースは既に kernel が
+      検証している。ステップの正規化 (後者側の展開 + `if` の簡約) に
+      witness 形式を与える必要がある
+- [ ] **`by algebra` の残り** — `!=` (差の符号で閉じる)・有理関数の約分
+      (各 1 件)
+- [ ] **反復アルゴリズムの囲い** — `approximate` 8 件はすべて区間の依存性
+      (wrapping effect)。区間 Newton 法・平均値形式が要るが、TCB が増える
 - [ ] **引数位置の refinement** — `(amt : {a in Nat | a <= bal}) -> ...`。
       返り値位置は 0.9.0 で証明義務になった (`src/obligation.rs`)
 - [ ] **エラー位置情報の精緻化** — 現在は decl 単位の `[line:col]`。Expr 単位
       の span を AST に持たせて、`x + true` のような場合に `true` 部分だけを
       指せるようにする。
-- [ ] **didYouMean** — `stlrLen` を typo して `strLen` を提案。
-- [ ] **REPL の改善** — 永続コマンド履歴、`:help`、`:builtins` リスト、
-      `:doc <name>` で builtin の docstring 表示。
+- [ ] **REPL の残り** — 矢印キーでの履歴呼び出し、`:doc <name>` で builtin
+      の docstring 表示。
+- [ ] **ドキュメントの英訳** — `docs/` (tutorial / cheatsheet / spec)。
 - [ ] **テストハーネス拡充** — parser fuzz harness、property-based tests
       for value_eq / set_eq / VM / linarith。
 - [ ] **stdlib API ドキュメント** — 各 builtin に doc comment + 自動抽出。
@@ -113,12 +141,13 @@
 **目標**: 「証明された」が本当に意味するようにする。
 
 ### 計画
-- [ ] **多変数線形整数算術** — 既存の単変数 Fourier-Motzkin を多変数に拡張。
-- [ ] **Real (実数) の線形算術** — Q 上の線形 FM。
+- [x] **多変数線形整数算術** — 多変数 Fourier-Motzkin 消去。
+- [x] **Real (実数) の線形算術** — Farkas 証明書 + 厳密有理数の単体法。
 - [ ] **依存型の SMT 委譲** — Z3 オプション統合 (現状の zero-deps とは
       `--features=smt` で trade off)。
 - [ ] **終了性検査の強制モード** — `#[total]` annotation で warning を error に。
-- [ ] **言語仕様書** — `docs/spec/`  配下に BNF + 意味論 + 健全性議論。
+- [ ] **言語仕様書** — `docs/spec/` 配下に BNF + 意味論 + 健全性議論。
+      骨格 (01〜10) はある。実装に追いついていない箇所の更新が残る。
 
 **honest 評価**: 健全な依存型は深い topic。F* / Lean / Coq の蓄積に
 追いつくには年単位の投資。
@@ -156,8 +185,9 @@
 
 ### 計画
 - [ ] **LSP の機能拡充**
-  - hover (型 + docstring)
-  - goto-definition
+  - [x] hover (テキストベース、スコープ非対応)
+  - [x] goto-definition (トップレベル定義のみ)
+  - scope-aware な hover / definition
   - completion
   - rename refactor
   - code actions
@@ -191,7 +221,7 @@ honest 評価: 以下は **意図的に実装しない** 予定です。
 ## バージョン体系
 
 - **0.1〜0.5**: 初期実装期 (Phase 1-5)。**破壊的変更頻繁**
-- **0.6〜0.9**: Production-readiness 整備期 (Phase 6-7)。重要な
+- **0.6〜0.x**: Production-readiness 整備期 (Phase 6-7)。重要な
   破壊的変更が出る場合は CHANGELOG に明示。
 - **1.0**: 言語仕様書 + 健全な依存型 + 完全 VM + LSP がそろった時点でリリース。
   以降は semver に厳密に従う。
